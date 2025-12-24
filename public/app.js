@@ -66,10 +66,15 @@ function normalizeCategory(value) {
 }
 
 function formatPrimary(machine) {
+  const macFallback =
+    Array.isArray(machine.macAddresses) && machine.macAddresses.length > 0
+      ? machine.macAddresses[0]
+      : null;
   return (
     machine.hostname ||
     machine.serialNumber ||
     machine.macAddress ||
+    macFallback ||
     'Poste sans identifiant'
   );
 }
@@ -185,6 +190,7 @@ function applyFilters() {
       machine.hostname,
       machine.serialNumber,
       machine.macAddress,
+      Array.isArray(machine.macAddresses) ? machine.macAddresses.join(' ') : null,
       machine.vendor,
       machine.model
     ]
@@ -272,6 +278,12 @@ function renderDetail() {
   const category = normalizeCategory(detail.category);
   const title = escapeHtml(formatPrimary(detail));
   const subtitle = escapeHtml(formatSubtitle(detail));
+  const macAddresses = Array.isArray(detail.macAddresses) ? detail.macAddresses : [];
+  const macListHtml = macAddresses.length
+    ? `<div class="mac-list">${macAddresses
+        .map((mac) => `<span class="mac-chip">${escapeHtml(mac)}</span>`)
+        .join('')}</div>`
+    : '<strong>--</strong>';
 
   const components =
     detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
@@ -350,6 +362,10 @@ function renderDetail() {
       <div class="detail-item">
         <span>MAC</span>
         <strong>${escapeHtml(detail.macAddress || '--')}</strong>
+      </div>
+      <div class="detail-item">
+        <span>MACs</span>
+        ${macListHtml}
       </div>
       <div class="detail-item">
         <span>OS</span>

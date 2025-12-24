@@ -15,7 +15,7 @@ param(
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.2.10'
+$scriptVersion = '1.2.12'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -154,8 +154,84 @@ function Get-MacFromMsinfo {
 
   if ($TimeoutSec -le 0) { return $null }
 
+  $macs = Get-MacsFromMsinfo -TimeoutSec $TimeoutSec
+  if ($macs -and $macs.Count -gt 0) { return $macs[0] }
+  return $null
+}
+
+function Normalize-MacAddress {
+  param([string]$Value)
+
+  if (-not $Value) { return $null }
+  $clean = ($Value -replace '[^0-9A-Fa-f]', '').ToUpper()
+  if ($clean.Length -ne 12) { return $null }
+  return (($clean -split '(.{2})' | Where-Object { $_ }) -join ':')
+}
+
+function Get-MacsFromGetmac {
+  param([string]$SkipPattern)
+
+  $cmd = Get-Command getmac -ErrorAction SilentlyContinue
+  if (-not $cmd) { return @() }
+
+  $list = @()
+  try {
+    $output = & $cmd.Source /V /FO CSV /NH 2>$null
+    if (-not $output) { return @() }
+    $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
+    foreach ($line in $output) {
+      $row = $line | ConvertFrom-Csv -Header 'Connection','Adapter','Mac','Transport'
+      if (-not $row) { continue }
+      $mac = $row.Mac
+      if (-not $mac -or $mac -notmatch $macRegex) { continue }
+      if ($row.Adapter -and $row.Adapter -match $SkipPattern) { continue }
+      if ($row.Connection -and $row.Connection -match $SkipPattern) { continue }
+      $normalized = Normalize-MacAddress $mac
+      if ($normalized) { $list += $normalized }
+    }
+  } catch {
+    Write-Log "getmac failed: $($_.Exception.Message)" 'WARN'
+    return @()
+  }
+
+  return $list | Sort-Object -Unique
+}
+
+function Get-MacsFromIpconfig {
+  param([string]$SkipPattern)
+
+  $cmd = Get-Command ipconfig -ErrorAction SilentlyContinue
+  if (-not $cmd) { return @() }
+
+  $list = @()
+  try {
+    $output = & $cmd.Source /all 2>$null
+    if (-not $output) { return @() }
+    $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
+    foreach ($line in $output) {
+      if ($line -match '(physical address|adresse physique|adresse mac|mac address)') {
+        if ($line -match $macRegex) {
+          if ($line -match $SkipPattern) { continue }
+          $normalized = Normalize-MacAddress $Matches[0]
+          if ($normalized) { $list += $normalized }
+        }
+      }
+    }
+  } catch {
+    Write-Log "ipconfig failed: $($_.Exception.Message)" 'WARN'
+    return @()
+  }
+
+  return $list | Sort-Object -Unique
+}
+
+function Get-MacsFromMsinfo {
+  param([int]$TimeoutSec = 30)
+
+  if ($TimeoutSec -le 0) { return @() }
+
   $cmd = Get-Command msinfo32 -ErrorAction SilentlyContinue
-  if (-not $cmd) { return $null }
+  if (-not $cmd) { return @() }
 
   $reportPath = Join-Path ([System.IO.Path]::GetTempPath()) ("mdt-msinfo-{0}.txt" -f [guid]::NewGuid().ToString('N'))
   $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -171,102 +247,53 @@ function Get-MacFromMsinfo {
     [void]$proc.Start()
   } catch {
     Write-Log "msinfo32 start failed: $($_.Exception.Message)" 'WARN'
-    return $null
+    return @()
   }
 
   try {
     if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
       try { $proc.Kill() } catch { }
       Write-Log "msinfo32 timed out after ${TimeoutSec}s" 'WARN'
-      return $null
+      return @()
     }
   } catch {
     Write-Log "msinfo32 wait failed: $($_.Exception.Message)" 'WARN'
-    return $null
+    return @()
   }
 
   if (-not (Test-Path $reportPath)) {
     Write-Log 'msinfo32 report not found' 'WARN'
-    return $null
+    return @()
   }
 
   $content = Get-Content -Path $reportPath -ErrorAction SilentlyContinue
   Remove-Item -Path $reportPath -ErrorAction SilentlyContinue
-  if (-not $content) { return $null }
+  if (-not $content) { return @() }
 
   $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
-  $skipPattern = 'virtual|vpn|loopback|bluetooth|wi-fi direct|tap|hyper-v|pseudo|wan miniport|ras'
-
-  foreach ($line in $content) {
-    if ($line -match '(adresse physique|physical address|adresse mac|mac address)') {
-      if ($line -match $macRegex) {
-        if ($line -match $skipPattern) { continue }
-        return $Matches[0]
-      }
-    }
-  }
-
   $matches = [regex]::Matches(($content -join "`n"), $macRegex)
-  $values = @()
-  foreach ($match in $matches) { $values += $match.Value }
-  $unique = $values | Sort-Object -Unique
-  foreach ($value in $unique) {
-    if ($value -notmatch '^00([-:]?00){5}$') { return $value }
+  $list = @()
+  foreach ($match in $matches) {
+    $normalized = Normalize-MacAddress $match.Value
+    if ($normalized -and $normalized -notmatch '^00(:00){5}$') { $list += $normalized }
   }
 
-  return $null
+  return $list | Sort-Object -Unique
 }
 
 function Get-MacFromGetmac {
   param([string]$SkipPattern)
 
-  $cmd = Get-Command getmac -ErrorAction SilentlyContinue
-  if (-not $cmd) { return $null }
-
-  try {
-    $output = & $cmd.Source /V /FO CSV /NH 2>$null
-    if (-not $output) { return $null }
-    $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
-    foreach ($line in $output) {
-      $row = $line | ConvertFrom-Csv -Header 'Connection','Adapter','Mac','Transport'
-      if (-not $row) { continue }
-      $mac = $row.Mac
-      if (-not $mac -or $mac -notmatch $macRegex) { continue }
-      if ($row.Adapter -and $row.Adapter -match $SkipPattern) { continue }
-      if ($row.Connection -and $row.Connection -match $SkipPattern) { continue }
-      return $mac
-    }
-  } catch {
-    Write-Log "getmac failed: $($_.Exception.Message)" 'WARN'
-    return $null
-  }
-
+  $macs = Get-MacsFromGetmac -SkipPattern $SkipPattern
+  if ($macs -and $macs.Count -gt 0) { return $macs[0] }
   return $null
 }
 
 function Get-MacFromIpconfig {
   param([string]$SkipPattern)
 
-  $cmd = Get-Command ipconfig -ErrorAction SilentlyContinue
-  if (-not $cmd) { return $null }
-
-  try {
-    $output = & $cmd.Source /all 2>$null
-    if (-not $output) { return $null }
-    $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
-    foreach ($line in $output) {
-      if ($line -match '(physical address|adresse physique|adresse mac|mac address)') {
-        if ($line -match $macRegex) {
-          if ($line -match $SkipPattern) { continue }
-          return $Matches[0]
-        }
-      }
-    }
-  } catch {
-    Write-Log "ipconfig failed: $($_.Exception.Message)" 'WARN'
-    return $null
-  }
-
+  $macs = Get-MacsFromIpconfig -SkipPattern $SkipPattern
+  if ($macs -and $macs.Count -gt 0) { return $macs[0] }
   return $null
 }
 
@@ -433,6 +460,53 @@ function Get-PrimaryMac {
   }
 
   return $null
+}
+
+function Get-AllMacs {
+  $skipPattern = 'Virtual|VPN|Loopback|Bluetooth|Wi-Fi Direct|TAP|Hyper-V|Pseudo|WAN Miniport|RAS'
+  $macs = New-Object System.Collections.Generic.List[string]
+
+  function Add-MacValue {
+    param([string]$Value)
+    $normalized = Normalize-MacAddress $Value
+    if ($normalized -and -not $macs.Contains($normalized)) { [void]$macs.Add($normalized) }
+  }
+
+  if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) {
+    try {
+      $netAdapters = Get-NetAdapter -ErrorAction Stop | Where-Object {
+        $_.MacAddress -and ($_.HardwareInterface -eq $true -or $_.Virtual -eq $false)
+      }
+      foreach ($adapter in $netAdapters) {
+        $label = (($adapter.Name, $adapter.InterfaceDescription, $adapter.MediaType, $adapter.PhysicalMediaType) -join ' ').Trim()
+        if ($label -match $skipPattern) { continue }
+        Add-MacValue $adapter.MacAddress
+      }
+    } catch {
+      Write-Log "Get-NetAdapter failed: $($_.Exception.Message)" 'WARN'
+    }
+  }
+
+  $configs = Get-CimInstanceSafe -ClassName 'Win32_NetworkAdapterConfiguration'
+  foreach ($cfg in $configs) {
+    if (-not $cfg.MACAddress) { continue }
+    if ($cfg.Description -and $cfg.Description -match $skipPattern) { continue }
+    Add-MacValue $cfg.MACAddress
+  }
+
+  $adapters = Get-CimInstanceSafe -ClassName 'Win32_NetworkAdapter'
+  foreach ($adapter in $adapters) {
+    if (-not $adapter.MACAddress) { continue }
+    if ($adapter.Description -and $adapter.Description -match $skipPattern) { continue }
+    if ($adapter.PhysicalAdapter -ne $true -and ($adapter.PNPDeviceID -and $adapter.PNPDeviceID -match '^ROOT\\')) { continue }
+    Add-MacValue $adapter.MACAddress
+  }
+
+  foreach ($value in (Get-MacsFromGetmac -SkipPattern $skipPattern)) { Add-MacValue $value }
+  foreach ($value in (Get-MacsFromIpconfig -SkipPattern $skipPattern)) { Add-MacValue $value }
+  foreach ($value in (Get-MacsFromMsinfo -TimeoutSec $MsinfoTimeoutSec)) { Add-MacValue $value }
+
+  return $macs.ToArray()
 }
 
 function Get-SerialNumber {
@@ -988,6 +1062,9 @@ $biosInfo = Get-CimInstanceSafe -ClassName 'Win32_BIOS' | Select-Object -First 1
 
 $hostname = $env:COMPUTERNAME
 $macAddress = Get-PrimaryMac
+$macAddresses = Get-AllMacs
+$macAddressesLog = if ($macAddresses) { $macAddresses -join ', ' } else { $null }
+if ($macAddressesLog) { Write-Log ("MAC list: {0}" -f $macAddressesLog) }
 $serialNumber = Get-SerialNumber
 $osVersion = Get-OsVersion
 $ramMb = Get-RamMb
@@ -1185,6 +1262,7 @@ $diag.durationSec = [int]$stopwatch.Elapsed.TotalSeconds
 $payload = [ordered]@{}
 if ($hostname) { $payload.hostname = $hostname }
 if ($macAddress) { $payload.macAddress = $macAddress }
+if ($macAddresses -and $macAddresses.Count -gt 0) { $payload.macAddresses = $macAddresses }
 if ($serialNumber) { $payload.serialNumber = $serialNumber }
 if ($categoryValue) { $payload.category = $categoryValue }
 if ($vendor) { $payload.vendor = $vendor }

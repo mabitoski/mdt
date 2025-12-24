@@ -403,6 +403,23 @@ body {
   font-weight: 600;
 }
 
+.mac-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mac-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(60, 64, 60, 0.08);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
 .components {
   margin-bottom: 18px;
 }

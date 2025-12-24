@@ -87,6 +87,7 @@ async function initDb() {
       machine_key TEXT NOT NULL UNIQUE,
       hostname TEXT,
       mac_address TEXT,
+      mac_addresses TEXT,
       serial_number TEXT,
       category TEXT NOT NULL DEFAULT 'unknown',
       model TEXT,
@@ -114,6 +115,7 @@ async function initDb() {
     ['ram_slots_total', 'INTEGER'],
     ['ram_slots_free', 'INTEGER'],
     ['battery_health', 'INTEGER'],
+    ['mac_addresses', 'TEXT'],
     ['camera_status', 'TEXT'],
     ['usb_status', 'TEXT'],
     ['keyboard_status', 'TEXT'],
@@ -140,6 +142,7 @@ const upsertMachineQuery = `
     machine_key,
     hostname,
     mac_address,
+    mac_addresses,
     serial_number,
     category,
     model,
@@ -181,11 +184,13 @@ const upsertMachineQuery = `
     $19,
     $20,
     $21,
-    $22
+    $22,
+    $23
   )
   ON CONFLICT(machine_key) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, machines.hostname),
     mac_address = COALESCE(excluded.mac_address, machines.mac_address),
+    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
     serial_number = COALESCE(excluded.serial_number, machines.serial_number),
     category = CASE
       WHEN excluded.category != 'unknown' THEN excluded.category
@@ -215,6 +220,7 @@ const listMachinesQuery = `
     id,
     hostname,
     mac_address,
+    mac_addresses,
     serial_number,
     category,
     model,
@@ -240,6 +246,7 @@ const getMachineByIdQuery = `
     id,
     hostname,
     mac_address,
+    mac_addresses,
     serial_number,
     category,
     model,
@@ -340,6 +347,41 @@ function normalizeMac(value) {
     return null;
   }
   return stripped.match(/.{2}/g).join(':');
+}
+
+function normalizeMacList(value) {
+  if (value == null) {
+    return null;
+  }
+  let list = [];
+  if (Array.isArray(value)) {
+    list = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          list = parsed;
+        } else {
+          list = [trimmed];
+        }
+      } catch (error) {
+        list = trimmed.split(/[;,]+/);
+      }
+    } else {
+      list = trimmed.split(/[;,]+/);
+    }
+  } else {
+    return null;
+  }
+
+  const normalized = list.map((entry) => normalizeMac(entry)).filter(Boolean);
+  const unique = [...new Set(normalized)];
+  return unique.length ? unique : null;
 }
 
 function normalizeSerial(value) {
@@ -776,7 +818,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
   }
 
   const hostname = cleanString(pickFirst(body, ['hostname', 'computerName', 'name']), 64);
-  const macAddress = normalizeMac(pickFirst(body, ['macAddress', 'mac', 'mac_address']));
+  let macAddress = normalizeMac(pickFirst(body, ['macAddress', 'mac', 'mac_address']));
   const serialNumber = normalizeSerial(pickFirst(body, ['serialNumber', 'serial', 'serial_number']));
   const category = normalizeCategory(
     pickFirst(body, ['category', 'type', 'formFactor', 'chassis', 'chassisType'])
@@ -788,6 +830,9 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     pickFirst(body, ['components', 'componentStatus', 'composants', 'etatComposants'])
   );
   const sources = [body, body.components, body.hardware];
+  let macAddresses = normalizeMacList(
+    pickFirstFromSources(sources, ['macAddresses', 'macs', 'mac_addresses', 'macList', 'maclist'])
+  );
   const ramMb = normalizeRamMb(
     pickFirstFromSources(sources, [
       'ramMb',
@@ -868,6 +913,13 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     ])
   );
 
+  if (macAddress && (!macAddresses || !macAddresses.includes(macAddress))) {
+    macAddresses = [macAddress, ...(macAddresses || [])];
+  }
+  if (!macAddress && macAddresses && macAddresses.length > 0) {
+    macAddress = macAddresses[0];
+  }
+
   if (!hostname && !macAddress && !serialNumber) {
     return res.status(400).json({
       ok: false,
@@ -890,6 +942,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     machineKey,
     hostname,
     macAddress,
+    macAddresses ? JSON.stringify(macAddresses) : null,
     serialNumber,
     category,
     model,
@@ -930,9 +983,10 @@ app.get('/api/machines', requireAuth, async (req, res) => {
     const result = await pool.query(listMachinesQuery);
     const machines = result.rows.map((row) => ({
       id: row.id,
-      hostname: row.hostname,
-      macAddress: row.mac_address,
-      serialNumber: row.serial_number,
+    hostname: row.hostname,
+    macAddress: row.mac_address,
+    macAddresses: normalizeMacList(row.mac_addresses),
+    serialNumber: row.serial_number,
       category: row.category,
       model: row.model,
       vendor: row.vendor,
@@ -996,6 +1050,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       id: row.id,
       hostname: row.hostname,
       macAddress: row.mac_address,
+      macAddresses: normalizeMacList(row.mac_addresses),
       serialNumber: row.serial_number,
       category: row.category,
       model: row.model,

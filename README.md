@@ -46,6 +46,7 @@ curl -X POST http://localhost:3000/api/ingest \
   -d '{
     "hostname": "PC-001",
     "macAddress": "AA:BB:CC:DD:EE:FF",
+    "macAddresses": ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"],
     "serialNumber": "ABC123",
     "category": "laptop",
     "vendor": "Dell",
@@ -70,6 +71,7 @@ curl -X POST http://localhost:3000/api/ingest \
 
 Champs acceptes (tous optionnels sauf identifiant) :
 - `hostname`, `macAddress`, `serialNumber` (au moins un requis)
+- `macAddresses` : liste de MAC (toutes interfaces)
 - `category` : `laptop`, `desktop` (ou `portable`, `tour`, etc.)
 - `vendor`, `model`, `osVersion`
 - `ramMb` / `ramGb`, `ramSlotsTotal`, `ramSlotsFree`
