@@ -1,11 +1,21 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: mdt
+      POSTGRES_USER: mdt
+      POSTGRES_PASSWORD: mdt
+    volumes:
+      - mdt-db:/var/lib/postgresql/data
+    restart: unless-stopped
+
   mdt-web:
     build: .
     ports:
       - "3000:3000"
     environment:
       PORT: 3000
-      DATA_DIR: /app/data
+      DATABASE_URL: "postgres://mdt:mdt@postgres:5432/mdt"
       COOKIE_SECURE: "0"
       SESSION_SECRET: "change-me"
       ALLOW_LOCAL_ADMIN: "1"
@@ -15,9 +25,9 @@ services:
       # LDAP_SEARCH_BASE: "dc=example,dc=local"
       # LDAP_BIND_DN: "cn=bind,dc=example,dc=local"
       # LDAP_BIND_PASSWORD: "secret"
-    volumes:
-      - mdt-data:/app/data
+    depends_on:
+      - postgres
     restart: unless-stopped
 
 volumes:
-  mdt-data:
+  mdt-db:

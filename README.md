@@ -11,21 +11,25 @@ npm start
 
 L'UI est disponible sur `http://localhost:3000`.
 
+Prerequis : PostgreSQL (definis `DATABASE_URL` ou les variables `PG*`).
+
 ## Docker
+
+Le plus simple est d'utiliser Docker Compose (PostgreSQL inclus) :
+
+```bash
+docker compose up -d
+```
+
+Ou en mode `docker run` si tu as deja un PostgreSQL accessible :
 
 ```bash
 docker build -t mdt-web .
 docker run -d --name mdt-web -p 3000:3000 \
+  -e DATABASE_URL=postgres://mdt:mdt@localhost:5432/mdt \
   -e SESSION_SECRET=change-me \
   -e COOKIE_SECURE=0 \
-  -v mdt-data:/app/data \
   mdt-web
-```
-
-Ou avec Docker Compose :
-
-```bash
-docker compose up -d
 ```
 
 ## API
@@ -91,13 +95,15 @@ Detail d'une machine (composants + payload complet).
 
 ## Donnees
 
-Les donnees sont stockees en SQLite dans `data/mdt.db`.
+Les donnees sont stockees en PostgreSQL.
 
 ## Variables d'environnement
 
 - `PORT` : port HTTP (defaut `3000`)
-- `DATA_DIR` : dossier des donnees (defaut `./data`)
-- `DATABASE_PATH` : chemin direct vers la DB SQLite
+- `DATABASE_URL` : URL PostgreSQL complete (ex: `postgres://user:pass@host:5432/mdt`)
+- `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` : alternative a `DATABASE_URL`
+- `PGSSLMODE` / `PGSSL` : activer TLS pour PostgreSQL
+- `PGSSL_REJECT_UNAUTHORIZED=0` : accepte un certificat TLS non valide
 - `JSON_LIMIT` : taille max d'un payload JSON (defaut `256kb`)
 - `INGEST_RATE_LIMIT` : requetes/minute par IP (defaut `180`)
 - `TRUST_PROXY` : `1` si l'app est derriere un reverse proxy

@@ -1,20 +1,17 @@
 const crypto = require('crypto');
-const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const session = require('express-session');
 const LdapAuth = require('ldapauth-fork');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 
 const app = express();
 app.disable('x-powered-by');
 
 const PORT = Number.parseInt(process.env.PORT || '3000', 10);
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const DB_PATH = process.env.DATABASE_PATH || path.join(DATA_DIR, 'mdt.db');
 const JSON_LIMIT = process.env.JSON_LIMIT || '256kb';
 const INGEST_RATE_LIMIT = Number.parseInt(process.env.INGEST_RATE_LIMIT || '180', 10);
 const SESSION_SECRET =
@@ -37,72 +34,84 @@ const LDAP_SEARCH_ATTRIBUTES = (process.env.LDAP_SEARCH_ATTRIBUTES || 'dn,cn,mai
 const LDAP_TLS_REJECT_UNAUTHORIZED =
   process.env.LDAP_TLS_REJECT_UNAUTHORIZED !== '0';
 const LDAP_ENABLED = Boolean(LDAP_URL && LDAP_SEARCH_BASE);
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const PGSSLMODE = (process.env.PGSSLMODE || '').toLowerCase();
+const PGSSL =
+  process.env.PGSSL === '1' ||
+  PGSSLMODE === 'require' ||
+  PGSSLMODE === 'verify-full' ||
+  PGSSLMODE === 'verify-ca';
+const PGSSL_REJECT_UNAUTHORIZED = process.env.PGSSL_REJECT_UNAUTHORIZED !== '0';
 
 if (!Number.isFinite(PORT)) {
   throw new Error('PORT must be a number');
 }
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const pool = new Pool({
+  connectionString: DATABASE_URL || undefined,
+  ssl: PGSSL ? { rejectUnauthorized: PGSSL_REJECT_UNAUTHORIZED } : undefined
+});
 
-const db = new Database(DB_PATH);
+pool.on('error', (error) => {
+  console.error('PostgreSQL pool error', error);
+});
 
-// Basic tuning for safe concurrent reads/writes.
-db.exec(`
-  PRAGMA journal_mode = WAL;
-  PRAGMA synchronous = NORMAL;
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS machines (
+      id SERIAL PRIMARY KEY,
+      machine_key TEXT NOT NULL UNIQUE,
+      hostname TEXT,
+      mac_address TEXT,
+      serial_number TEXT,
+      category TEXT NOT NULL DEFAULT 'unknown',
+      model TEXT,
+      vendor TEXT,
+      os_version TEXT,
+      ram_mb INTEGER,
+      ram_slots_total INTEGER,
+      ram_slots_free INTEGER,
+      battery_health INTEGER,
+      camera_status TEXT,
+      usb_status TEXT,
+      keyboard_status TEXT,
+      pad_status TEXT,
+      badge_reader_status TEXT,
+      last_seen TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      components TEXT,
+      payload TEXT,
+      last_ip TEXT
+    );
+  `);
 
-  CREATE TABLE IF NOT EXISTS machines (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    machine_key TEXT NOT NULL UNIQUE,
-    hostname TEXT,
-    mac_address TEXT,
-    serial_number TEXT,
-    category TEXT NOT NULL DEFAULT 'unknown',
-    model TEXT,
-    vendor TEXT,
-    os_version TEXT,
-    ram_mb INTEGER,
-    ram_slots_total INTEGER,
-    ram_slots_free INTEGER,
-    battery_health INTEGER,
-    camera_status TEXT,
-    usb_status TEXT,
-    keyboard_status TEXT,
-    pad_status TEXT,
-    badge_reader_status TEXT,
-    last_seen TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    components TEXT,
-    payload TEXT,
-    last_ip TEXT
-  );
+  const columns = [
+    ['ram_mb', 'INTEGER'],
+    ['ram_slots_total', 'INTEGER'],
+    ['ram_slots_free', 'INTEGER'],
+    ['battery_health', 'INTEGER'],
+    ['camera_status', 'TEXT'],
+    ['usb_status', 'TEXT'],
+    ['keyboard_status', 'TEXT'],
+    ['pad_status', 'TEXT'],
+    ['badge_reader_status', 'TEXT'],
+    ['last_ip', 'TEXT'],
+    ['components', 'TEXT'],
+    ['payload', 'TEXT'],
+    ['last_seen', 'TIMESTAMPTZ'],
+    ['created_at', 'TIMESTAMPTZ']
+  ];
 
-  CREATE INDEX IF NOT EXISTS idx_machines_category ON machines(category);
-  CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen);
-`);
-
-const existingColumns = new Set(
-  db.prepare("PRAGMA table_info(machines)").all().map((column) => column.name)
-);
-
-function ensureColumn(name, type) {
-  if (!existingColumns.has(name)) {
-    db.exec(`ALTER TABLE machines ADD COLUMN ${name} ${type}`);
-    existingColumns.add(name);
+  for (const [name, type] of columns) {
+    await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS ${name} ${type}`);
   }
+
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_machine_key ON machines(machine_key)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_category ON machines(category)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen)');
 }
 
-ensureColumn('ram_mb', 'INTEGER');
-ensureColumn('ram_slots_total', 'INTEGER');
-ensureColumn('ram_slots_free', 'INTEGER');
-ensureColumn('battery_health', 'INTEGER');
-ensureColumn('camera_status', 'TEXT');
-ensureColumn('usb_status', 'TEXT');
-ensureColumn('keyboard_status', 'TEXT');
-ensureColumn('pad_status', 'TEXT');
-ensureColumn('badge_reader_status', 'TEXT');
-
-const upsertMachine = db.prepare(`
+const upsertMachineQuery = `
   INSERT INTO machines (
     machine_key,
     hostname,
@@ -127,28 +136,28 @@ const upsertMachine = db.prepare(`
     payload,
     last_ip
   ) VALUES (
-    @machine_key,
-    @hostname,
-    @mac_address,
-    @serial_number,
-    @category,
-    @model,
-    @vendor,
-    @os_version,
-    @ram_mb,
-    @ram_slots_total,
-    @ram_slots_free,
-    @battery_health,
-    @camera_status,
-    @usb_status,
-    @keyboard_status,
-    @pad_status,
-    @badge_reader_status,
-    @last_seen,
-    @created_at,
-    @components,
-    @payload,
-    @last_ip
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12,
+    $13,
+    $14,
+    $15,
+    $16,
+    $17,
+    $18,
+    $19,
+    $20,
+    $21,
+    $22
   )
   ON CONFLICT(machine_key) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, machines.hostname),
@@ -174,9 +183,10 @@ const upsertMachine = db.prepare(`
     components = COALESCE(excluded.components, machines.components),
     payload = COALESCE(excluded.payload, machines.payload),
     last_ip = excluded.last_ip
-`);
+  RETURNING id
+`;
 
-const listMachines = db.prepare(`
+const listMachinesQuery = `
   SELECT
     id,
     hostname,
@@ -199,9 +209,9 @@ const listMachines = db.prepare(`
     last_ip
   FROM machines
   ORDER BY last_seen DESC
-`);
+`;
 
-const getMachineById = db.prepare(`
+const getMachineByIdQuery = `
   SELECT
     id,
     hostname,
@@ -226,10 +236,8 @@ const getMachineById = db.prepare(`
     payload,
     last_ip
   FROM machines
-  WHERE id = ?
-`);
-
-const getMachineIdByKey = db.prepare('SELECT id FROM machines WHERE machine_key = ?');
+  WHERE id = $1
+`;
 
 const ingestLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -737,7 +745,7 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/ingest', ingestLimiter, (req, res) => {
+app.post('/api/ingest', ingestLimiter, async (req, res) => {
   const body = req.body;
   if (!body || typeof body !== 'object') {
     return res.status(400).json({ ok: false, error: 'invalid_payload' });
@@ -854,73 +862,92 @@ app.post('/api/ingest', ingestLimiter, (req, res) => {
   const payload = safeJsonStringify(body, 64 * 1024);
   const ipAddress = getClientIp(req);
 
-  upsertMachine.run({
-    machine_key: machineKey,
+  const values = [
+    machineKey,
     hostname,
-    mac_address: macAddress,
-    serial_number: serialNumber,
+    macAddress,
+    serialNumber,
     category,
     model,
     vendor,
-    os_version: osVersion,
-    ram_mb: ramMb,
-    ram_slots_total: ramSlotsTotal,
-    ram_slots_free: ramSlotsFree,
-    battery_health: batteryHealth,
-    camera_status: cameraStatus,
-    usb_status: usbStatus,
-    keyboard_status: keyboardStatus,
-    pad_status: padStatus,
-    badge_reader_status: badgeReaderStatus,
-    last_seen: now,
-    created_at: now,
-    components: components ? JSON.stringify(components) : null,
+    osVersion,
+    ramMb,
+    ramSlotsTotal,
+    ramSlotsFree,
+    batteryHealth,
+    cameraStatus,
+    usbStatus,
+    keyboardStatus,
+    padStatus,
+    badgeReaderStatus,
+    now,
+    now,
+    components ? JSON.stringify(components) : null,
     payload,
-    last_ip: ipAddress
-  });
+    ipAddress
+  ];
 
-  const row = getMachineIdByKey.get(machineKey);
-
-  return res.status(200).json({
-    ok: true,
-    id: row ? row.id : null,
-    machineKey
-  });
+  try {
+    const result = await pool.query(upsertMachineQuery, values);
+    const id = result.rows && result.rows[0] ? result.rows[0].id : null;
+    return res.status(200).json({
+      ok: true,
+      id,
+      machineKey
+    });
+  } catch (error) {
+    console.error('Failed to ingest payload', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
 });
 
-app.get('/api/machines', requireAuth, (req, res) => {
-  const machines = listMachines.all().map((row) => ({
-    id: row.id,
-    hostname: row.hostname,
-    macAddress: row.mac_address,
-    serialNumber: row.serial_number,
-    category: row.category,
-    model: row.model,
-    vendor: row.vendor,
-    osVersion: row.os_version,
-    ramMb: row.ram_mb,
-    ramSlotsTotal: row.ram_slots_total,
-    ramSlotsFree: row.ram_slots_free,
-    batteryHealth: row.battery_health,
-    cameraStatus: row.camera_status,
-    usbStatus: row.usb_status,
-    keyboardStatus: row.keyboard_status,
-    padStatus: row.pad_status,
-    badgeReaderStatus: row.badge_reader_status,
-    lastSeen: row.last_seen,
-    lastIp: row.last_ip
-  }));
+app.get('/api/machines', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(listMachinesQuery);
+    const machines = result.rows.map((row) => ({
+      id: row.id,
+      hostname: row.hostname,
+      macAddress: row.mac_address,
+      serialNumber: row.serial_number,
+      category: row.category,
+      model: row.model,
+      vendor: row.vendor,
+      osVersion: row.os_version,
+      ramMb: row.ram_mb,
+      ramSlotsTotal: row.ram_slots_total,
+      ramSlotsFree: row.ram_slots_free,
+      batteryHealth: row.battery_health,
+      cameraStatus: row.camera_status,
+      usbStatus: row.usb_status,
+      keyboardStatus: row.keyboard_status,
+      padStatus: row.pad_status,
+      badgeReaderStatus: row.badge_reader_status,
+      lastSeen: row.last_seen,
+      lastIp: row.last_ip
+    }));
 
-  res.json({ machines });
+    res.json({ machines });
+  } catch (error) {
+    console.error('Failed to list machines', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
 });
 
-app.get('/api/machines/:id', requireAuth, (req, res) => {
+app.get('/api/machines/:id', requireAuth, async (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   if (!Number.isFinite(id)) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
   }
 
-  const row = getMachineById.get(id);
+  let row;
+  try {
+    const result = await pool.query(getMachineByIdQuery, [id]);
+    row = result.rows && result.rows[0] ? result.rows[0] : null;
+  } catch (error) {
+    console.error('Failed to fetch machine detail', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+
   if (!row) {
     return res.status(404).json({ ok: false, error: 'not_found' });
   }
@@ -982,6 +1009,16 @@ app.use((req, res) => {
   res.status(404).json({ ok: false, error: 'not_found' });
 });
 
-app.listen(PORT, () => {
-  console.log(`MDT web listening on http://localhost:${PORT}`);
-});
+async function startServer() {
+  try {
+    await initDb();
+    app.listen(PORT, () => {
+      console.log(`MDT web listening on http://localhost:${PORT}`);
+    });
+  } catch (error) {
+    console.error('Failed to initialize database', error);
+    process.exit(1);
+  }
+}
+
+startServer();
