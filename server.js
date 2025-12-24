@@ -56,7 +56,31 @@ pool.on('error', (error) => {
   console.error('PostgreSQL pool error', error);
 });
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForDatabase() {
+  const maxAttempts = Number.parseInt(process.env.DB_CONNECT_RETRIES || '20', 10);
+  const delayMs = Number.parseInt(process.env.DB_CONNECT_DELAY_MS || '2000', 10);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await pool.query('SELECT 1');
+      return;
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      console.warn(`Database not ready (attempt ${attempt}/${maxAttempts}): ${message}`);
+      if (attempt === maxAttempts) {
+        throw error;
+      }
+      await wait(delayMs);
+    }
+  }
+}
+
 async function initDb() {
+  await waitForDatabase();
   await pool.query(`
     CREATE TABLE IF NOT EXISTS machines (
       id SERIAL PRIMARY KEY,
