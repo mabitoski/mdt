@@ -7,11 +7,13 @@ param(
   [int]$DiskTestTimeoutSec = 180,
   [int]$MemTestTimeoutSec = 180,
   [int]$StressLoops = 2,
+  [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
+  [int]$CameraTestTimeoutSec = 20,
   [string]$LogPath,
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.2.3'
+$scriptVersion = '1.2.5'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -468,6 +470,50 @@ function Invoke-WinsatCapture {
   return @{ status = $status; mbps = $mbps }
 }
 
+function Invoke-ExternalTest {
+  param(
+    [string]$Path,
+    [string[]]$Arguments = @(),
+    [int]$TimeoutSec = 20,
+    [string]$Name = 'External'
+  )
+
+  if (-not $Path -or -not (Test-Path $Path)) { return $null }
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $Path
+  if ($Arguments -and $Arguments.Count -gt 0) {
+    $psi.Arguments = ($Arguments -join ' ')
+  }
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  try {
+    [void]$proc.Start()
+  } catch {
+    Write-Log "$Name test start failed: $($_.Exception.Message)" 'WARN'
+    return 'nok'
+  }
+
+  try {
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+      try { $proc.Kill() } catch { }
+      Write-Log "$Name test timeout after ${TimeoutSec}s" 'WARN'
+      return 'nok'
+    }
+  } catch {
+    Write-Log "$Name test wait failed: $($_.Exception.Message)" 'WARN'
+    return 'nok'
+  }
+
+  if ($proc.ExitCode -eq 0) { return 'ok' }
+  Write-Log "$Name test failed with exit code $($proc.ExitCode)" 'WARN'
+  return 'nok'
+}
+
 function Run-WinsatLoop {
   param(
     [string[]]$Arguments,
@@ -699,7 +745,23 @@ $batteryInfo = Get-BatteryInfo
 $cameraDevices = @()
 $cameraDevices += Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPClass='Camera'"
 $cameraDevices += Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPClass='Image'"
-$cameraStatus = Get-StatusFromDevices $cameraDevices
+$cameraPresence = Get-StatusFromDevices $cameraDevices
+$cameraTestStatus = $null
+$cameraStatus = $null
+if ($cameraPresence -eq 'absent' -or $cameraPresence -eq 'nok') {
+  $cameraStatus = $cameraPresence
+} else {
+  if ($CameraTestPath -and -not (Test-Path $CameraTestPath)) {
+    Write-Log "Camera test binary not found: $CameraTestPath" 'WARN'
+  }
+  $cameraTestStatus = Invoke-ExternalTest -Path $CameraTestPath -TimeoutSec $CameraTestTimeoutSec -Name 'Camera'
+  if ($cameraTestStatus) {
+    $cameraStatus = $cameraTestStatus
+  } else {
+    $cameraStatus = 'not_tested'
+  }
+}
+Write-Log "Camera presence=$cameraPresence TestPath=$CameraTestPath TestStatus=$cameraTestStatus Final=$cameraStatus"
 
 $usbDevices = Get-CimInstanceSafe -ClassName 'Win32_USBController'
 $usbStatus = Get-StatusFromDevices $usbDevices
