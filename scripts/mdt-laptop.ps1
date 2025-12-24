@@ -8,7 +8,7 @@ param(
   [int]$StressLoops = 2,
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [int]$CameraTestTimeoutSec = 20,
-  [int]$MsinfoTimeoutSec = 30,
+  [int]$MsinfoTimeoutSec = 0,
   [string]$LogPath,
   [switch]$SkipTlsValidation
 )

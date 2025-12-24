@@ -9,12 +9,12 @@ param(
   [int]$StressLoops = 2,
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [int]$CameraTestTimeoutSec = 20,
-  [int]$MsinfoTimeoutSec = 30,
+  [int]$MsinfoTimeoutSec = 0,
   [string]$LogPath,
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.2.6'
+$scriptVersion = '1.2.7'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -151,6 +151,8 @@ function Get-ChassisCategory {
 function Get-MacFromMsinfo {
   param([int]$TimeoutSec = 30)
 
+  if ($TimeoutSec -le 0) { return $null }
+
   $cmd = Get-Command msinfo32 -ErrorAction SilentlyContinue
   if (-not $cmd) { return $null }
 
@@ -214,6 +216,59 @@ function Get-MacFromMsinfo {
   return $null
 }
 
+function Get-MacFromGetmac {
+  param([string]$SkipPattern)
+
+  $cmd = Get-Command getmac -ErrorAction SilentlyContinue
+  if (-not $cmd) { return $null }
+
+  try {
+    $output = & $cmd.Source /V /FO CSV /NH 2>$null
+    if (-not $output) { return $null }
+    $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
+    foreach ($line in $output) {
+      $row = $line | ConvertFrom-Csv -Header 'Connection','Adapter','Mac','Transport'
+      if (-not $row) { continue }
+      $mac = $row.Mac
+      if (-not $mac -or $mac -notmatch $macRegex) { continue }
+      if ($row.Adapter -and $row.Adapter -match $SkipPattern) { continue }
+      if ($row.Connection -and $row.Connection -match $SkipPattern) { continue }
+      return $mac
+    }
+  } catch {
+    Write-Log "getmac failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+
+  return $null
+}
+
+function Get-MacFromIpconfig {
+  param([string]$SkipPattern)
+
+  $cmd = Get-Command ipconfig -ErrorAction SilentlyContinue
+  if (-not $cmd) { return $null }
+
+  try {
+    $output = & $cmd.Source /all 2>$null
+    if (-not $output) { return $null }
+    $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
+    foreach ($line in $output) {
+      if ($line -match '(physical address|adresse physique|adresse mac|mac address)') {
+        if ($line -match $macRegex) {
+          if ($line -match $SkipPattern) { continue }
+          return $Matches[0]
+        }
+      }
+    }
+  } catch {
+    Write-Log "ipconfig failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+
+  return $null
+}
+
 function Get-PrimaryMac {
   $skipPattern = 'Virtual|VPN|Loopback|Bluetooth|Wi-Fi Direct|TAP|Hyper-V|Pseudo|WAN Miniport|RAS'
 
@@ -245,6 +300,18 @@ function Get-PrimaryMac {
   $connected = $filteredAdapters | Where-Object { $_.NetConnectionStatus -eq 2 }
   if ($connected -and $connected.Count -gt 0) { return $connected[0].MACAddress }
   if ($filteredAdapters -and $filteredAdapters.Count -gt 0) { return $filteredAdapters[0].MACAddress }
+
+  $getmacMac = Get-MacFromGetmac -SkipPattern $skipPattern
+  if ($getmacMac) {
+    Write-Log "MAC from getmac: $getmacMac"
+    return $getmacMac
+  }
+
+  $ipconfigMac = Get-MacFromIpconfig -SkipPattern $skipPattern
+  if ($ipconfigMac) {
+    Write-Log "MAC from ipconfig: $ipconfigMac"
+    return $ipconfigMac
+  }
 
   $msinfoMac = Get-MacFromMsinfo -TimeoutSec $MsinfoTimeoutSec
   if ($msinfoMac) {
