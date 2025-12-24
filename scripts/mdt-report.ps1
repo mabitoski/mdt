@@ -15,7 +15,7 @@ param(
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.2.8'
+$scriptVersion = '1.2.9'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -275,12 +275,14 @@ function New-MacCandidate {
     [string]$Mac,
     [string]$Name,
     [string]$Description,
+    [string]$MediaType,
+    [string]$PhysicalMediaType,
     [bool]$IsUp,
     [string]$EthernetPattern,
     [string]$WifiPattern
   )
 
-  $label = (($Name, $Description) -join ' ').Trim()
+  $label = (($Name, $Description, $MediaType, $PhysicalMediaType) -join ' ').Trim()
   return [pscustomobject]@{
     Mac = $Mac
     Name = $Name
@@ -299,29 +301,47 @@ function Select-MacCandidate {
   )
 
   if (-not $Candidates -or $Candidates.Count -eq 0) { return $null }
-  $up = $Candidates | Where-Object { $_.IsUp }
-  $pool = if ($up -and $up.Count -gt 0) { $up } else { $Candidates }
   $selected = $null
-
+  $priorities = @()
   switch ($Preference) {
-    'ethernet' { $selected = $pool | Where-Object { $_.IsEthernet } | Select-Object -First 1 }
-    'wifi' { $selected = $pool | Where-Object { $_.IsWifi } | Select-Object -First 1 }
-    'any' { $selected = $pool | Select-Object -First 1 }
-    default {
-      $selected = $pool | Where-Object { $_.IsEthernet } | Select-Object -First 1
-      if (-not $selected) {
-        $selected = $pool | Where-Object { $_.IsWifi } | Select-Object -First 1
-      }
-    }
+    'ethernet' { $priorities = @('ethernet', 'wifi', 'any') }
+    'wifi' { $priorities = @('wifi', 'ethernet', 'any') }
+    'any' { $priorities = @('any') }
+    default { $priorities = @('ethernet', 'wifi', 'any') }
   }
 
-  if (-not $selected) { $selected = $pool | Select-Object -First 1 }
+  foreach ($priority in $priorities) {
+    $subset = $Candidates
+    if ($priority -eq 'ethernet') { $subset = $Candidates | Where-Object { $_.IsEthernet } }
+    if ($priority -eq 'wifi') { $subset = $Candidates | Where-Object { $_.IsWifi } }
+    if (-not $subset -or $subset.Count -eq 0) { continue }
+    $up = $subset | Where-Object { $_.IsUp }
+    $selected = if ($up -and $up.Count -gt 0) { $up | Select-Object -First 1 } else { $subset | Select-Object -First 1 }
+    if ($selected) { break }
+  }
+
+  if (-not $selected) { $selected = $Candidates | Select-Object -First 1 }
   if ($selected -and $selected.Mac) {
     Write-Log "MAC selected from $Source ($Preference): $($selected.Mac) [$($selected.Name)]"
     return $selected.Mac
   }
 
   return $null
+}
+
+function Log-MacCandidates {
+  param(
+    [string]$Source,
+    [array]$Candidates
+  )
+
+  if (-not $Candidates -or $Candidates.Count -eq 0) { return }
+  $lines = $Candidates | ForEach-Object {
+    $type = if ($_.IsEthernet) { 'eth' } elseif ($_.IsWifi) { 'wifi' } else { 'other' }
+    $state = if ($_.IsUp) { 'up' } else { 'down' }
+    "$($_.Mac) [$type,$state,$($_.Name)]"
+  }
+  Write-Log "MAC candidates from $Source: $($lines -join ' | ')"
 }
 
 function Get-PrimaryMac {
@@ -340,10 +360,13 @@ function Get-PrimaryMac {
           -Mac $adapter.MacAddress `
           -Name $adapter.Name `
           -Description $adapter.InterfaceDescription `
+          -MediaType $adapter.MediaType `
+          -PhysicalMediaType $adapter.PhysicalMediaType `
           -IsUp ($adapter.Status -eq 'Up') `
           -EthernetPattern $ethernetPattern `
           -WifiPattern $wifiPattern
       }
+      Log-MacCandidates -Source 'Get-NetAdapter' -Candidates $netCandidates
       $selected = Select-MacCandidate -Candidates $netCandidates -Preference $MacPreference -Source 'Get-NetAdapter'
       if ($selected) { return $selected }
     } catch {
@@ -361,10 +384,13 @@ function Get-PrimaryMac {
       -Mac $cfg.MACAddress `
       -Name $cfg.Caption `
       -Description $cfg.Description `
+      -MediaType $null `
+      -PhysicalMediaType $null `
       -IsUp ($cfg.IPEnabled -eq $true) `
       -EthernetPattern $ethernetPattern `
       -WifiPattern $wifiPattern
   }
+  Log-MacCandidates -Source 'Win32_NetworkAdapterConfiguration' -Candidates $cfgCandidates
   $selected = Select-MacCandidate -Candidates $cfgCandidates -Preference $MacPreference -Source 'Win32_NetworkAdapterConfiguration'
   if ($selected) { return $selected }
 
@@ -378,10 +404,13 @@ function Get-PrimaryMac {
       -Mac $adapter.MACAddress `
       -Name $adapter.NetConnectionID `
       -Description $adapter.Description `
+      -MediaType $null `
+      -PhysicalMediaType $null `
       -IsUp ($adapter.NetConnectionStatus -eq 2) `
       -EthernetPattern $ethernetPattern `
       -WifiPattern $wifiPattern
   }
+  Log-MacCandidates -Source 'Win32_NetworkAdapter' -Candidates $adapterCandidates
   $selected = Select-MacCandidate -Candidates $adapterCandidates -Preference $MacPreference -Source 'Win32_NetworkAdapter'
   if ($selected) { return $selected }
 
