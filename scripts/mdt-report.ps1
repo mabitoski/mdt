@@ -15,7 +15,7 @@ param(
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.2.9'
+$scriptVersion = '1.2.10'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -341,7 +341,7 @@ function Log-MacCandidates {
     $state = if ($_.IsUp) { 'up' } else { 'down' }
     "$($_.Mac) [$type,$state,$($_.Name)]"
   }
-  Write-Log "MAC candidates from $Source: $($lines -join ' | ')"
+  Write-Log ("MAC candidates from {0}: {1}" -f $Source, ($lines -join ' | '))
 }
 
 function Get-PrimaryMac {
