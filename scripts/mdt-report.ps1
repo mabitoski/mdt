@@ -10,11 +10,12 @@ param(
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [int]$CameraTestTimeoutSec = 20,
   [int]$MsinfoTimeoutSec = 0,
+  [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
   [string]$LogPath,
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.2.7'
+$scriptVersion = '1.2.8'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -269,17 +270,82 @@ function Get-MacFromIpconfig {
   return $null
 }
 
+function New-MacCandidate {
+  param(
+    [string]$Mac,
+    [string]$Name,
+    [string]$Description,
+    [bool]$IsUp,
+    [string]$EthernetPattern,
+    [string]$WifiPattern
+  )
+
+  $label = (($Name, $Description) -join ' ').Trim()
+  return [pscustomobject]@{
+    Mac = $Mac
+    Name = $Name
+    Description = $Description
+    IsUp = $IsUp
+    IsEthernet = ($label -match $EthernetPattern)
+    IsWifi = ($label -match $WifiPattern)
+  }
+}
+
+function Select-MacCandidate {
+  param(
+    [array]$Candidates,
+    [string]$Preference,
+    [string]$Source
+  )
+
+  if (-not $Candidates -or $Candidates.Count -eq 0) { return $null }
+  $up = $Candidates | Where-Object { $_.IsUp }
+  $pool = if ($up -and $up.Count -gt 0) { $up } else { $Candidates }
+  $selected = $null
+
+  switch ($Preference) {
+    'ethernet' { $selected = $pool | Where-Object { $_.IsEthernet } | Select-Object -First 1 }
+    'wifi' { $selected = $pool | Where-Object { $_.IsWifi } | Select-Object -First 1 }
+    'any' { $selected = $pool | Select-Object -First 1 }
+    default {
+      $selected = $pool | Where-Object { $_.IsEthernet } | Select-Object -First 1
+      if (-not $selected) {
+        $selected = $pool | Where-Object { $_.IsWifi } | Select-Object -First 1
+      }
+    }
+  }
+
+  if (-not $selected) { $selected = $pool | Select-Object -First 1 }
+  if ($selected -and $selected.Mac) {
+    Write-Log "MAC selected from $Source ($Preference): $($selected.Mac) [$($selected.Name)]"
+    return $selected.Mac
+  }
+
+  return $null
+}
+
 function Get-PrimaryMac {
   $skipPattern = 'Virtual|VPN|Loopback|Bluetooth|Wi-Fi Direct|TAP|Hyper-V|Pseudo|WAN Miniport|RAS'
+  $ethernetPattern = '(?i)ethernet|lan|gigabit|gbe|realtek|intel|broadcom|qualcomm|pci'
+  $wifiPattern = '(?i)wi-?fi|wireless|802\.11|wlan'
 
   if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) {
     try {
       $netAdapters = Get-NetAdapter -ErrorAction Stop | Where-Object {
         $_.MacAddress -and ($_.HardwareInterface -eq $true -or $_.Virtual -eq $false)
       }
-      $preferred = $netAdapters | Where-Object { $_.Status -eq 'Up' }
-      if ($preferred -and $preferred.Count -gt 0) { return $preferred[0].MacAddress }
-      if ($netAdapters -and $netAdapters.Count -gt 0) { return $netAdapters[0].MacAddress }
+      $netCandidates = @()
+      foreach ($adapter in $netAdapters) {
+        $netCandidates += New-MacCandidate `
+          -Mac $adapter.MacAddress `
+          -Name $adapter.Name `
+          -Description $adapter.InterfaceDescription `
+          -IsUp ($adapter.Status -eq 'Up') `
+          -EthernetPattern $ethernetPattern `
+          -WifiPattern $wifiPattern
+      }
+      $selected = Select-MacCandidate -Candidates $netCandidates -Preference $MacPreference -Source 'Get-NetAdapter'
+      if ($selected) { return $selected }
     } catch {
       Write-Log "Get-NetAdapter failed: $($_.Exception.Message)" 'WARN'
     }
@@ -289,17 +355,35 @@ function Get-PrimaryMac {
   $filteredConfigs = $configs | Where-Object {
     $_.MACAddress -and $_.Description -notmatch $skipPattern
   }
-  $activeConfigs = $filteredConfigs | Where-Object { $_.IPEnabled -eq $true }
-  if ($activeConfigs -and $activeConfigs.Count -gt 0) { return $activeConfigs[0].MACAddress }
-  if ($filteredConfigs -and $filteredConfigs.Count -gt 0) { return $filteredConfigs[0].MACAddress }
+  $cfgCandidates = @()
+  foreach ($cfg in $filteredConfigs) {
+    $cfgCandidates += New-MacCandidate `
+      -Mac $cfg.MACAddress `
+      -Name $cfg.Caption `
+      -Description $cfg.Description `
+      -IsUp ($cfg.IPEnabled -eq $true) `
+      -EthernetPattern $ethernetPattern `
+      -WifiPattern $wifiPattern
+  }
+  $selected = Select-MacCandidate -Candidates $cfgCandidates -Preference $MacPreference -Source 'Win32_NetworkAdapterConfiguration'
+  if ($selected) { return $selected }
 
   $adapters = Get-CimInstanceSafe -ClassName 'Win32_NetworkAdapter'
   $filteredAdapters = $adapters | Where-Object {
     $_.MACAddress -and ($_.PhysicalAdapter -eq $true -or ($_.PNPDeviceID -and $_.PNPDeviceID -notmatch '^ROOT\\')) -and $_.Description -notmatch $skipPattern
   }
-  $connected = $filteredAdapters | Where-Object { $_.NetConnectionStatus -eq 2 }
-  if ($connected -and $connected.Count -gt 0) { return $connected[0].MACAddress }
-  if ($filteredAdapters -and $filteredAdapters.Count -gt 0) { return $filteredAdapters[0].MACAddress }
+  $adapterCandidates = @()
+  foreach ($adapter in $filteredAdapters) {
+    $adapterCandidates += New-MacCandidate `
+      -Mac $adapter.MACAddress `
+      -Name $adapter.NetConnectionID `
+      -Description $adapter.Description `
+      -IsUp ($adapter.NetConnectionStatus -eq 2) `
+      -EthernetPattern $ethernetPattern `
+      -WifiPattern $wifiPattern
+  }
+  $selected = Select-MacCandidate -Candidates $adapterCandidates -Preference $MacPreference -Source 'Win32_NetworkAdapter'
+  if ($selected) { return $selected }
 
   $getmacMac = Get-MacFromGetmac -SkipPattern $skipPattern
   if ($getmacMac) {

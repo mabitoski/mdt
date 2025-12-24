@@ -9,6 +9,7 @@ param(
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [int]$CameraTestTimeoutSec = 20,
   [int]$MsinfoTimeoutSec = 0,
+  [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
   [string]$LogPath,
   [switch]$SkipTlsValidation
 )
@@ -25,6 +26,7 @@ $params = @{
   CameraTestPath = $CameraTestPath
   CameraTestTimeoutSec = $CameraTestTimeoutSec
   MsinfoTimeoutSec = $MsinfoTimeoutSec
+  MacPreference = $MacPreference
   LogPath = $LogPath
 }
 if ($SkipTlsValidation) { $params.SkipTlsValidation = $true }

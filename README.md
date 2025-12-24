@@ -158,6 +158,7 @@ Options utiles :
 - `-CameraTestPath` : chemin du binaire de test camera (exit code 0 = ok)
 - `-CameraTestTimeoutSec` : timeout du test camera (defaut `20`)
 - `-MsinfoTimeoutSec` : timeout de msinfo32 si fallback MAC (defaut `0`, desactive par defaut)
+- `-MacPreference` : `auto`, `ethernet`, `wifi`, `any` (defaut `auto`)
 - `-LogPath` : chemin du fichier de log (defaut `scripts/mdt-report.log`)
 
 Notes tests :
