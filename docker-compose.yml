@@ -1,0 +1,23 @@
+services:
+  mdt-web:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      DATA_DIR: /app/data
+      COOKIE_SECURE: "0"
+      SESSION_SECRET: "change-me"
+      ALLOW_LOCAL_ADMIN: "1"
+      LOCAL_ADMIN_USER: "admin"
+      LOCAL_ADMIN_PASSWORD: "admin"
+      # LDAP_URL: "ldap://ldap.example.local"
+      # LDAP_SEARCH_BASE: "dc=example,dc=local"
+      # LDAP_BIND_DN: "cn=bind,dc=example,dc=local"
+      # LDAP_BIND_PASSWORD: "secret"
+    volumes:
+      - mdt-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  mdt-data:

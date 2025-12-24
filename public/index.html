@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MDT Fleet</title>
+    <meta
+      name="description"
+      content="Inventaire MDT en temps reel : visualiser l'etat des machines, filtrer par categorie et acceder aux details."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="aura" aria-hidden="true"></div>
+    <main class="app">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="hero-kicker">MDT Live Ops</p>
+          <h1>Suivi instantane du parc MDT.</h1>
+          <p class="hero-sub">
+            Les scripts MDT envoient leurs donnees directement a l'API et l'interface expose l'etat
+            des composants, les identifiants clefs et la categorie de chaque poste.
+          </p>
+        </div>
+        <div class="hero-stats">
+          <div class="stat-card">
+            <span class="stat-label">Total postes</span>
+            <span class="stat-value" id="stat-total">0</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Portables</span>
+            <span class="stat-value" id="stat-laptop">0</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Tours</span>
+            <span class="stat-value" id="stat-desktop">0</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Inconnus</span>
+            <span class="stat-value" id="stat-unknown">0</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="controls">
+        <div class="filters" role="tablist" aria-label="Filtrer par categorie">
+          <button class="filter-btn active" data-filter="all" type="button" aria-pressed="true">
+            Tous
+          </button>
+          <button class="filter-btn" data-filter="laptop" type="button" aria-pressed="false">
+            Portables
+          </button>
+          <button class="filter-btn" data-filter="desktop" type="button" aria-pressed="false">
+            Tours
+          </button>
+          <button class="filter-btn" data-filter="unknown" type="button" aria-pressed="false">
+            Inconnus
+          </button>
+        </div>
+        <div class="search-wrap">
+          <input
+            id="search-input"
+            type="search"
+            placeholder="Rechercher par nom, serie ou MAC"
+            autocomplete="off"
+          />
+        </div>
+        <div class="controls-meta">
+          <label class="sort-wrap" for="sort-select">
+            <span>Tri</span>
+            <select id="sort-select">
+              <option value="lastSeen">Dernier passage</option>
+              <option value="category">Categorie</option>
+              <option value="name">Nom</option>
+            </select>
+          </label>
+          <a class="logout-btn" href="/logout">Deconnexion</a>
+          <button id="refresh-btn" type="button">Rafraichir</button>
+          <span id="last-updated">Derniere mise a jour : --</span>
+        </div>
+      </section>
+
+      <section class="board">
+        <div class="list" id="machine-list" aria-live="polite"></div>
+        <aside class="detail" id="machine-detail">
+          <div class="detail-empty">
+            <p>Selectionne un poste pour afficher les details.</p>
+            <span>Les donnees apparaissent des qu'un script MDT se presente.</span>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Connexion MDT</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/login.css" />
+  </head>
+  <body class="login-body">
+    <div class="login-aura" aria-hidden="true"></div>
+    <main class="login-card">
+      <p class="login-kicker">MDT Secure</p>
+      <h1>Connexion</h1>
+      <p class="login-sub">
+        Authentifiez-vous via LDAP ou le compte admin local.
+      </p>
+      <div class="login-error" id="login-error">
+        Identifiants invalides. Reessayez.
+      </div>
+      <form class="login-form" method="post" action="/login">
+        <label>
+          Utilisateur
+          <input
+            type="text"
+            name="username"
+            autocomplete="username"
+            required
+          />
+        </label>
+        <label>
+          Mot de passe
+          <input
+            type="password"
+            name="password"
+            autocomplete="current-password"
+            required
+          />
+        </label>
+        <button type="submit">Se connecter</button>
+      </form>
+    </main>
+    <script src="/login.js" defer></script>
+  </body>
+</html>
