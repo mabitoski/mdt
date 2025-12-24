@@ -472,6 +472,16 @@ function normalizeStatus(value) {
   }
   const cleaned = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   if (
+    cleaned.includes('not tested') ||
+    cleaned.includes('not_tested') ||
+    cleaned.includes('non teste') ||
+    cleaned.includes('non testee') ||
+    cleaned.includes('pas teste') ||
+    cleaned.includes('not run')
+  ) {
+    return 'not_tested';
+  }
+  if (
     cleaned.includes('absent') ||
     cleaned.includes('missing') ||
     cleaned.includes('not present') ||
