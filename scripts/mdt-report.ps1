@@ -9,11 +9,12 @@ param(
   [int]$StressLoops = 2,
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [int]$CameraTestTimeoutSec = 20,
+  [int]$MsinfoTimeoutSec = 30,
   [string]$LogPath,
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.2.5'
+$scriptVersion = '1.2.6'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -147,6 +148,72 @@ function Get-ChassisCategory {
   return 'unknown'
 }
 
+function Get-MacFromMsinfo {
+  param([int]$TimeoutSec = 30)
+
+  $cmd = Get-Command msinfo32 -ErrorAction SilentlyContinue
+  if (-not $cmd) { return $null }
+
+  $reportPath = Join-Path ([System.IO.Path]::GetTempPath()) ("mdt-msinfo-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $cmd.Source
+  $psi.Arguments = "/report `"$reportPath`""
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  try {
+    [void]$proc.Start()
+  } catch {
+    Write-Log "msinfo32 start failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+
+  try {
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+      try { $proc.Kill() } catch { }
+      Write-Log "msinfo32 timed out after ${TimeoutSec}s" 'WARN'
+      return $null
+    }
+  } catch {
+    Write-Log "msinfo32 wait failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+
+  if (-not (Test-Path $reportPath)) {
+    Write-Log 'msinfo32 report not found' 'WARN'
+    return $null
+  }
+
+  $content = Get-Content -Path $reportPath -ErrorAction SilentlyContinue
+  Remove-Item -Path $reportPath -ErrorAction SilentlyContinue
+  if (-not $content) { return $null }
+
+  $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
+  $skipPattern = 'virtual|vpn|loopback|bluetooth|wi-fi direct|tap|hyper-v|pseudo|wan miniport|ras'
+
+  foreach ($line in $content) {
+    if ($line -match '(adresse physique|physical address|adresse mac|mac address)') {
+      if ($line -match $macRegex) {
+        if ($line -match $skipPattern) { continue }
+        return $Matches[0]
+      }
+    }
+  }
+
+  $matches = [regex]::Matches(($content -join "`n"), $macRegex)
+  $values = @()
+  foreach ($match in $matches) { $values += $match.Value }
+  $unique = $values | Sort-Object -Unique
+  foreach ($value in $unique) {
+    if ($value -notmatch '^00([-:]?00){5}$') { return $value }
+  }
+
+  return $null
+}
+
 function Get-PrimaryMac {
   $skipPattern = 'Virtual|VPN|Loopback|Bluetooth|Wi-Fi Direct|TAP|Hyper-V|Pseudo|WAN Miniport|RAS'
 
@@ -178,6 +245,12 @@ function Get-PrimaryMac {
   $connected = $filteredAdapters | Where-Object { $_.NetConnectionStatus -eq 2 }
   if ($connected -and $connected.Count -gt 0) { return $connected[0].MACAddress }
   if ($filteredAdapters -and $filteredAdapters.Count -gt 0) { return $filteredAdapters[0].MACAddress }
+
+  $msinfoMac = Get-MacFromMsinfo -TimeoutSec $MsinfoTimeoutSec
+  if ($msinfoMac) {
+    Write-Log "MAC from msinfo32: $msinfoMac"
+    return $msinfoMac
+  }
 
   return $null
 }

@@ -8,6 +8,7 @@ param(
   [int]$StressLoops = 2,
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [int]$CameraTestTimeoutSec = 20,
+  [int]$MsinfoTimeoutSec = 30,
   [string]$LogPath,
   [switch]$SkipTlsValidation
 )
@@ -23,6 +24,7 @@ $params = @{
   StressLoops = $StressLoops
   CameraTestPath = $CameraTestPath
   CameraTestTimeoutSec = $CameraTestTimeoutSec
+  MsinfoTimeoutSec = $MsinfoTimeoutSec
   LogPath = $LogPath
 }
 if ($SkipTlsValidation) { $params.SkipTlsValidation = $true }
