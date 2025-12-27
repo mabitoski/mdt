@@ -364,6 +364,26 @@ body {
   margin-bottom: 18px;
 }
 
+.detail-tech {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+.detail-tech span {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.detail-tech strong {
+  font-weight: 600;
+}
+
 .detail-title {
   font-family: "Space Grotesk", sans-serif;
   font-size: 1.5rem;

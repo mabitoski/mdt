@@ -29,6 +29,7 @@ param(
   [int]$MsinfoTimeoutSec = 0,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
   [string]$LogPath,
+  [string]$Technician = $env:MDT_TECHNICIAN,
   [string]$KeyboardCapturePath,
   [string]$KeyboardCaptureLogPath,
   [string]$KeyboardCaptureConfigDir,
@@ -71,6 +72,7 @@ $params = @{
   MsinfoTimeoutSec = $MsinfoTimeoutSec
   MacPreference = $MacPreference
   LogPath = $LogPath
+  Technician = $Technician
   KeyboardCapturePath = $KeyboardCapturePath
   KeyboardCaptureLogPath = $KeyboardCaptureLogPath
   KeyboardCaptureConfigDir = $KeyboardCaptureConfigDir

@@ -30,6 +30,7 @@ param(
   [int]$MsinfoTimeoutSec = 0,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
   [string]$LogPath,
+  [string]$Technician = $env:MDT_TECHNICIAN,
   [string]$KeyboardCapturePath,
   [string]$KeyboardCaptureLogPath,
   [string]$KeyboardCaptureConfigDir,
@@ -41,7 +42,7 @@ param(
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.3.1'
+$scriptVersion = '1.3.2'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -177,6 +178,7 @@ if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
       MsinfoTimeoutSec = $MsinfoTimeoutSec
       MacPreference = $MacPreference
       LogPath = $LogPath
+      Technician = $Technician
     }
     if ($SkipTlsValidation) { $delegateParams.SkipTlsValidation = $true }
     & $stressScriptPath @delegateParams
@@ -1775,11 +1777,13 @@ $diag.completedAt = (Get-Date).ToString('o')
 $diag.durationSec = [int]$stopwatch.Elapsed.TotalSeconds
 
 $payload = [ordered]@{}
+$technicianValue = if ($Technician) { $Technician.Trim() } else { $null }
 if ($hostname) { $payload.hostname = $hostname }
 if ($macAddress) { $payload.macAddress = $macAddress }
 if ($macAddresses -and $macAddresses.Count -gt 0) { $payload.macAddresses = $macAddresses }
 if ($serialNumber) { $payload.serialNumber = $serialNumber }
 if ($categoryValue) { $payload.category = $categoryValue }
+if ($technicianValue) { $payload.technician = $technicianValue }
 if ($vendor) { $payload.vendor = $vendor }
 if ($model) { $payload.model = $model }
 if ($osVersion) { $payload.osVersion = $osVersion }

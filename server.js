@@ -92,6 +92,7 @@ async function initDb() {
       category TEXT NOT NULL DEFAULT 'unknown',
       model TEXT,
       vendor TEXT,
+      technician TEXT,
       os_version TEXT,
       ram_mb INTEGER,
       ram_slots_total INTEGER,
@@ -121,6 +122,7 @@ async function initDb() {
     ['keyboard_status', 'TEXT'],
     ['pad_status', 'TEXT'],
     ['badge_reader_status', 'TEXT'],
+    ['technician', 'TEXT'],
     ['last_ip', 'TEXT'],
     ['components', 'TEXT'],
     ['payload', 'TEXT'],
@@ -147,6 +149,7 @@ const upsertMachineQuery = `
     category,
     model,
     vendor,
+    technician,
     os_version,
     ram_mb,
     ram_slots_total,
@@ -185,7 +188,8 @@ const upsertMachineQuery = `
     $20,
     $21,
     $22,
-    $23
+    $23,
+    $24
   )
   ON CONFLICT(machine_key) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, machines.hostname),
@@ -198,6 +202,7 @@ const upsertMachineQuery = `
     END,
     model = COALESCE(excluded.model, machines.model),
     vendor = COALESCE(excluded.vendor, machines.vendor),
+    technician = COALESCE(excluded.technician, machines.technician),
     os_version = COALESCE(excluded.os_version, machines.os_version),
     ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
     ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
@@ -225,6 +230,7 @@ const listMachinesQuery = `
     category,
     model,
     vendor,
+    technician,
     os_version,
     ram_mb,
     ram_slots_total,
@@ -251,6 +257,7 @@ const getMachineByIdQuery = `
     category,
     model,
     vendor,
+    technician,
     os_version,
     ram_mb,
     ram_slots_total,
@@ -825,6 +832,10 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
   );
   const model = cleanString(pickFirst(body, ['model', 'computerModel', 'product', 'productName']), 64);
   const vendor = cleanString(pickFirst(body, ['vendor', 'manufacturer', 'make']), 64);
+  const technician = cleanString(
+    pickFirst(body, ['technician', 'technicianName', 'tech', 'techName', 'operator']),
+    64
+  );
   const osVersion = cleanString(pickFirst(body, ['osVersion', 'os', 'os_version']), 64);
   const components = sanitizeComponents(
     pickFirst(body, ['components', 'componentStatus', 'composants', 'etatComposants'])
@@ -947,6 +958,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     category,
     model,
     vendor,
+    technician,
     osVersion,
     ramMb,
     ramSlotsTotal,
@@ -983,13 +995,14 @@ app.get('/api/machines', requireAuth, async (req, res) => {
     const result = await pool.query(listMachinesQuery);
     const machines = result.rows.map((row) => ({
       id: row.id,
-    hostname: row.hostname,
-    macAddress: row.mac_address,
-    macAddresses: normalizeMacList(row.mac_addresses),
-    serialNumber: row.serial_number,
+      hostname: row.hostname,
+      macAddress: row.mac_address,
+      macAddresses: normalizeMacList(row.mac_addresses),
+      serialNumber: row.serial_number,
       category: row.category,
       model: row.model,
       vendor: row.vendor,
+      technician: row.technician,
       osVersion: row.os_version,
       ramMb: row.ram_mb,
       ramSlotsTotal: row.ram_slots_total,
@@ -1055,6 +1068,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       category: row.category,
       model: row.model,
       vendor: row.vendor,
+      technician: row.technician,
       osVersion: row.os_version,
       ramMb: row.ram_mb,
       ramSlotsTotal: row.ram_slots_total,

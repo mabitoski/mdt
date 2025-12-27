@@ -302,6 +302,7 @@ function applyFilters() {
       machine.serialNumber,
       machine.macAddress,
       Array.isArray(machine.macAddresses) ? machine.macAddresses.join(' ') : null,
+      machine.technician,
       machine.vendor,
       machine.model
     ]
@@ -475,6 +476,9 @@ function renderDetail() {
   const category = normalizeCategory(detail.category);
   const title = escapeHtml(formatPrimary(detail));
   const subtitle = escapeHtml(formatSubtitle(detail));
+  const technicianLine = detail.technician
+    ? `<p class="detail-tech"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></p>`
+    : '';
   const macAddresses = Array.isArray(detail.macAddresses) ? detail.macAddresses : [];
   const macListHtml = macAddresses.length
     ? `<div class="mac-list">${macAddresses
@@ -562,6 +566,7 @@ function renderDetail() {
       <h2 class="detail-title">${title}</h2>
       <span class="badge detail-category" data-category="${category}">${categoryLabels[category]}</span>
       <p class="machine-sub">${subtitle}</p>
+      ${technicianLine}
     </div>
     <div class="detail-grid">
       <div class="detail-item">

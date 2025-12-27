@@ -50,6 +50,7 @@ curl -X POST http://localhost:3000/api/ingest \
     "serialNumber": "ABC123",
     "category": "laptop",
     "vendor": "Dell",
+    "technician": "Remi",
     "model": "Latitude 5420",
     "osVersion": "Windows 11",
     "ramGb": 16,
@@ -74,6 +75,7 @@ Champs acceptes (tous optionnels sauf identifiant) :
 - `macAddresses` : liste de MAC (toutes interfaces)
 - `category` : `laptop`, `desktop` (ou `portable`, `tour`, etc.)
 - `vendor`, `model`, `osVersion`
+- `technician` : prenom/identifiant du technicien
 - `ramMb` / `ramGb`, `ramSlotsTotal`, `ramSlotsFree`
 - `batteryHealth` (0-100)
 - `cameraStatus`, `usbStatus`, `keyboardStatus`, `padStatus`, `badgeReaderStatus` (`ok`, `nok`, `absent`)
@@ -177,6 +179,7 @@ Options utiles :
 - `-MsinfoTimeoutSec` : timeout de msinfo32 si fallback MAC (defaut `0`, desactive par defaut)
 - `-MacPreference` : `auto`, `ethernet`, `wifi`, `any` (defaut `auto`)
 - `-LogPath` : chemin du fichier de log (defaut `scripts/mdt-report.log`)
+- `-Technician` : nom/prenom du technicien (ou env `MDT_TECHNICIAN`)
 - `-SkipKeyboardCapture` : ne lance pas `keyboard_capture.ps1` sur les laptops
 - `-KeyboardCapturePath` / `-KeyboardCaptureLogPath` / `-KeyboardCaptureConfigDir` : options du script clavier
 - `-KeyboardCaptureLayout` / `-KeyboardCaptureLayoutConfig` / `-KeyboardCaptureBlockInput` : layout et blocage des touches
