@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$ApiUrl = $env:MDT_API_URL,
-  [ValidateSet('none', 'quick', 'stress')][string]$TestMode = 'quick',
+  [ValidateSet('auto', 'laptop', 'desktop', 'unknown')][string]$Category = 'auto',
   [int]$TimeoutSec = 15,
   [int]$DiskTestTimeoutSec = 180,
   [int]$MemTestTimeoutSec = 180,
@@ -42,8 +42,8 @@ param(
 $scriptPath = Join-Path $PSScriptRoot 'mdt-report.ps1'
 $params = @{
   ApiUrl = $ApiUrl
-  Category = 'laptop'
-  TestMode = $TestMode
+  Category = $Category
+  TestMode = 'stress'
   TimeoutSec = $TimeoutSec
   DiskTestTimeoutSec = $DiskTestTimeoutSec
   MemTestTimeoutSec = $MemTestTimeoutSec
@@ -78,6 +78,7 @@ $params = @{
   KeyboardCaptureLayoutConfig = $KeyboardCaptureLayoutConfig
   KeyboardCaptureBlockInput = $KeyboardCaptureBlockInput
   SkipKeyboardCapture = $SkipKeyboardCapture
+  SkipStressScript = $true
 }
 if ($SkipTlsValidation) { $params.SkipTlsValidation = $true }
 

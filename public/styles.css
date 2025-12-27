@@ -455,6 +455,30 @@ body {
   background: rgba(255, 255, 255, 0.6);
   border-radius: 12px;
   font-size: 0.9rem;
+  align-items: center;
+}
+
+.diagnostics {
+  margin-bottom: 18px;
+}
+
+.diagnostics h3 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.status-stack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.status-stack .metric {
+  font-size: 0.82rem;
+  color: var(--muted);
+  font-weight: 600;
 }
 
 .payload details {
@@ -501,6 +525,21 @@ body {
 .status-pill[data-status="not_tested"] {
   background: rgba(60, 64, 60, 0.08);
   color: #6b6f6c;
+}
+
+.status-pill[data-status="denied"] {
+  background: rgba(60, 64, 60, 0.12);
+  color: #4b4b4b;
+}
+
+.status-pill[data-status="timeout"] {
+  background: rgba(242, 139, 45, 0.2);
+  color: #9b4a16;
+}
+
+.status-pill[data-status="scheduled"] {
+  background: rgba(47, 124, 92, 0.15);
+  color: #1b4c38;
 }
 
 .payload pre {

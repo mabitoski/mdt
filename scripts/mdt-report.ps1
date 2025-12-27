@@ -6,20 +6,46 @@ param(
   [int]$TimeoutSec = 15,
   [int]$DiskTestTimeoutSec = 180,
   [int]$MemTestTimeoutSec = 180,
+  [int]$CpuTestTimeoutSec = 180,
+  [int]$GpuTestTimeoutSec = 240,
+  [int]$FsCheckTimeoutSec = 120,
+  [ValidateSet('auto', 'none', 'scan')][string]$FsCheckMode = 'auto',
+  [ValidateSet('none', 'schedule')][string]$MemDiagMode = 'none',
   [int]$StressLoops = 2,
+  [string]$CpuTestPath = $env:MDT_CPU_TEST_PATH,
+  [string[]]$CpuTestArguments = $env:MDT_CPU_TEST_ARGS,
+  [string]$GpuTestPath = $env:MDT_GPU_TEST_PATH,
+  [string[]]$GpuTestArguments = $env:MDT_GPU_TEST_ARGS,
+  [string]$NetworkTestPath = $env:MDT_IPERF_PATH,
+  [string]$NetworkTestServer = $env:MDT_IPERF_SERVER,
+  [int]$NetworkTestPort = 5201,
+  [int]$NetworkTestSeconds = 10,
+  [int]$NetworkTestTimeoutSec = 40,
+  [ValidateSet('download', 'upload', 'both')][string]$NetworkTestDirection = 'download',
+  [string[]]$NetworkTestExtraArgs = $env:MDT_IPERF_ARGS,
+  [string]$NetworkPingTarget = $env:MDT_PING_TARGET,
+  [int]$NetworkPingCount = 2,
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [int]$CameraTestTimeoutSec = 20,
   [int]$MsinfoTimeoutSec = 0,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
   [string]$LogPath,
+  [string]$KeyboardCapturePath,
+  [string]$KeyboardCaptureLogPath,
+  [string]$KeyboardCaptureConfigDir,
+  [string]$KeyboardCaptureLayout,
+  [string]$KeyboardCaptureLayoutConfig,
+  [switch]$KeyboardCaptureBlockInput,
+  [switch]$SkipKeyboardCapture,
+  [switch]$SkipStressScript,
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.2.12'
+$scriptVersion = '1.3.1'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
-  $ApiUrl = 'http://10.1.142.28:3000/api/ingest'
+  $ApiUrl = 'http://192.168.1.36:3000/api/ingest'
 }
 
 if (-not $LogPath) {
@@ -41,6 +67,69 @@ function Write-Log {
   }
 }
 
+function Normalize-ArgumentList {
+  param([string[]]$Values)
+
+  if (-not $Values -or $Values.Count -eq 0) { return @() }
+  if ($Values.Count -eq 1) {
+    $single = $Values[0]
+    if (-not $single) { return @() }
+    return ($single -split '\s+') | Where-Object { $_ -ne '' }
+  }
+  return $Values
+}
+
+function Resolve-KeyboardCapturePath {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return Join-Path $PSScriptRoot 'keyboard_capture.ps1'
+  }
+  if ([System.IO.Path]::IsPathRooted($Value)) {
+    return $Value
+  }
+  return Join-Path (Get-Location) $Value
+}
+
+function Start-KeyboardCapture {
+  param(
+    [string]$ScriptPath,
+    [string]$LogPath,
+    [string]$ConfigDir,
+    [string]$Layout,
+    [string]$LayoutConfig,
+    [switch]$BlockInput
+  )
+
+  if (-not $ScriptPath) { return $false }
+  if (-not (Test-Path $ScriptPath)) {
+    Write-Log "Keyboard capture script not found: $ScriptPath" 'WARN'
+    return $false
+  }
+
+  $psCmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
+  if (-not $psCmd) {
+    Write-Log 'powershell.exe not found for keyboard capture' 'WARN'
+    return $false
+  }
+
+  $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath)
+  if ($LogPath) { $args += @('-LogPath', $LogPath) }
+  if ($ConfigDir) { $args += @('-ConfigDir', $ConfigDir) }
+  if ($Layout) { $args += @('-Layout', $Layout) }
+  if ($LayoutConfig) { $args += @('-LayoutConfig', $LayoutConfig) }
+  if ($BlockInput) { $args += '-BlockInput' }
+
+  try {
+    Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal | Out-Null
+    Write-Log "Keyboard capture launched: $ScriptPath"
+    return $true
+  } catch {
+    Write-Log "Keyboard capture launch failed: $($_.Exception.Message)" 'WARN'
+    return $false
+  }
+}
+
 function Test-IsAdmin {
   try {
     $current = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -53,6 +142,49 @@ function Test-IsAdmin {
 
 Write-Log "Start script version $scriptVersion"
 Write-Log "ApiUrl=$ApiUrl Category=$Category TestMode=$TestMode"
+
+if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
+  $stressScriptPath = Join-Path $PSScriptRoot 'mdt-stress.ps1'
+  if (Test-Path $stressScriptPath) {
+    Write-Log "Delegating stress run to mdt-stress.ps1"
+    $delegateParams = @{
+      ApiUrl = $ApiUrl
+      Category = $Category
+      TimeoutSec = $TimeoutSec
+      DiskTestTimeoutSec = $DiskTestTimeoutSec
+      MemTestTimeoutSec = $MemTestTimeoutSec
+      CpuTestTimeoutSec = $CpuTestTimeoutSec
+      GpuTestTimeoutSec = $GpuTestTimeoutSec
+      FsCheckTimeoutSec = $FsCheckTimeoutSec
+      FsCheckMode = $FsCheckMode
+      MemDiagMode = $MemDiagMode
+      StressLoops = $StressLoops
+      CpuTestPath = $CpuTestPath
+      CpuTestArguments = $CpuTestArguments
+      GpuTestPath = $GpuTestPath
+      GpuTestArguments = $GpuTestArguments
+      NetworkTestPath = $NetworkTestPath
+      NetworkTestServer = $NetworkTestServer
+      NetworkTestPort = $NetworkTestPort
+      NetworkTestSeconds = $NetworkTestSeconds
+      NetworkTestTimeoutSec = $NetworkTestTimeoutSec
+      NetworkTestDirection = $NetworkTestDirection
+      NetworkTestExtraArgs = $NetworkTestExtraArgs
+      NetworkPingTarget = $NetworkPingTarget
+      NetworkPingCount = $NetworkPingCount
+      CameraTestPath = $CameraTestPath
+      CameraTestTimeoutSec = $CameraTestTimeoutSec
+      MsinfoTimeoutSec = $MsinfoTimeoutSec
+      MacPreference = $MacPreference
+      LogPath = $LogPath
+    }
+    if ($SkipTlsValidation) { $delegateParams.SkipTlsValidation = $true }
+    & $stressScriptPath @delegateParams
+    exit $LASTEXITCODE
+  } else {
+    Write-Log "Stress script not found: $stressScriptPath" 'WARN'
+  }
+}
 
 $script:IsAdmin = Test-IsAdmin
 Write-Log "IsAdmin=$script:IsAdmin"
@@ -805,10 +937,19 @@ function Invoke-ExternalTest {
     [string]$Name = 'External'
   )
 
-  if (-not $Path -or -not (Test-Path $Path)) { return $null }
+  if (-not $Path) { return $null }
+  $resolvedPath = $Path
+  if (-not (Test-Path $resolvedPath)) {
+    $cmd = Get-Command $Path -ErrorAction SilentlyContinue
+    if ($cmd) {
+      $resolvedPath = $cmd.Source
+    } else {
+      return $null
+    }
+  }
 
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $Path
+  $psi.FileName = $resolvedPath
   if ($Arguments -and $Arguments.Count -gt 0) {
     $psi.Arguments = ($Arguments -join ' ')
   }
@@ -841,6 +982,71 @@ function Invoke-ExternalTest {
   return 'nok'
 }
 
+function Invoke-ExternalCommand {
+  param(
+    [string]$Path,
+    [string[]]$Arguments = @(),
+    [int]$TimeoutSec = 20,
+    [string]$Name = 'External'
+  )
+
+  if (-not $Path) {
+    return @{ status = 'absent'; output = $null; exitCode = $null }
+  }
+
+  $resolvedPath = $Path
+  if (-not (Test-Path $resolvedPath)) {
+    $cmd = Get-Command $Path -ErrorAction SilentlyContinue
+    if ($cmd) {
+      $resolvedPath = $cmd.Source
+    } else {
+      return @{ status = 'absent'; output = $null; exitCode = $null }
+    }
+  }
+
+  if (-not (Test-Path $resolvedPath)) {
+    return @{ status = 'absent'; output = $null; exitCode = $null }
+  }
+
+  $args = Normalize-ArgumentList $Arguments
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $resolvedPath
+  if ($args -and $args.Count -gt 0) {
+    $psi.Arguments = ($args -join ' ')
+  }
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  try {
+    [void]$proc.Start()
+  } catch {
+    Write-Log "$Name command start failed: $($_.Exception.Message)" 'WARN'
+    return @{ status = 'nok'; output = $null; exitCode = $null }
+  }
+
+  try {
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+      try { $proc.Kill() } catch { }
+      Write-Log "$Name command timeout after ${TimeoutSec}s" 'WARN'
+      return @{ status = 'timeout'; output = $null; exitCode = $null }
+    }
+  } catch {
+    Write-Log "$Name command wait failed: $($_.Exception.Message)" 'WARN'
+    return @{ status = 'nok'; output = $null; exitCode = $null }
+  }
+
+  $output = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
+  $status = if ($proc.ExitCode -eq 0) { 'ok' } else { 'nok' }
+  if ($status -ne 'ok') {
+    Write-Log "$Name command failed with exit code $($proc.ExitCode)" 'WARN'
+  }
+  return @{ status = $status; output = $output; exitCode = $proc.ExitCode }
+}
+
 function Run-WinsatLoop {
   param(
     [string[]]$Arguments,
@@ -866,6 +1072,259 @@ function Run-WinsatLoop {
   }
 
   return @{ status = $resultStatus; mbps = $bestMbps }
+}
+
+function Invoke-WinsatScore {
+  param(
+    [string[]]$Arguments,
+    [int]$TimeoutSec
+  )
+
+  $cmd = Get-Command winsat -ErrorAction SilentlyContinue
+  if (-not $cmd) { return @{ status = 'absent'; score = $null } }
+  if (-not $script:IsAdmin) {
+    Write-Log 'WinSAT skipped (admin required)' 'WARN'
+    return @{ status = 'denied'; score = $null }
+  }
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $cmd.Source
+  $psi.Arguments = ($Arguments -join ' ')
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  try {
+    [void]$proc.Start()
+  } catch {
+    Write-Log "WinSAT start failed: $($_.Exception.Message)" 'WARN'
+    return @{ status = 'denied'; score = $null }
+  }
+
+  try {
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+      try { $proc.Kill() } catch { }
+      return @{ status = 'timeout'; score = $null }
+    }
+  } catch {
+    Write-Log "WinSAT wait failed: $($_.Exception.Message)" 'WARN'
+    return @{ status = 'nok'; score = $null }
+  }
+
+  $output = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
+  $status = if ($proc.ExitCode -eq 0) { 'ok' } else { 'nok' }
+
+  $score = $null
+  $match = [regex]::Match(
+    $output,
+    '(?i)(?:D3D|Graphics|GPU|Direct3D)\s*(?:Score|Rating)?\s*[:=]\s*([0-9]+(?:[\\.,][0-9]+)?)'
+  )
+  if ($match.Success) {
+    $raw = $match.Groups[1].Value.Replace(',', '.')
+    $score = [double]::Parse($raw, [System.Globalization.CultureInfo]::InvariantCulture)
+  }
+
+  return @{ status = $status; score = $score }
+}
+
+function Get-DefaultGateway {
+  $configs = Get-CimInstanceSafe -ClassName 'Win32_NetworkAdapterConfiguration'
+  foreach ($cfg in $configs) {
+    if (-not $cfg.DefaultIPGateway) { continue }
+    foreach ($gw in $cfg.DefaultIPGateway) {
+      if ($gw -and $gw -ne '0.0.0.0') {
+        return $gw
+      }
+    }
+  }
+  return $null
+}
+
+function Test-NetworkPing {
+  param(
+    [string]$Target,
+    [int]$Count = 2
+  )
+
+  if (-not $Target) { return @{ status = 'not_tested'; target = $null } }
+
+  if (-not (Get-Command Test-Connection -ErrorAction SilentlyContinue)) {
+    return @{ status = 'absent'; target = $Target }
+  }
+
+  try {
+    $ok = Test-Connection -ComputerName $Target -Count $Count -Quiet -ErrorAction Stop
+    return @{ status = if ($ok) { 'ok' } else { 'nok' }; target = $Target }
+  } catch {
+    Write-Log "Ping failed: $($_.Exception.Message)" 'WARN'
+    return @{ status = 'nok'; target = $Target }
+  }
+}
+
+function Get-IperfMbps {
+  param(
+    [object]$Json,
+    [string]$Direction
+  )
+
+  if (-not $Json -or -not $Json.end) { return $null }
+  $sum = if ($Direction -eq 'download') { $Json.end.sum_received } else { $Json.end.sum_sent }
+  if (-not $sum) { $sum = $Json.end.sum }
+  if (-not $sum) { return $null }
+  if ($sum.bits_per_second -eq $null) { return $null }
+  return [math]::Round(($sum.bits_per_second / 1e6), 1)
+}
+
+function Invoke-IperfTest {
+  param(
+    [string]$Path,
+    [string]$Server,
+    [int]$Port,
+    [int]$Seconds,
+    [string]$Direction,
+    [int]$TimeoutSec,
+    [string[]]$ExtraArgs
+  )
+
+  if (-not $Path -or -not $Server) {
+    return @{ status = 'not_tested'; downMbps = $null; upMbps = $null }
+  }
+
+  $baseArgs = @('-J', '-c', $Server, '-p', $Port, '-t', $Seconds)
+  $extra = Normalize-ArgumentList $ExtraArgs
+
+  $results = @{ status = 'ok'; downMbps = $null; upMbps = $null }
+
+  function Run-IperfOnce {
+    param([string]$Mode)
+    $args = @($baseArgs)
+    if ($Mode -eq 'download') { $args += '-R' }
+    if ($extra -and $extra.Count -gt 0) { $args += $extra }
+    $name = "iPerf $Mode"
+    $res = Invoke-ExternalCommand -Path $Path -Arguments $args -TimeoutSec $TimeoutSec -Name $name
+    if ($res.status -ne 'ok') {
+      $results.status = if ($res.status -eq 'absent') { 'not_tested' } else { $res.status }
+      return $null
+    }
+    try {
+      return $res.output | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+      Write-Log "$name JSON parse failed: $($_.Exception.Message)" 'WARN'
+      $results.status = 'nok'
+      return $null
+    }
+  }
+
+  if ($Direction -eq 'both') {
+    $upJson = Run-IperfOnce -Mode 'upload'
+    if ($upJson) { $results.upMbps = Get-IperfMbps -Json $upJson -Direction 'upload' }
+    $downJson = Run-IperfOnce -Mode 'download'
+    if ($downJson) { $results.downMbps = Get-IperfMbps -Json $downJson -Direction 'download' }
+  } elseif ($Direction -eq 'download') {
+    $downJson = Run-IperfOnce -Mode 'download'
+    if ($downJson) { $results.downMbps = Get-IperfMbps -Json $downJson -Direction 'download' }
+  } else {
+    $upJson = Run-IperfOnce -Mode 'upload'
+    if ($upJson) { $results.upMbps = Get-IperfMbps -Json $upJson -Direction 'upload' }
+  }
+
+  if ($results.downMbps -eq $null -and $results.upMbps -eq $null -and $results.status -eq 'ok') {
+    $results.status = 'nok'
+  }
+
+  return $results
+}
+
+function Invoke-FsCheck {
+  param(
+    [string]$DriveLetter,
+    [int]$TimeoutSec
+  )
+
+  $cmd = Get-Command chkdsk -ErrorAction SilentlyContinue
+  if (-not $cmd) { return @{ status = 'absent' } }
+  if (-not $script:IsAdmin) {
+    Write-Log 'chkdsk skipped (admin required)' 'WARN'
+    return @{ status = 'denied' }
+  }
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $cmd.Source
+  $psi.Arguments = "$DriveLetter /scan"
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  try {
+    [void]$proc.Start()
+  } catch {
+    Write-Log "chkdsk start failed: $($_.Exception.Message)" 'WARN'
+    return @{ status = 'nok' }
+  }
+
+  try {
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+      try { $proc.Kill() } catch { }
+      return @{ status = 'timeout' }
+    }
+  } catch {
+    Write-Log "chkdsk wait failed: $($_.Exception.Message)" 'WARN'
+    return @{ status = 'nok' }
+  }
+
+  $output = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
+  if ($proc.ExitCode -eq 0) {
+    return @{ status = 'ok'; output = $output }
+  }
+  return @{ status = 'nok'; output = $output }
+}
+
+function Get-ThermalInfo {
+  $zones = Get-CimInstanceSafe -Namespace 'root\\wmi' -ClassName 'MSAcpi_ThermalZoneTemperature'
+  if (-not $zones -or $zones.Count -eq 0) {
+    return @{ status = 'absent'; maxC = $null; zones = @() }
+  }
+
+  $items = @()
+  foreach ($zone in $zones) {
+    if ($zone.CurrentTemperature -eq $null) { continue }
+    $tempC = [math]::Round(($zone.CurrentTemperature / 10) - 273.15, 1)
+    $items += [ordered]@{
+      name = $zone.InstanceName
+      temperatureC = $tempC
+    }
+  }
+
+  if ($items.Count -eq 0) {
+    return @{ status = 'absent'; maxC = $null; zones = @() }
+  }
+
+  $maxC = ($items | Measure-Object -Property temperatureC -Maximum).Maximum
+  return @{ status = 'ok'; maxC = $maxC; zones = $items }
+}
+
+function Invoke-MemoryDiagnostic {
+  param([string]$Mode)
+
+  if ($Mode -eq 'none') { return 'not_tested' }
+  $cmd = Get-Command mdsched -ErrorAction SilentlyContinue
+  if (-not $cmd) { return 'absent' }
+  if (-not $script:IsAdmin) {
+    Write-Log 'Memory diagnostic scheduling skipped (admin required)' 'WARN'
+    return 'denied'
+  }
+
+  try {
+    & $cmd.Source /f | Out-Null
+    return 'scheduled'
+  } catch {
+    Write-Log "Memory diagnostic schedule failed: $($_.Exception.Message)" 'WARN'
+    return 'nok'
+  }
 }
 
 function Get-PowerPlanName {
@@ -1133,6 +1592,39 @@ $diskReadTest = Run-WinsatLoop -Arguments @('disk', '-seq', '-read', '-drive', $
 $diskWriteTest = Run-WinsatLoop -Arguments @('disk', '-seq', '-write', '-drive', $driveLetter) -Loops $testLoops -TimeoutSec $DiskTestTimeoutSec
 $memTest = Run-WinsatLoop -Arguments @('mem') -Loops $testLoops -TimeoutSec $MemTestTimeoutSec
 
+$cpuTest = $null
+$gpuTest = $null
+if ($testLoops -gt 0) {
+  $cpuTest = Run-WinsatLoop -Arguments @('cpu') -Loops $testLoops -TimeoutSec $CpuTestTimeoutSec
+  $gpuTest = Invoke-WinsatScore -Arguments @('d3d') -TimeoutSec $GpuTestTimeoutSec
+}
+
+$cpuExternalStatus = $null
+if ($CpuTestPath) {
+  $cpuExternalStatus = Invoke-ExternalTest -Path $CpuTestPath -Arguments (Normalize-ArgumentList $CpuTestArguments) -TimeoutSec $CpuTestTimeoutSec -Name 'CPU'
+}
+
+$gpuExternalStatus = $null
+if ($GpuTestPath) {
+  $gpuExternalStatus = Invoke-ExternalTest -Path $GpuTestPath -Arguments (Normalize-ArgumentList $GpuTestArguments) -TimeoutSec $GpuTestTimeoutSec -Name 'GPU'
+}
+
+$memDiagStatus = Invoke-MemoryDiagnostic -Mode $MemDiagMode
+
+$networkPingTargetValue = if ($NetworkPingTarget) { $NetworkPingTarget } else { Get-DefaultGateway }
+$networkPingResult = Test-NetworkPing -Target $networkPingTargetValue -Count $NetworkPingCount
+$iperfResult = Invoke-IperfTest `
+  -Path $NetworkTestPath `
+  -Server $NetworkTestServer `
+  -Port $NetworkTestPort `
+  -Seconds $NetworkTestSeconds `
+  -Direction $NetworkTestDirection `
+  -TimeoutSec $NetworkTestTimeoutSec `
+  -ExtraArgs $NetworkTestExtraArgs
+
+$runFsCheck = $FsCheckMode -eq 'scan' -or ($FsCheckMode -eq 'auto' -and $TestMode -eq 'stress')
+$fsCheckResult = if ($runFsCheck) { Invoke-FsCheck -DriveLetter $driveLetter -TimeoutSec $FsCheckTimeoutSec } else { @{ status = 'not_tested' } }
+
 $powerPlan = Get-PowerPlanName
 $bootMode = Get-BootMode
 $secureBoot = Get-SecureBootStatus
@@ -1174,6 +1666,7 @@ $cpuInfo = [ordered]@{
 }
 
 $video = Get-CimInstanceSafe -ClassName 'Win32_VideoController'
+$gpuStatus = Get-StatusFromDevices $video
 $primaryVideo = $video | Where-Object { $_.CurrentHorizontalResolution } | Select-Object -First 1
 if (-not $primaryVideo) { $primaryVideo = $video | Select-Object -First 1 }
 $gpuInfo = [ordered]@{
@@ -1226,6 +1719,7 @@ foreach ($module in $memoryModules) {
 }
 
 $displayInfo = Get-DisplayInfo
+$thermalInfo = Get-ThermalInfo
 
 $biosReleaseDate = $null
 if ($biosInfo -and $biosInfo.ReleaseDate) {
@@ -1252,6 +1746,27 @@ if ($memTest) {
   $tests.ramTest = $memTest.status
   if ($memTest.mbps -ne $null) { $tests.ramMBps = $memTest.mbps }
 }
+if ($cpuTest) {
+  $tests.cpuTest = $cpuTest.status
+  if ($cpuTest.mbps -ne $null) { $tests.cpuMBps = $cpuTest.mbps }
+}
+if ($gpuTest) {
+  $tests.gpuTest = $gpuTest.status
+  if ($gpuTest.score -ne $null) { $tests.gpuScore = $gpuTest.score }
+}
+if ($cpuExternalStatus) { $tests.cpuStress = $cpuExternalStatus }
+if ($gpuExternalStatus) { $tests.gpuStress = $gpuExternalStatus }
+if ($networkPingResult) {
+  $tests.networkPing = $networkPingResult.status
+  if ($networkPingResult.target) { $tests.networkPingTarget = $networkPingResult.target }
+}
+if ($iperfResult) {
+  $tests.network = $iperfResult.status
+  if ($iperfResult.downMbps -ne $null) { $tests.networkDownMbps = $iperfResult.downMbps }
+  if ($iperfResult.upMbps -ne $null) { $tests.networkUpMbps = $iperfResult.upMbps }
+}
+if ($fsCheckResult) { $tests.fsCheck = $fsCheckResult.status }
+if ($memDiagStatus) { $tests.memDiag = $memDiagStatus }
 
 $diag.diagnosticsPerformed = $tests.Keys.Count
 
@@ -1323,6 +1838,7 @@ $payload.memory = [ordered]@{
 
 if ($memorySlots.Count -gt 0) { $payload.memorySlots = $memorySlots }
 if ($displayInfo.Count -gt 0) { $payload.display = $displayInfo }
+if ($thermalInfo) { $payload.thermal = $thermalInfo }
 if ($tests.Count -gt 0) { $payload.tests = $tests }
 
 $components = @{}
@@ -1335,6 +1851,16 @@ if ($diskSmart) { $components.diskSmart = $diskSmart }
 if ($tests.diskRead) { $components.diskReadTest = $tests.diskRead }
 if ($tests.diskWrite) { $components.diskWriteTest = $tests.diskWrite }
 if ($tests.ramTest) { $components.ramTest = $tests.ramTest }
+if ($tests.cpuTest) { $components.cpuTest = $tests.cpuTest }
+if ($tests.gpuTest) { $components.gpuTest = $tests.gpuTest }
+if ($tests.cpuStress) { $components.cpuStress = $tests.cpuStress }
+if ($tests.gpuStress) { $components.gpuStress = $tests.gpuStress }
+if ($tests.network) { $components.networkTest = $tests.network }
+if ($tests.networkPing) { $components.networkPing = $tests.networkPing }
+if ($tests.fsCheck) { $components.fsCheck = $tests.fsCheck }
+if ($tests.memDiag) { $components.memDiag = $tests.memDiag }
+if ($gpuStatus) { $components.gpu = $gpuStatus }
+if ($thermalInfo -and $thermalInfo.status) { $components.thermal = $thermalInfo.status }
 
 if ($components.Count -gt 0) {
   $payload.components = $components
@@ -1344,9 +1870,11 @@ $json = $payload | ConvertTo-Json -Depth 10
 
 Write-Log "Payload size=$($json.Length)"
 
+$ingestOk = $false
 try {
   $response = Invoke-RestMethod -Uri $ApiUrl -Method Post -ContentType 'application/json' -Body $json -TimeoutSec $TimeoutSec
   Write-Log 'Ingest OK'
+  $ingestOk = $true
   Write-Output $response
 } catch {
   Write-Log $_.Exception.Message 'ERROR'
@@ -1355,4 +1883,20 @@ try {
   }
   Write-Error $_
   exit 1
+}
+
+if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
+  $keyboardScript = Resolve-KeyboardCapturePath -Value $KeyboardCapturePath
+  $layoutValue = if ($KeyboardCaptureLayout) { $KeyboardCaptureLayout } else { $null }
+  $layoutConfigValue = if ($KeyboardCaptureLayoutConfig) { $KeyboardCaptureLayoutConfig } else { $null }
+  $configDirValue = if ($KeyboardCaptureConfigDir) { $KeyboardCaptureConfigDir } else { $null }
+  $logPathValue = if ($KeyboardCaptureLogPath) { $KeyboardCaptureLogPath } else { $null }
+  Write-Log 'Launching keyboard capture for laptop'
+  Start-KeyboardCapture `
+    -ScriptPath $keyboardScript `
+    -LogPath $logPathValue `
+    -ConfigDir $configDirValue `
+    -Layout $layoutValue `
+    -LayoutConfig $layoutConfigValue `
+    -BlockInput:$KeyboardCaptureBlockInput
 }

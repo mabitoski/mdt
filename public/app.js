@@ -30,8 +30,56 @@ const statusLabels = {
   ok: 'OK',
   nok: 'NOK',
   absent: 'Non present',
-  not_tested: 'Non teste'
+  not_tested: 'Non teste',
+  denied: 'Refuse',
+  timeout: 'Timeout',
+  scheduled: 'Planifie',
+  unknown: '--'
 };
+
+const componentLabels = {
+  diskSmart: 'SMART disque',
+  diskReadTest: 'Lecture disque',
+  diskWriteTest: 'Ecriture disque',
+  ramTest: 'RAM (WinSAT)',
+  cpuTest: 'CPU (WinSAT)',
+  gpuTest: 'GPU (WinSAT)',
+  cpuStress: 'CPU (stress)',
+  gpuStress: 'GPU (stress)',
+  networkTest: 'iPerf',
+  networkPing: 'Ping',
+  fsCheck: 'Check disque',
+  memDiag: 'Diag memoire',
+  thermal: 'Thermique',
+  gpu: 'GPU',
+  usb: 'Ports USB',
+  keyboard: 'Clavier',
+  camera: 'Camera',
+  pad: 'Pave tactile',
+  badgeReader: 'Lecteur badge'
+};
+
+const componentOrder = [
+  'diskSmart',
+  'diskReadTest',
+  'diskWriteTest',
+  'ramTest',
+  'cpuTest',
+  'gpuTest',
+  'cpuStress',
+  'gpuStress',
+  'networkTest',
+  'networkPing',
+  'fsCheck',
+  'memDiag',
+  'thermal',
+  'gpu',
+  'usb',
+  'keyboard',
+  'camera',
+  'pad',
+  'badgeReader'
+];
 
 const delayClasses = [
   'delay-0',
@@ -56,6 +104,26 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function normalizeStatusKey(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'ok' : 'nok';
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return 'ok';
+    }
+    if (value === 0) {
+      return 'nok';
+    }
+    return null;
+  }
+  const key = String(value).trim().toLowerCase();
+  return statusLabels[key] ? key : null;
 }
 
 function normalizeCategory(value) {
@@ -158,10 +226,53 @@ function formatBatteryHealth(value) {
   return `${Math.round(value)}%`;
 }
 
+function formatMetric(value, unit) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+  return `${rounded} ${unit}`;
+}
+
+function formatMbps(value) {
+  return formatMetric(value, 'MB/s');
+}
+
+function formatNetMbps(value) {
+  return formatMetric(value, 'Mb/s');
+}
+
+function formatTemp(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+  return `${rounded} C`;
+}
+
+function formatScore(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+  return `Score ${rounded}`;
+}
+
 function renderStatus(status) {
-  const normalized = statusLabels[status] ? status : 'unknown';
-  const label = statusLabels[status] || '--';
+  const normalized = normalizeStatusKey(status) || 'unknown';
+  const label = statusLabels[normalized] || '--';
   return `<strong class="status-pill" data-status="${normalized}">${label}</strong>`;
+}
+
+function renderStatusValue(value) {
+  const statusKey = normalizeStatusKey(value);
+  if (statusKey) {
+    return renderStatus(statusKey);
+  }
+  if (value == null || value === '') {
+    return '<strong>--</strong>';
+  }
+  return `<strong>${escapeHtml(value)}</strong>`;
 }
 
 function updateStats() {
@@ -227,6 +338,92 @@ function sortMachines(list) {
   return sorted;
 }
 
+function buildDiagnosticsHtml(detail) {
+  const payload =
+    detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const tests =
+    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+      ? payload.tests
+      : null;
+  const thermal =
+    payload && payload.thermal && typeof payload.thermal === 'object' && !Array.isArray(payload.thermal)
+      ? payload.thermal
+      : null;
+
+  const rows = [];
+
+  function addRow(label, status, extra) {
+    const hasStatus = status !== undefined && status !== null && status !== '';
+    const statusHtml = hasStatus ? renderStatusValue(status) : '';
+    const extraHtml = extra ? `<span class="metric">${escapeHtml(extra)}</span>` : '';
+    const content = statusHtml || extraHtml ? `<div class="status-stack">${statusHtml}${extraHtml}</div>` : '<strong>--</strong>';
+    rows.push(`
+      <div class="component-row">
+        <span>${escapeHtml(label)}</span>
+        ${content}
+      </div>
+    `);
+  }
+
+  if (tests) {
+    if (tests.diskRead || tests.diskReadMBps != null) {
+      addRow('Lecture disque', tests.diskRead, formatMbps(tests.diskReadMBps));
+    }
+    if (tests.diskWrite || tests.diskWriteMBps != null) {
+      addRow('Ecriture disque', tests.diskWrite, formatMbps(tests.diskWriteMBps));
+    }
+    if (tests.ramTest || tests.ramMBps != null) {
+      addRow('RAM (WinSAT)', tests.ramTest, formatMbps(tests.ramMBps));
+    }
+    if (tests.cpuTest || tests.cpuMBps != null) {
+      addRow('CPU (WinSAT)', tests.cpuTest, formatMbps(tests.cpuMBps));
+    }
+    if (tests.gpuTest || tests.gpuScore != null) {
+      addRow('GPU (WinSAT)', tests.gpuTest, formatScore(tests.gpuScore));
+    }
+    if (tests.cpuStress) {
+      addRow('CPU (stress)', tests.cpuStress, null);
+    }
+    if (tests.gpuStress) {
+      addRow('GPU (stress)', tests.gpuStress, null);
+    }
+    if (tests.networkPing || tests.networkPingTarget) {
+      addRow('Ping', tests.networkPing, tests.networkPingTarget || null);
+    }
+    if (tests.network || tests.networkDownMbps != null || tests.networkUpMbps != null) {
+      const parts = [];
+      const down = formatNetMbps(tests.networkDownMbps);
+      const up = formatNetMbps(tests.networkUpMbps);
+      if (down) { parts.push(`↓ ${down}`); }
+      if (up) { parts.push(`↑ ${up}`); }
+      addRow('iPerf', tests.network, parts.length ? parts.join(' · ') : null);
+    }
+    if (tests.fsCheck) {
+      addRow('Check disque', tests.fsCheck, null);
+    }
+    if (tests.memDiag) {
+      addRow('Diag memoire', tests.memDiag, null);
+    }
+  }
+
+  if (thermal && (thermal.status || thermal.maxC != null)) {
+    addRow('Thermique', thermal.status, formatTemp(thermal.maxC));
+  }
+
+  if (!rows.length) {
+    return '';
+  }
+
+  return `
+    <div class="diagnostics">
+      <h3>Diagnostics et performances</h3>
+      <div class="component-list diagnostic-list">
+        ${rows.join('')}
+      </div>
+    </div>
+  `;
+}
+
 function renderList() {
   const filtered = applyFilters();
 
@@ -290,14 +487,24 @@ function renderDetail() {
       ? detail.components
       : {};
   const componentEntries = Object.entries(components);
+  const componentOrderMap = new Map(componentOrder.map((key, index) => [key, index]));
+  const sortedComponentEntries = componentEntries.sort((a, b) => {
+    const orderA = componentOrderMap.has(a[0]) ? componentOrderMap.get(a[0]) : 999;
+    const orderB = componentOrderMap.has(b[0]) ? componentOrderMap.get(b[0]) : 999;
+    if (orderA !== orderB) {
+      return orderA - orderB;
+    }
+    return a[0].localeCompare(b[0], 'fr');
+  });
 
-  const componentHtml = componentEntries.length
-    ? componentEntries
+  const componentHtml = sortedComponentEntries.length
+    ? sortedComponentEntries
         .map(([key, value]) => {
+          const label = componentLabels[key] || key;
           return `
             <div class="component-row">
-              <span>${escapeHtml(key)}</span>
-              <strong>${escapeHtml(value)}</strong>
+              <span>${escapeHtml(label)}</span>
+              ${renderStatusValue(value)}
             </div>
           `;
         })
@@ -348,6 +555,8 @@ function renderDetail() {
     ? `<pre>${escapeHtml(JSON.stringify(detail.payload, null, 2))}</pre>`
     : '<div class="empty">Payload non disponible.</div>';
 
+  const diagnosticsHtml = buildDiagnosticsHtml(detail);
+
   detailEl.innerHTML = `
     <div class="detail-header">
       <h2 class="detail-title">${title}</h2>
@@ -385,6 +594,7 @@ function renderDetail() {
       </div>
     </div>
     ${hardwareHtml}
+    ${diagnosticsHtml}
     <div class="components">
       <h3>Etat des composants</h3>
       <div class="component-list">${componentHtml}</div>

@@ -142,6 +142,8 @@ Les scripts sont dans `scripts/` :
 - `mdt-report.ps1` : detection auto de la categorie + tests materiel
 - `mdt-laptop.ps1` : force la categorie `laptop`
 - `mdt-desktop.ps1` : force la categorie `desktop`
+- `mdt-stress.ps1` : lance les tests en mode `stress` (boucles WinSAT)
+- `keyboard_capture.ps1` : outil graphique pour valider le clavier (Windows)
 
 Exemples :
 
@@ -149,6 +151,7 @@ Exemples :
 .\scripts\mdt-report.ps1 -ApiUrl "http://serveur-mdt:3000/api/ingest"
 .\scripts\mdt-laptop.ps1 -ApiUrl "http://serveur-mdt:3000/api/ingest" -TestMode quick
 .\scripts\mdt-desktop.ps1 -ApiUrl "http://serveur-mdt:3000/api/ingest" -TestMode stress
+.\scripts\mdt-stress.ps1 -ApiUrl "http://serveur-mdt:3000/api/ingest" -Category laptop
 ```
 
 Options utiles :
@@ -156,12 +159,30 @@ Options utiles :
 - `-TimeoutSec 15` : timeout HTTP
 - `-TestMode` : `none`, `quick`, `stress` (par defaut `quick`)
 - `-DiskTestTimeoutSec` / `-MemTestTimeoutSec` : timeout des tests WinSAT
+- `-CpuTestTimeoutSec` / `-GpuTestTimeoutSec` : timeout WinSAT CPU/GPU
 - `-StressLoops` : nombre de boucles en mode `stress`
+- `-FsCheckMode` : `auto` (stress uniquement), `scan`, `none`
+- `-FsCheckTimeoutSec` : timeout du `chkdsk /scan`
+- `-MemDiagMode` : `none` ou `schedule` (planifie `mdsched`)
 - `-CameraTestPath` : chemin du binaire de test camera (exit code 0 = ok)
 - `-CameraTestTimeoutSec` : timeout du test camera (defaut `20`)
+- `-CpuTestPath` / `-GpuTestPath` : binaire externe de stress CPU/GPU (optionnel)
+- `-CpuTestArguments` / `-GpuTestArguments` : arguments des binaires externes
+- `-NetworkTestPath` : binaire `iperf3` (optionnel)
+- `-NetworkTestServer` / `-NetworkTestPort` : serveur iperf
+- `-NetworkTestSeconds` / `-NetworkTestTimeoutSec` : duree/timeout iperf
+- `-NetworkTestDirection` : `download`, `upload`, `both`
+- `-NetworkTestExtraArgs` : arguments supplementaires iperf
+- `-NetworkPingTarget` / `-NetworkPingCount` : ping rapide (par defaut gateway)
 - `-MsinfoTimeoutSec` : timeout de msinfo32 si fallback MAC (defaut `0`, desactive par defaut)
 - `-MacPreference` : `auto`, `ethernet`, `wifi`, `any` (defaut `auto`)
 - `-LogPath` : chemin du fichier de log (defaut `scripts/mdt-report.log`)
+- `-SkipKeyboardCapture` : ne lance pas `keyboard_capture.ps1` sur les laptops
+- `-KeyboardCapturePath` / `-KeyboardCaptureLogPath` / `-KeyboardCaptureConfigDir` : options du script clavier
+- `-KeyboardCaptureLayout` / `-KeyboardCaptureLayoutConfig` / `-KeyboardCaptureBlockInput` : layout et blocage des touches
+
+Notes clavier :
+- `mdt-report.ps1` lance `keyboard_capture.ps1` a la fin si la categorie est `laptop`.
 
 Notes tests :
 - Les tests utilisent WMI/CIM et WinSAT (disponible en OS complet).
