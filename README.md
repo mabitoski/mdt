@@ -146,6 +146,8 @@ Les scripts sont dans `scripts/` :
 - `mdt-desktop.ps1` : force la categorie `desktop`
 - `mdt-stress.ps1` : lance les tests en mode `stress` (boucles WinSAT)
 - `keyboard_capture.ps1` : outil graphique pour valider le clavier (Windows)
+- `camera_capture.py` : script camera (OpenCV) a compiler en exe
+- `build_camera_capture.ps1` : build `camera_capture.exe` via PyInstaller
 
 Exemples :
 
@@ -168,6 +170,7 @@ Options utiles :
 - `-MemDiagMode` : `none` ou `schedule` (planifie `mdsched`)
 - `-CameraTestPath` : chemin du binaire de test camera (exit code 0 = ok)
 - `-CameraTestTimeoutSec` : timeout du test camera (defaut `20`)
+- `-CameraTestArguments` : arguments du test camera (ou `MDT_CAMERA_TEST_ARGS`)
 - `-CpuTestPath` / `-GpuTestPath` : binaire externe de stress CPU/GPU (optionnel)
 - `-CpuTestArguments` / `-GpuTestArguments` : arguments des binaires externes
 - `-NetworkTestPath` : binaire `iperf3` (optionnel)
@@ -190,3 +193,13 @@ Notes clavier :
 Notes tests :
 - Les tests utilisent WMI/CIM et WinSAT (disponible en OS complet).
 - En WinPE, certains tests peuvent renvoyer `absent`.
+
+## Camera (exe)
+
+Compiler le script Python en exe (sur Windows, avec Python + OpenCV) :
+
+```powershell
+.\scripts\build_camera_capture.ps1
+```
+
+Cela produit `scripts\camera_capture.exe` utilise automatiquement par `mdt-report.ps1` si `-CameraTestPath` n'est pas fourni.

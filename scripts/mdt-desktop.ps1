@@ -25,6 +25,7 @@ param(
   [string]$NetworkPingTarget = $env:MDT_PING_TARGET,
   [int]$NetworkPingCount = 2,
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
+  [string[]]$CameraTestArguments = $env:MDT_CAMERA_TEST_ARGS,
   [int]$CameraTestTimeoutSec = 20,
   [int]$MsinfoTimeoutSec = 0,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
@@ -68,6 +69,7 @@ $params = @{
   NetworkPingTarget = $NetworkPingTarget
   NetworkPingCount = $NetworkPingCount
   CameraTestPath = $CameraTestPath
+  CameraTestArguments = $CameraTestArguments
   CameraTestTimeoutSec = $CameraTestTimeoutSec
   MsinfoTimeoutSec = $MsinfoTimeoutSec
   MacPreference = $MacPreference

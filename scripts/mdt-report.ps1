@@ -26,6 +26,7 @@ param(
   [string]$NetworkPingTarget = $env:MDT_PING_TARGET,
   [int]$NetworkPingCount = 2,
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
+  [string[]]$CameraTestArguments = $env:MDT_CAMERA_TEST_ARGS,
   [int]$CameraTestTimeoutSec = 20,
   [int]$MsinfoTimeoutSec = 0,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
@@ -42,7 +43,7 @@ param(
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.3.2'
+$scriptVersion = '1.3.3'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -174,6 +175,7 @@ if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
       NetworkPingTarget = $NetworkPingTarget
       NetworkPingCount = $NetworkPingCount
       CameraTestPath = $CameraTestPath
+      CameraTestArguments = $CameraTestArguments
       CameraTestTimeoutSec = $CameraTestTimeoutSec
       MsinfoTimeoutSec = $MsinfoTimeoutSec
       MacPreference = $MacPreference
@@ -1539,20 +1541,31 @@ $cameraDevices += Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPC
 $cameraPresence = Get-StatusFromDevices $cameraDevices
 $cameraTestStatus = $null
 $cameraStatus = $null
+$cameraTestPathValue = $CameraTestPath
+if (-not $cameraTestPathValue) {
+  $defaultCameraExe = Join-Path $PSScriptRoot 'camera_capture.exe'
+  if (Test-Path $defaultCameraExe) {
+    $cameraTestPathValue = $defaultCameraExe
+  }
+}
 if ($cameraPresence -eq 'absent' -or $cameraPresence -eq 'nok') {
   $cameraStatus = $cameraPresence
 } else {
-  if ($CameraTestPath -and -not (Test-Path $CameraTestPath)) {
-    Write-Log "Camera test binary not found: $CameraTestPath" 'WARN'
+  if ($cameraTestPathValue -and -not (Test-Path $cameraTestPathValue)) {
+    Write-Log "Camera test binary not found: $cameraTestPathValue" 'WARN'
   }
-  $cameraTestStatus = Invoke-ExternalTest -Path $CameraTestPath -TimeoutSec $CameraTestTimeoutSec -Name 'Camera'
+  $cameraTestStatus = Invoke-ExternalTest `
+    -Path $cameraTestPathValue `
+    -Arguments (Normalize-ArgumentList $CameraTestArguments) `
+    -TimeoutSec $CameraTestTimeoutSec `
+    -Name 'Camera'
   if ($cameraTestStatus) {
     $cameraStatus = $cameraTestStatus
   } else {
     $cameraStatus = 'not_tested'
   }
 }
-Write-Log "Camera presence=$cameraPresence TestPath=$CameraTestPath TestStatus=$cameraTestStatus Final=$cameraStatus"
+Write-Log "Camera presence=$cameraPresence TestPath=$cameraTestPathValue TestStatus=$cameraTestStatus Final=$cameraStatus"
 
 $usbDevices = Get-CimInstanceSafe -ClassName 'Win32_USBController'
 $usbStatus = Get-StatusFromDevices $usbDevices
