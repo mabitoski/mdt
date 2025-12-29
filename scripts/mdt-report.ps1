@@ -43,7 +43,7 @@ param(
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.3.4'
+$scriptVersion = '1.3.5'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -1604,6 +1604,10 @@ if (-not $padDevices -or $padDevices.Count -eq 0) {
   }
 }
 $padStatus = Get-StatusFromDevices $padDevices
+if (-not $padStatus -or $padStatus -eq 'absent') {
+  $padStatus = 'ok'
+  Write-Log 'Pad status defaulted to ok'
+}
 
 $badgeDevices = @()
 $badgeDevices += Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPClass='SmartCardReader'"
