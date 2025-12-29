@@ -43,7 +43,7 @@ param(
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.3.3'
+$scriptVersion = '1.3.4'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -91,6 +91,35 @@ function Resolve-KeyboardCapturePath {
     return $Value
   }
   return Join-Path (Get-Location) $Value
+}
+
+function Resolve-CameraTestExe {
+  param([string]$Value)
+
+  $candidate = $Value
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    $candidate = Join-Path $PSScriptRoot 'camera_capture.exe'
+  }
+
+  if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+    $candidate = Join-Path (Get-Location) $candidate
+  }
+
+  if (-not (Test-Path $candidate)) {
+    if (-not [System.IO.Path]::GetExtension($candidate)) {
+      $exeCandidate = "${candidate}.exe"
+      if (Test-Path $exeCandidate) {
+        $candidate = $exeCandidate
+      }
+    }
+  }
+
+  if (-not (Test-Path $candidate)) { return $null }
+  if ([System.IO.Path]::GetExtension($candidate).ToLowerInvariant() -ne '.exe') {
+    Write-Log "Camera test must be .exe, skipping: $candidate" 'WARN'
+    return $null
+  }
+  return $candidate
 }
 
 function Start-KeyboardCapture {
@@ -1541,19 +1570,10 @@ $cameraDevices += Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPC
 $cameraPresence = Get-StatusFromDevices $cameraDevices
 $cameraTestStatus = $null
 $cameraStatus = $null
-$cameraTestPathValue = $CameraTestPath
-if (-not $cameraTestPathValue) {
-  $defaultCameraExe = Join-Path $PSScriptRoot 'camera_capture.exe'
-  if (Test-Path $defaultCameraExe) {
-    $cameraTestPathValue = $defaultCameraExe
-  }
-}
+$cameraTestPathValue = Resolve-CameraTestExe -Value $CameraTestPath
 if ($cameraPresence -eq 'absent' -or $cameraPresence -eq 'nok') {
   $cameraStatus = $cameraPresence
 } else {
-  if ($cameraTestPathValue -and -not (Test-Path $cameraTestPathValue)) {
-    Write-Log "Camera test binary not found: $cameraTestPathValue" 'WARN'
-  }
   $cameraTestStatus = Invoke-ExternalTest `
     -Path $cameraTestPathValue `
     -Arguments (Normalize-ArgumentList $CameraTestArguments) `

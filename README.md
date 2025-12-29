@@ -148,6 +148,8 @@ Les scripts sont dans `scripts/` :
 - `keyboard_capture.ps1` : outil graphique pour valider le clavier (Windows)
 - `camera_capture.py` : script camera (OpenCV) a compiler en exe
 - `build_camera_capture.ps1` : build `camera_capture.exe` via PyInstaller
+- `setup_py2exe.py` : config py2exe (Windows)
+- `build_camera_capture_pyexe.ps1` : build `camera_capture.exe` via py2exe
 
 Exemples :
 
@@ -168,7 +170,7 @@ Options utiles :
 - `-FsCheckMode` : `auto` (stress uniquement), `scan`, `none`
 - `-FsCheckTimeoutSec` : timeout du `chkdsk /scan`
 - `-MemDiagMode` : `none` ou `schedule` (planifie `mdsched`)
-- `-CameraTestPath` : chemin du binaire de test camera (exit code 0 = ok)
+- `-CameraTestPath` : chemin du binaire de test camera `.exe` (exit code 0 = ok)
 - `-CameraTestTimeoutSec` : timeout du test camera (defaut `20`)
 - `-CameraTestArguments` : arguments du test camera (ou `MDT_CAMERA_TEST_ARGS`)
 - `-CpuTestPath` / `-GpuTestPath` : binaire externe de stress CPU/GPU (optionnel)
@@ -203,3 +205,11 @@ Compiler le script Python en exe (sur Windows, avec Python + OpenCV) :
 ```
 
 Cela produit `scripts\camera_capture.exe` utilise automatiquement par `mdt-report.ps1` si `-CameraTestPath` n'est pas fourni.
+
+Note : le workflow MDT n'effectue aucun build, il execute uniquement le `.exe` fourni.
+
+Alternative py2exe (Windows uniquement) :
+
+```powershell
+.\scripts\build_camera_capture_pyexe.ps1
+```
