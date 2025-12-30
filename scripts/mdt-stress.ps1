@@ -38,6 +38,7 @@ param(
   [string]$KeyboardCaptureLayoutConfig,
   [switch]$KeyboardCaptureBlockInput,
   [switch]$SkipKeyboardCapture,
+  [switch]$SkipElevation,
   [switch]$SkipTlsValidation
 )
 
@@ -82,6 +83,7 @@ $params = @{
   KeyboardCaptureLayoutConfig = $KeyboardCaptureLayoutConfig
   KeyboardCaptureBlockInput = $KeyboardCaptureBlockInput
   SkipKeyboardCapture = $SkipKeyboardCapture
+  SkipElevation = $SkipElevation
   SkipStressScript = $true
 }
 if ($SkipTlsValidation) { $params.SkipTlsValidation = $true }

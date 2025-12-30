@@ -40,14 +40,15 @@ param(
   [switch]$KeyboardCaptureBlockInput,
   [switch]$SkipKeyboardCapture,
   [switch]$SkipStressScript,
+  [switch]$SkipElevation,
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.3.5'
+$scriptVersion = '1.3.6'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
-  $ApiUrl = 'http://192.168.1.36:3000/api/ingest'
+  $ApiUrl = 'http://10.1.142.28:3000/api/ingest'
 }
 
 if (-not $LogPath) {
@@ -79,6 +80,35 @@ function Normalize-ArgumentList {
     return ($single -split '\s+') | Where-Object { $_ -ne '' }
   }
   return $Values
+}
+
+function Build-ArgumentList {
+  param([hashtable]$BoundParams)
+
+  $args = @()
+  if (-not $BoundParams) { return $args }
+  foreach ($entry in $BoundParams.GetEnumerator()) {
+    $name = $entry.Key
+    $value = $entry.Value
+    if ($name -eq 'SkipElevation') { continue }
+    if ($value -is [System.Management.Automation.SwitchParameter]) {
+      if ($value.IsPresent) { $args += "-$name" }
+      continue
+    }
+    if ($value -is [bool]) {
+      if ($value) { $args += "-$name" }
+      continue
+    }
+    if ($null -eq $value) { continue }
+    if ($value -is [System.Array] -and -not ($value -is [string])) {
+      $args += "-$name"
+      foreach ($item in $value) { $args += "$item" }
+      continue
+    }
+    $args += "-$name"
+    $args += "$value"
+  }
+  return $args
 }
 
 function Resolve-KeyboardCapturePath {
@@ -122,7 +152,7 @@ function Resolve-CameraTestExe {
   return $candidate
 }
 
-function Start-KeyboardCapture {
+function Invoke-KeyboardCapture {
   param(
     [string]$ScriptPath,
     [string]$LogPath,
@@ -132,16 +162,16 @@ function Start-KeyboardCapture {
     [switch]$BlockInput
   )
 
-  if (-not $ScriptPath) { return $false }
+  if (-not $ScriptPath) { return @{ status = 'not_tested'; exitCode = $null } }
   if (-not (Test-Path $ScriptPath)) {
     Write-Log "Keyboard capture script not found: $ScriptPath" 'WARN'
-    return $false
+    return @{ status = 'not_tested'; exitCode = $null }
   }
 
   $psCmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
   if (-not $psCmd) {
     Write-Log 'powershell.exe not found for keyboard capture' 'WARN'
-    return $false
+    return @{ status = 'not_tested'; exitCode = $null }
   }
 
   $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath)
@@ -152,12 +182,19 @@ function Start-KeyboardCapture {
   if ($BlockInput) { $args += '-BlockInput' }
 
   try {
-    Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal | Out-Null
-    Write-Log "Keyboard capture launched: $ScriptPath"
-    return $true
+    $proc = Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal -Wait -PassThru
+    $exitCode = $proc.ExitCode
+    $status = switch ($exitCode) {
+      0 { 'ok' }
+      1 { 'nok' }
+      2 { 'not_tested' }
+      default { 'not_tested' }
+    }
+    Write-Log "Keyboard capture finished: status=$status exitCode=$exitCode"
+    return @{ status = $status; exitCode = $exitCode }
   } catch {
     Write-Log "Keyboard capture launch failed: $($_.Exception.Message)" 'WARN'
-    return $false
+    return @{ status = 'not_tested'; exitCode = $null }
   }
 }
 
@@ -169,6 +206,25 @@ function Test-IsAdmin {
   } catch {
     return $false
   }
+}
+
+$script:IsAdmin = Test-IsAdmin
+if (-not $script:IsAdmin -and -not $SkipElevation) {
+  Write-Log 'Elevation required, requesting admin rights...' 'WARN'
+  $scriptPath = $MyInvocation.MyCommand.Path
+  if (-not $scriptPath) {
+    Write-Log 'Unable to resolve script path for elevation.' 'ERROR'
+    exit 1
+  }
+  $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath)
+  $argList += Build-ArgumentList -BoundParams $PSBoundParameters
+  $argList += '-SkipElevation'
+  try {
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs | Out-Null
+  } catch {
+    Write-Log "Elevation cancelled or failed: $($_.Exception.Message)" 'ERROR'
+  }
+  exit 1
 }
 
 Write-Log "Start script version $scriptVersion"
@@ -219,7 +275,6 @@ if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
   }
 }
 
-$script:IsAdmin = Test-IsAdmin
 Write-Log "IsAdmin=$script:IsAdmin"
 
 if ($SkipTlsValidation) {
@@ -1933,11 +1988,25 @@ if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
   $configDirValue = if ($KeyboardCaptureConfigDir) { $KeyboardCaptureConfigDir } else { $null }
   $logPathValue = if ($KeyboardCaptureLogPath) { $KeyboardCaptureLogPath } else { $null }
   Write-Log 'Launching keyboard capture for laptop'
-  Start-KeyboardCapture `
+  $keyboardResult = Invoke-KeyboardCapture `
     -ScriptPath $keyboardScript `
     -LogPath $logPathValue `
     -ConfigDir $configDirValue `
     -Layout $layoutValue `
     -LayoutConfig $layoutConfigValue `
     -BlockInput:$KeyboardCaptureBlockInput
+  if ($keyboardResult -and $keyboardResult.status -and $keyboardResult.status -ne 'not_tested') {
+    $kbPayload = [ordered]@{}
+    if ($hostname) { $kbPayload.hostname = $hostname }
+    if ($macAddress) { $kbPayload.macAddress = $macAddress }
+    if ($serialNumber) { $kbPayload.serialNumber = $serialNumber }
+    $kbPayload.keyboardStatus = $keyboardResult.status
+    $kbJson = $kbPayload | ConvertTo-Json -Depth 4
+    try {
+      Invoke-RestMethod -Uri $ApiUrl -Method Post -ContentType 'application/json' -Body $kbJson -TimeoutSec $TimeoutSec | Out-Null
+      Write-Log "Keyboard status updated: $($keyboardResult.status)"
+    } catch {
+      Write-Log "Keyboard status update failed: $($_.Exception.Message)" 'WARN'
+    }
+  }
 }

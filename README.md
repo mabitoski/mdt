@@ -188,6 +188,7 @@ Options utiles :
 - `-SkipKeyboardCapture` : ne lance pas `keyboard_capture.ps1` sur les laptops
 - `-KeyboardCapturePath` / `-KeyboardCaptureLogPath` / `-KeyboardCaptureConfigDir` : options du script clavier
 - `-KeyboardCaptureLayout` / `-KeyboardCaptureLayoutConfig` / `-KeyboardCaptureBlockInput` : layout et blocage des touches
+- `-SkipElevation` : n'essaie pas d'elever en admin si le script est lance en utilisateur
 
 Notes clavier :
 - `mdt-report.ps1` lance `keyboard_capture.ps1` a la fin si la categorie est `laptop`.

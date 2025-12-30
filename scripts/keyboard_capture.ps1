@@ -156,6 +156,7 @@ $queue = New-Object System.Collections.Concurrent.BlockingCollection[pscustomobj
 $seenKeys = [System.Collections.Generic.HashSet[string]]::new()
 $keyInfo = @{}
 $script:completionWritten = $false
+$script:finalStatus = 'not_tested'
 $script:logStream = $null
 $script:labelOverrides = @{}
 $script:blockInputs = $BlockInput.IsPresent
@@ -165,6 +166,9 @@ function Write-CompletionStatus {
         [string]$Status,
         [string[]]$Missing = @()
     )
+    if ($Status) {
+        $script:finalStatus = $Status.ToUpperInvariant()
+    }
     $payload = [pscustomobject]@{
         ts      = (Get-Date).ToUniversalTime().ToString("o")
         status  = $Status
@@ -1077,3 +1081,10 @@ finally {
     }
     Write-Host "[info] Stopped."
 }
+
+$exitCode = switch ($script:finalStatus) {
+    'OK' { 0 }
+    'NOK' { 1 }
+    default { 2 }
+}
+exit $exitCode
