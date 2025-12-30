@@ -38,17 +38,22 @@ param(
   [string]$KeyboardCaptureLayout,
   [string]$KeyboardCaptureLayoutConfig,
   [switch]$KeyboardCaptureBlockInput,
+  [int]$KeyboardCaptureTimeoutSec = 600,
   [switch]$SkipKeyboardCapture,
   [switch]$SkipStressScript,
   [switch]$SkipElevation,
   [switch]$SkipTlsValidation
 )
 
-$scriptVersion = '1.3.6'
+$scriptVersion = '1.4.3'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
   $ApiUrl = 'http://10.1.142.28:3000/api/ingest'
+}
+
+if (-not $NetworkPingTarget) {
+  $NetworkPingTarget = '1.1.1.1'
 }
 
 if (-not $LogPath) {
@@ -152,6 +157,24 @@ function Resolve-CameraTestExe {
   return $candidate
 }
 
+function Copy-ScriptsForElevation {
+  param([string]$ScriptPath)
+
+  if (-not $ScriptPath) { return $null }
+  $sourceDir = Split-Path $ScriptPath -Parent
+  if (-not $sourceDir) { return $null }
+  $targetRoot = Join-Path $env:TEMP ("mdt-elev-{0}" -f [guid]::NewGuid().ToString('N'))
+  $targetDir = Join-Path $targetRoot (Split-Path $sourceDir -Leaf)
+  try {
+    Copy-Item -Path $sourceDir -Destination $targetDir -Recurse -Force -ErrorAction Stop
+    $targetScript = Join-Path $targetDir (Split-Path $ScriptPath -Leaf)
+    if (Test-Path $targetScript) { return $targetScript }
+  } catch {
+    Write-Log "Failed to stage scripts for elevation: $($_.Exception.Message)" 'WARN'
+  }
+  return $null
+}
+
 function Invoke-KeyboardCapture {
   param(
     [string]$ScriptPath,
@@ -159,12 +182,20 @@ function Invoke-KeyboardCapture {
     [string]$ConfigDir,
     [string]$Layout,
     [string]$LayoutConfig,
-    [switch]$BlockInput
+    [switch]$BlockInput,
+    [int]$TimeoutSec = 600
   )
 
   if (-not $ScriptPath) { return @{ status = 'not_tested'; exitCode = $null } }
   if (-not (Test-Path $ScriptPath)) {
     Write-Log "Keyboard capture script not found: $ScriptPath" 'WARN'
+    return @{ status = 'not_tested'; exitCode = $null }
+  }
+
+  $isInteractive = $true
+  try { $isInteractive = [Environment]::UserInteractive } catch { }
+  if (-not $isInteractive) {
+    Write-Log 'Keyboard capture skipped (non-interactive session).' 'WARN'
     return @{ status = 'not_tested'; exitCode = $null }
   }
 
@@ -174,7 +205,7 @@ function Invoke-KeyboardCapture {
     return @{ status = 'not_tested'; exitCode = $null }
   }
 
-  $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath)
+  $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-NoLogo', '-File', $ScriptPath)
   if ($LogPath) { $args += @('-LogPath', $LogPath) }
   if ($ConfigDir) { $args += @('-ConfigDir', $ConfigDir) }
   if ($Layout) { $args += @('-Layout', $Layout) }
@@ -182,7 +213,20 @@ function Invoke-KeyboardCapture {
   if ($BlockInput) { $args += '-BlockInput' }
 
   try {
-    $proc = Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal -Wait -PassThru
+    $proc = Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal -PassThru
+    if (-not $proc) {
+      Write-Log 'Keyboard capture failed to start.' 'WARN'
+      return @{ status = 'not_tested'; exitCode = $null }
+    }
+    if ($TimeoutSec -gt 0) {
+      if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+        Write-Log "Keyboard capture timed out after ${TimeoutSec}s." 'WARN'
+        try { $proc.Kill() } catch { }
+        return @{ status = 'not_tested'; exitCode = $null; timedOut = $true }
+      }
+    } else {
+      $proc.WaitForExit()
+    }
     $exitCode = $proc.ExitCode
     $status = switch ($exitCode) {
       0 { 'ok' }
@@ -208,23 +252,69 @@ function Test-IsAdmin {
   }
 }
 
+$script:IsWinPE = $false
+try {
+  if ($env:SystemDrive -eq 'X:' -or $env:WinPE -eq 'Yes') {
+    $script:IsWinPE = $true
+  }
+} catch { }
+
 $script:IsAdmin = Test-IsAdmin
+$script:IsInteractive = $true
+try { $script:IsInteractive = [Environment]::UserInteractive } catch { }
 if (-not $script:IsAdmin -and -not $SkipElevation) {
-  Write-Log 'Elevation required, requesting admin rights...' 'WARN'
-  $scriptPath = $MyInvocation.MyCommand.Path
-  if (-not $scriptPath) {
-    Write-Log 'Unable to resolve script path for elevation.' 'ERROR'
-    exit 1
+  if ($script:IsWinPE) {
+    Write-Log 'WinPE detected; skipping elevation prompt.' 'WARN'
+  } elseif (-not $script:IsInteractive) {
+    Write-Log 'Non-interactive session; skipping elevation prompt.' 'WARN'
+  } else {
+    Write-Log 'Elevation required, requesting admin rights...' 'WARN'
+    $scriptPath = $MyInvocation.MyCommand.Path
+    $elevatedScriptPath = $scriptPath
+    $forceLogPath = $false
+    if ($scriptPath -and $scriptPath.StartsWith('\\')) {
+      Write-Log 'Script launched from a network path; staging local copy for elevation.' 'WARN'
+      $localCopy = Copy-ScriptsForElevation -ScriptPath $scriptPath
+      if ($localCopy) {
+        $elevatedScriptPath = $localCopy
+        if (-not $PSBoundParameters.ContainsKey('LogPath')) {
+          $forceLogPath = $true
+          $localLogPath = Join-Path (Split-Path $elevatedScriptPath -Parent) 'mdt-report.log'
+          Write-Log "Elevated run will log locally: $localLogPath" 'WARN'
+        }
+      } else {
+        Write-Log 'Local staging failed; elevation may fail due to UNC access.' 'WARN'
+      }
+    }
+    $psPath = $null
+    $psCmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if ($psCmd) { $psPath = $psCmd.Source }
+    if (-not $psPath) {
+      $psPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    }
+
+    if (-not $psPath -or -not (Test-Path $psPath)) {
+      Write-Log 'Unable to resolve PowerShell path for elevation.' 'ERROR'
+    } elseif (-not $elevatedScriptPath) {
+      Write-Log 'Unable to resolve script path for elevation.' 'ERROR'
+    } else {
+      $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $elevatedScriptPath)
+      $argList += Build-ArgumentList -BoundParams $PSBoundParameters
+      if ($forceLogPath -and $localLogPath) { $argList += @('-LogPath', $localLogPath) }
+      $argList += '-SkipElevation'
+      try {
+        $proc = Start-Process -FilePath $psPath -ArgumentList $argList -Verb RunAs -PassThru
+        if ($proc) {
+          Write-Log "Elevation launched (PID=$($proc.Id)). Exiting current session."
+          exit 0
+        }
+        Write-Log 'Elevation did not start; continuing without admin rights.' 'WARN'
+      } catch {
+        Write-Log "Elevation cancelled or failed: $($_.Exception.Message)" 'WARN'
+      }
+    }
   }
-  $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath)
-  $argList += Build-ArgumentList -BoundParams $PSBoundParameters
-  $argList += '-SkipElevation'
-  try {
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs | Out-Null
-  } catch {
-    Write-Log "Elevation cancelled or failed: $($_.Exception.Message)" 'ERROR'
-  }
-  exit 1
+  Write-Log 'Continuing without admin rights.' 'WARN'
 }
 
 Write-Log "Start script version $scriptVersion"
@@ -526,16 +616,20 @@ function New-MacCandidate {
     [string]$PhysicalMediaType,
     [bool]$IsUp,
     [string]$EthernetPattern,
-    [string]$WifiPattern
+    [string]$WifiPattern,
+    [string]$CellularPattern
   )
 
   $label = (($Name, $Description, $MediaType, $PhysicalMediaType) -join ' ').Trim()
+  $isCellular = $false
+  if ($CellularPattern) { $isCellular = ($label -match $CellularPattern) }
   return [pscustomobject]@{
     Mac = $Mac
     Name = $Name
     Description = $Description
     IsUp = $IsUp
-    IsEthernet = ($label -match $EthernetPattern)
+    IsCellular = $isCellular
+    IsEthernet = (($label -match $EthernetPattern) -and -not $isCellular)
     IsWifi = ($label -match $WifiPattern)
   }
 }
@@ -584,7 +678,7 @@ function Log-MacCandidates {
 
   if (-not $Candidates -or $Candidates.Count -eq 0) { return }
   $lines = $Candidates | ForEach-Object {
-    $type = if ($_.IsEthernet) { 'eth' } elseif ($_.IsWifi) { 'wifi' } else { 'other' }
+    $type = if ($_.IsEthernet) { 'eth' } elseif ($_.IsWifi) { 'wifi' } elseif ($_.IsCellular) { 'cell' } else { 'other' }
     $state = if ($_.IsUp) { 'up' } else { 'down' }
     "$($_.Mac) [$type,$state,$($_.Name)]"
   }
@@ -593,8 +687,9 @@ function Log-MacCandidates {
 
 function Get-PrimaryMac {
   $skipPattern = 'Virtual|VPN|Loopback|Bluetooth|Wi-Fi Direct|TAP|Hyper-V|Pseudo|WAN Miniport|RAS'
-  $ethernetPattern = '(?i)ethernet|lan|gigabit|gbe|realtek|intel|broadcom|qualcomm|pci'
+  $ethernetPattern = '(?i)ethernet|lan|gigabit|gbe|realtek|intel|broadcom|pci'
   $wifiPattern = '(?i)wi-?fi|wireless|802\.11|wlan'
+  $cellularPattern = '(?i)cellular|cellulaire|wwan|mobile|lte|5g|4g|broadband|modem'
 
   if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) {
     try {
@@ -611,7 +706,8 @@ function Get-PrimaryMac {
           -PhysicalMediaType $adapter.PhysicalMediaType `
           -IsUp ($adapter.Status -eq 'Up') `
           -EthernetPattern $ethernetPattern `
-          -WifiPattern $wifiPattern
+          -WifiPattern $wifiPattern `
+          -CellularPattern $cellularPattern
       }
       Log-MacCandidates -Source 'Get-NetAdapter' -Candidates $netCandidates
       $selected = Select-MacCandidate -Candidates $netCandidates -Preference $MacPreference -Source 'Get-NetAdapter'
@@ -635,7 +731,8 @@ function Get-PrimaryMac {
       -PhysicalMediaType $null `
       -IsUp ($cfg.IPEnabled -eq $true) `
       -EthernetPattern $ethernetPattern `
-      -WifiPattern $wifiPattern
+      -WifiPattern $wifiPattern `
+      -CellularPattern $cellularPattern
   }
   Log-MacCandidates -Source 'Win32_NetworkAdapterConfiguration' -Candidates $cfgCandidates
   $selected = Select-MacCandidate -Candidates $cfgCandidates -Preference $MacPreference -Source 'Win32_NetworkAdapterConfiguration'
@@ -655,7 +752,8 @@ function Get-PrimaryMac {
       -PhysicalMediaType $null `
       -IsUp ($adapter.NetConnectionStatus -eq 2) `
       -EthernetPattern $ethernetPattern `
-      -WifiPattern $wifiPattern
+      -WifiPattern $wifiPattern `
+      -CellularPattern $cellularPattern
   }
   Log-MacCandidates -Source 'Win32_NetworkAdapter' -Candidates $adapterCandidates
   $selected = Select-MacCandidate -Candidates $adapterCandidates -Preference $MacPreference -Source 'Win32_NetworkAdapter'
@@ -726,6 +824,115 @@ function Get-AllMacs {
   foreach ($value in (Get-MacsFromIpconfig -SkipPattern $skipPattern)) { Add-MacValue $value }
   foreach ($value in (Get-MacsFromMsinfo -TimeoutSec $MsinfoTimeoutSec)) { Add-MacValue $value }
 
+  return $macs.ToArray()
+}
+
+function Pick-MacCandidate {
+  param([array]$Candidates)
+
+  if (-not $Candidates -or $Candidates.Count -eq 0) { return $null }
+  $up = $Candidates | Where-Object { $_.IsUp }
+  $selected = if ($up -and $up.Count -gt 0) { $up | Select-Object -First 1 } else { $Candidates | Select-Object -First 1 }
+  if ($selected -and $selected.Mac) { return $selected.Mac }
+  return $null
+}
+
+function Get-PreferredMacs {
+  param([string]$PrimaryMac)
+
+  $skipPattern = 'Virtual|VPN|Loopback|Bluetooth|Wi-Fi Direct|TAP|Hyper-V|Pseudo|WAN Miniport|RAS'
+  $ethernetPattern = '(?i)ethernet|lan|gigabit|gbe|realtek|intel|broadcom|pci'
+  $wifiPattern = '(?i)wi-?fi|wireless|802\.11|wlan'
+  $cellularPattern = '(?i)cellular|cellulaire|wwan|mobile|lte|5g|4g|broadband|modem'
+  $macs = New-Object System.Collections.Generic.List[string]
+
+  function Add-UniqueMac {
+    param([string]$Value)
+    $normalized = Normalize-MacAddress $Value
+    if ($normalized -and -not $macs.Contains($normalized)) { [void]$macs.Add($normalized) }
+  }
+
+  if ($PrimaryMac) { Add-UniqueMac $PrimaryMac }
+
+  $candidates = @()
+  if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) {
+    try {
+      $netAdapters = Get-NetAdapter -ErrorAction Stop | Where-Object {
+        $_.MacAddress -and ($_.HardwareInterface -eq $true -or $_.Virtual -eq $false)
+      }
+      foreach ($adapter in $netAdapters) {
+        $label = (($adapter.Name, $adapter.InterfaceDescription, $adapter.MediaType, $adapter.PhysicalMediaType) -join ' ').Trim()
+        if ($label -match $skipPattern) { continue }
+        $candidates += New-MacCandidate `
+          -Mac $adapter.MacAddress `
+          -Name $adapter.Name `
+          -Description $adapter.InterfaceDescription `
+          -MediaType $adapter.MediaType `
+          -PhysicalMediaType $adapter.PhysicalMediaType `
+          -IsUp ($adapter.Status -eq 'Up') `
+          -EthernetPattern $ethernetPattern `
+          -WifiPattern $wifiPattern `
+          -CellularPattern $cellularPattern
+      }
+    } catch {
+      Write-Log "Get-NetAdapter failed: $($_.Exception.Message)" 'WARN'
+    }
+  }
+
+  if (-not $candidates -or $candidates.Count -eq 0) {
+    $configs = Get-CimInstanceSafe -ClassName 'Win32_NetworkAdapterConfiguration'
+    foreach ($cfg in $configs) {
+      if (-not $cfg.MACAddress) { continue }
+      if ($cfg.Description -and $cfg.Description -match $skipPattern) { continue }
+      $candidates += New-MacCandidate `
+        -Mac $cfg.MACAddress `
+        -Name $cfg.Caption `
+        -Description $cfg.Description `
+        -MediaType $null `
+        -PhysicalMediaType $null `
+        -IsUp ($cfg.IPEnabled -eq $true) `
+        -EthernetPattern $ethernetPattern `
+        -WifiPattern $wifiPattern `
+        -CellularPattern $cellularPattern
+    }
+  }
+
+  if (-not $candidates -or $candidates.Count -eq 0) {
+    $adapters = Get-CimInstanceSafe -ClassName 'Win32_NetworkAdapter'
+    foreach ($adapter in $adapters) {
+      if (-not $adapter.MACAddress) { continue }
+      if ($adapter.Description -and $adapter.Description -match $skipPattern) { continue }
+      if ($adapter.PhysicalAdapter -ne $true -and ($adapter.PNPDeviceID -and $adapter.PNPDeviceID -match '^ROOT\\')) { continue }
+      $candidates += New-MacCandidate `
+        -Mac $adapter.MACAddress `
+        -Name $adapter.NetConnectionID `
+        -Description $adapter.Description `
+        -MediaType $null `
+        -PhysicalMediaType $null `
+        -IsUp ($adapter.NetConnectionStatus -eq 2) `
+        -EthernetPattern $ethernetPattern `
+        -WifiPattern $wifiPattern `
+        -CellularPattern $cellularPattern
+    }
+  }
+
+  if ($candidates -and $candidates.Count -gt 0) {
+    $ethernetMac = Pick-MacCandidate -Candidates ($candidates | Where-Object { $_.IsEthernet })
+    $wifiMac = Pick-MacCandidate -Candidates ($candidates | Where-Object { $_.IsWifi })
+    $cellMac = Pick-MacCandidate -Candidates ($candidates | Where-Object { $_.IsCellular })
+    Add-UniqueMac $ethernetMac
+    Add-UniqueMac $wifiMac
+    if ($macs.Count -lt 2) { Add-UniqueMac $cellMac }
+  }
+
+  if ($macs.Count -lt 2) {
+    foreach ($value in (Get-AllMacs)) {
+      Add-UniqueMac $value
+      if ($macs.Count -ge 2) { break }
+    }
+  }
+
+  if ($macs.Count -gt 2) { return $macs[0..1] }
   return $macs.ToArray()
 }
 
@@ -998,7 +1205,6 @@ function Invoke-WinsatCapture {
   }
 
   $output = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
-  $status = if ($proc.ExitCode -eq 0) { 'ok' } else { 'nok' }
 
   $matches = [regex]::Matches($output, '([0-9]+(?:[\.,][0-9]+)?)\s*MB/s')
   $mbps = $null
@@ -1012,6 +1218,28 @@ function Invoke-WinsatCapture {
     if ($values.Count -gt 0) {
       $mbps = [math]::Round(($values | Measure-Object -Maximum).Maximum, 1)
     }
+  }
+
+  $outputLower = $output.ToLowerInvariant()
+  $status = $null
+  if ($outputLower -match 'battery|sur batterie|power adapter|secteur') {
+    $status = 'denied'
+  } elseif ($outputLower -match 'already running|déjà en cours') {
+    $status = 'not_tested'
+  } elseif ($outputLower -match 'not available|not supported|introuvable') {
+    $status = 'absent'
+  } elseif ($outputLower -match 'access is denied|permission') {
+    $status = 'denied'
+  } elseif ($proc.ExitCode -ne 0 -and $mbps -ne $null) {
+    Write-Log "WinSAT exit code $($proc.ExitCode) but MB/s found; treating as ok." 'WARN'
+    $status = 'ok'
+  } else {
+    $status = if ($proc.ExitCode -eq 0) { 'ok' } else { 'nok' }
+  }
+
+  if ($status -ne 'ok' -and $output) {
+    $snippet = ($output -split "`r?`n" | Where-Object { $_ -ne '' } | Select-Object -Last 4) -join ' | '
+    if ($snippet) { Write-Log "WinSAT output: $snippet" 'WARN' }
   }
 
   return @{ status = $status; mbps = $mbps }
@@ -1609,9 +1837,9 @@ $biosInfo = Get-CimInstanceSafe -ClassName 'Win32_BIOS' | Select-Object -First 1
 
 $hostname = $env:COMPUTERNAME
 $macAddress = Get-PrimaryMac
-$macAddresses = Get-AllMacs
+$macAddresses = Get-PreferredMacs -PrimaryMac $macAddress
 $macAddressesLog = if ($macAddresses) { $macAddresses -join ', ' } else { $null }
-if ($macAddressesLog) { Write-Log ("MAC list: {0}" -f $macAddressesLog) }
+if ($macAddressesLog) { Write-Log ("MAC list (primary+secondary): {0}" -f $macAddressesLog) }
 $serialNumber = Get-SerialNumber
 $osVersion = Get-OsVersion
 $ramMb = Get-RamMb
@@ -1674,7 +1902,7 @@ if (-not $badgeDevices -or $badgeDevices.Count -eq 0) {
 }
 $badgeStatus = Get-StatusFromDevices $badgeDevices
 
-$diskSmart = Get-DiskSmartStatus
+$diskSmart = $null
 $diskInventory = Get-DiskInventory
 $volumeInventory = Get-VolumeInventory
 
@@ -1692,6 +1920,10 @@ if ($testLoops -gt 0) {
   $cpuTest = Run-WinsatLoop -Arguments @('cpu') -Loops $testLoops -TimeoutSec $CpuTestTimeoutSec
   $gpuTest = Invoke-WinsatScore -Arguments @('d3d') -TimeoutSec $GpuTestTimeoutSec
 }
+if ($gpuTest -and $gpuTest.status -eq 'timeout') {
+  Write-Log 'WinSAT GPU timeout; marking as not_tested.' 'WARN'
+  $gpuTest.status = 'not_tested'
+}
 
 $cpuExternalStatus = $null
 if ($CpuTestPath) {
@@ -1703,18 +1935,11 @@ if ($GpuTestPath) {
   $gpuExternalStatus = Invoke-ExternalTest -Path $GpuTestPath -Arguments (Normalize-ArgumentList $GpuTestArguments) -TimeoutSec $GpuTestTimeoutSec -Name 'GPU'
 }
 
-$memDiagStatus = Invoke-MemoryDiagnostic -Mode $MemDiagMode
+$memDiagStatus = $null
 
 $networkPingTargetValue = if ($NetworkPingTarget) { $NetworkPingTarget } else { Get-DefaultGateway }
 $networkPingResult = Test-NetworkPing -Target $networkPingTargetValue -Count $NetworkPingCount
-$iperfResult = Invoke-IperfTest `
-  -Path $NetworkTestPath `
-  -Server $NetworkTestServer `
-  -Port $NetworkTestPort `
-  -Seconds $NetworkTestSeconds `
-  -Direction $NetworkTestDirection `
-  -TimeoutSec $NetworkTestTimeoutSec `
-  -ExtraArgs $NetworkTestExtraArgs
+$iperfResult = $null
 
 $runFsCheck = $FsCheckMode -eq 'scan' -or ($FsCheckMode -eq 'auto' -and $TestMode -eq 'stress')
 $fsCheckResult = if ($runFsCheck) { Invoke-FsCheck -DriveLetter $driveLetter -TimeoutSec $FsCheckTimeoutSec } else { @{ status = 'not_tested' } }
@@ -1813,7 +2038,7 @@ foreach ($module in $memoryModules) {
 }
 
 $displayInfo = Get-DisplayInfo
-$thermalInfo = Get-ThermalInfo
+$thermalInfo = $null
 
 $biosReleaseDate = $null
 if ($biosInfo -and $biosInfo.ReleaseDate) {
@@ -1994,12 +2219,14 @@ if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
     -ConfigDir $configDirValue `
     -Layout $layoutValue `
     -LayoutConfig $layoutConfigValue `
-    -BlockInput:$KeyboardCaptureBlockInput
+    -BlockInput:$KeyboardCaptureBlockInput `
+    -TimeoutSec $KeyboardCaptureTimeoutSec
   if ($keyboardResult -and $keyboardResult.status -and $keyboardResult.status -ne 'not_tested') {
     $kbPayload = [ordered]@{}
     if ($hostname) { $kbPayload.hostname = $hostname }
     if ($macAddress) { $kbPayload.macAddress = $macAddress }
     if ($serialNumber) { $kbPayload.serialNumber = $serialNumber }
+    $kbPayload.payloadMode = 'skip'
     $kbPayload.keyboardStatus = $keyboardResult.status
     $kbJson = $kbPayload | ConvertTo-Json -Depth 4
     try {

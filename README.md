@@ -38,6 +38,8 @@ docker run -d --name mdt-web -p 3000:3000 \
 
 Endpoint public (sans authentification) pour recevoir les donnees MDT.
 
+Pour les mises a jour partielles (ex: statut clavier), envoyer `payloadMode: "skip"` afin de ne pas ecraser le payload complet.
+
 Exemple :
 
 ```bash

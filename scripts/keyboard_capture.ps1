@@ -664,6 +664,8 @@ function New-KeyboardVisualizer {
     $form.Text = "Keyboard visualizer"
     $form.StartPosition = 'CenterScreen'
     $form.Size = New-Object System.Drawing.Size(1150, 420)
+    $form.WindowState = 'Maximized'
+    $form.FormBorderStyle = 'None'
     $form.BackColor = [System.Drawing.Color]::FromArgb(18,18,18)
     $form.ForeColor = [System.Drawing.Color]::White
     $form.AutoScroll = $true
@@ -752,7 +754,20 @@ function New-KeyboardVisualizer {
     $okButton.UseMnemonic = $false
     $okButton.UseVisualStyleBackColor = $false
 
+    $nokButton = New-Object System.Windows.Forms.Button
+    $nokButton.Text = "NOK"
+    $nokButton.AutoSize = $true
+    $nokButton.Padding = '8,6,8,6'
+    $nokButton.BackColor = [System.Drawing.Color]::FromArgb(231,76,60)
+    $nokButton.ForeColor = [System.Drawing.Color]::White
+    $nokButton.FlatStyle = 'Flat'
+    $nokButton.Font = New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Bold)
+    $nokButton.TabStop = $false
+    $nokButton.UseMnemonic = $false
+    $nokButton.UseVisualStyleBackColor = $false
+
     $footer.Controls.Add($okButton)
+    $footer.Controls.Add($nokButton)
 
     $root.Controls.Add($header)
     $root.Controls.Add($kbPanel)
@@ -777,6 +792,7 @@ function New-KeyboardVisualizer {
         Verified        = [System.Collections.Generic.HashSet[string]]::new()
         Required        = [System.Collections.Generic.HashSet[string]]::new()
         OkButton        = $okButton
+        NokButton       = $nokButton
         WidthOverrides  = $WidthOverrides
         LabelOverrides  = $LabelOverrides
     }
@@ -951,8 +967,10 @@ function Resolve-LogPath {
     if (-not $Path) {
         return Join-Path $env:TEMP "workflow\\keyboard\\keyboard_log.jsonl"
     }
-    # Keep relative paths relative to the current directory; create directory if missing.
-    $full = if ([System.IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path (Get-Location) $Path }
+    $base = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path $PSCommandPath -Parent } else { (Get-Location).Path }
+    if (-not $base) { $base = $env:TEMP }
+    # Keep relative paths relative to the script location; create directory if missing.
+    $full = if ([System.IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path $base $Path }
     $dir = [System.IO.Path]::GetDirectoryName($full)
     if ($dir -and -not (Test-Path $dir)) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -960,9 +978,55 @@ function Resolve-LogPath {
     return $full
 }
 
+function Resolve-ConfigDir {
+    param([string]$Path)
+
+    $base = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path $PSCommandPath -Parent } else { (Get-Location).Path }
+    if (-not $base) { $base = $env:TEMP }
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        $Path = Join-Path $base 'keyboard conf'
+    }
+    $hasDrive = $Path -match '^[A-Za-z]:'
+    $hasUnc = $Path -match '^\\\\[^\\]+\\'
+    if (-not $hasDrive -and -not $hasUnc) {
+        $Path = Join-Path $base ($Path.TrimStart('\'))
+    }
+    if (-not $Path -or $Path -eq '\' -or $Path -eq '\\') {
+        $Path = Join-Path $env:TEMP 'workflow\\keyboard\\conf'
+    }
+    if (-not (Test-Path $Path)) { New-Item -ItemType Directory -Force -Path $Path | Out-Null }
+    return $Path
+}
+
+function Open-LogStream {
+    param([string]$Path)
+
+    $dir = [System.IO.Path]::GetDirectoryName($Path)
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    try {
+        $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        $writer = New-Object System.IO.StreamWriter($fs, [System.Text.Encoding]::UTF8)
+        $writer.AutoFlush = $true
+        return @{ Path = $Path; Writer = $writer }
+    } catch {
+        $fallback = Join-Path $dir ("keyboard_log_{0}_{1}.jsonl" -f (Get-Date -Format "yyyyMMdd_HHmmss"), $PID)
+        try {
+            $fs = New-Object System.IO.FileStream($fallback, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+            $writer = New-Object System.IO.StreamWriter($fs, [System.Text.Encoding]::UTF8)
+            $writer.AutoFlush = $true
+            Write-Warning "Log file locked, using fallback: $fallback"
+            return @{ Path = $fallback; Writer = $writer }
+        } catch {
+            Write-Warning "Cannot open log file: $($_.Exception.Message)"
+            return $null
+        }
+    }
+}
+
 $logPathResolved = Resolve-LogPath -Path $LogPath
-$configDirResolved = if ([System.IO.Path]::IsPathRooted($ConfigDir)) { $ConfigDir } else { Join-Path (Get-Location) $ConfigDir }
-if (-not (Test-Path $configDirResolved)) { New-Item -ItemType Directory -Force -Path $configDirResolved | Out-Null }
+$configDirResolved = Resolve-ConfigDir -Path $ConfigDir
 $configFileResolved = if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     Join-Path $configDirResolved ("keyboard_{0}.json" -f $stamp)
@@ -1003,18 +1067,31 @@ $visualizer.NumpadSelector.add_SelectedIndexChanged({
 })
 $initialNpRows = Get-SelectedNumpadRows -sel $selectedNumpad
 Rebuild-KeyboardLayout -Visualizer $visualizer -LayoutDef $layoutDef -NumpadRows $initialNpRows
+$visualizer.Form.TopMost = $true
+$visualizer.Form.add_Shown({
+    param($sender, $eventArgs)
+    if ($sender) {
+        $sender.Activate()
+        $sender.TopMost = $false
+    }
+})
 $visualizer.Form.add_FormClosed({ $script:stopRequested = $true })
 $visualizer.Form.Show()
 $visualizer.OkButton.add_Click({
     if ($script:stopRequested) { return }
     $missing = $visualizer.Required | Where-Object { -not $visualizer.Verified.Contains($_) }
-    if ($missing.Count -eq 0) {
-        Write-Host "[info] Toutes les touches requises sont vérifiées. OK."
-        Write-CompletionStatus -Status "OK" -Missing @()
-    } else {
-        Write-Warning ("[warn] Il manque encore: {0}" -f ($missing -join ', '))
-        Write-CompletionStatus -Status "NOK" -Missing $missing
+    if ($missing.Count -gt 0) {
+        Write-Warning ("[warn] Touches non vues: {0}" -f ($missing -join ', '))
     }
+    Write-Host "[info] Validation OK forcee."
+    Write-CompletionStatus -Status "OK" -Missing $missing
+    $script:stopRequested = $true
+})
+$visualizer.NokButton.add_Click({
+    if ($script:stopRequested) { return }
+    $missing = $visualizer.Required | Where-Object { -not $visualizer.Verified.Contains($_) }
+    Write-Warning "[warn] Validation NOK forcee."
+    Write-CompletionStatus -Status "NOK" -Missing $missing
     $script:stopRequested = $true
 })
 
@@ -1022,12 +1099,17 @@ $visualizer.OkButton.add_Click({
 [WinAPI.GlobalKeyboardHook]::Start()
 
 Write-Host "[info] Capturing keyboard events. Press Ctrl+C to stop."
-Write-Host "[info] Logging to $logPathResolved"
 Write-Host "[info] Config will be written to $configFileResolved"
 Write-Host "[info] Layout: $($layoutDef.Name)"
-$visualizer.Form.BeginInvoke({ param($f) $f.Activate() }, $visualizer.Form) | Out-Null
 $script:stopRequested = $false
-$script:logStream = [System.IO.StreamWriter]::new($logPathResolved, $true, [System.Text.Encoding]::UTF8)
+$logStreamInfo = Open-LogStream -Path $logPathResolved
+if ($logStreamInfo) {
+    $script:logStream = $logStreamInfo.Writer
+    $logPathResolved = $logStreamInfo.Path
+    Write-Host "[info] Logging to $logPathResolved"
+} else {
+    Write-Warning "[warn] Log stream not available; keyboard events won't be persisted."
+}
 
 try {
     while (-not $script:stopRequested) {

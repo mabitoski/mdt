@@ -3,13 +3,12 @@ const state = {
   filter: 'all',
   search: '',
   sort: 'lastSeen',
-  selectedId: null,
+  expandedId: null,
   details: {},
   lastUpdated: null
 };
 
 const listEl = document.getElementById('machine-list');
-const detailEl = document.getElementById('machine-detail');
 const searchInput = document.getElementById('search-input');
 const refreshBtn = document.getElementById('refresh-btn');
 const lastUpdatedEl = document.getElementById('last-updated');
@@ -38,7 +37,6 @@ const statusLabels = {
 };
 
 const componentLabels = {
-  diskSmart: 'SMART disque',
   diskReadTest: 'Lecture disque',
   diskWriteTest: 'Ecriture disque',
   ramTest: 'RAM (WinSAT)',
@@ -46,11 +44,8 @@ const componentLabels = {
   gpuTest: 'GPU (WinSAT)',
   cpuStress: 'CPU (stress)',
   gpuStress: 'GPU (stress)',
-  networkTest: 'iPerf',
   networkPing: 'Ping',
   fsCheck: 'Check disque',
-  memDiag: 'Diag memoire',
-  thermal: 'Thermique',
   gpu: 'GPU',
   usb: 'Ports USB',
   keyboard: 'Clavier',
@@ -60,7 +55,6 @@ const componentLabels = {
 };
 
 const componentOrder = [
-  'diskSmart',
   'diskReadTest',
   'diskWriteTest',
   'ramTest',
@@ -68,11 +62,8 @@ const componentOrder = [
   'gpuTest',
   'cpuStress',
   'gpuStress',
-  'networkTest',
   'networkPing',
   'fsCheck',
-  'memDiag',
-  'thermal',
   'gpu',
   'usb',
   'keyboard',
@@ -80,6 +71,8 @@ const componentOrder = [
   'pad',
   'badgeReader'
 ];
+
+const hiddenComponents = new Set(['diskSmart', 'networkTest', 'memDiag', 'thermal']);
 
 const delayClasses = [
   'delay-0',
@@ -126,6 +119,28 @@ function normalizeStatusKey(value) {
   return statusLabels[key] ? key : null;
 }
 
+function summarizeComponents(components) {
+  const summary = { ok: 0, nok: 0, other: 0, total: 0 };
+  if (!components || typeof components !== 'object' || Array.isArray(components)) {
+    return summary;
+  }
+  Object.values(components).forEach((value) => {
+    const key = normalizeStatusKey(value);
+    if (!key) {
+      return;
+    }
+    if (key === 'ok') {
+      summary.ok += 1;
+    } else if (key === 'nok') {
+      summary.nok += 1;
+    } else {
+      summary.other += 1;
+    }
+    summary.total += 1;
+  });
+  return summary;
+}
+
 function normalizeCategory(value) {
   if (value === 'laptop' || value === 'desktop' || value === 'unknown') {
     return value;
@@ -150,6 +165,16 @@ function formatPrimary(machine) {
 function formatSubtitle(machine) {
   const chunks = [machine.vendor, machine.model].filter(Boolean);
   return chunks.length ? chunks.join(' ') : 'Modele non renseigne';
+}
+
+function formatMacSummary(machine) {
+  const macs = Array.isArray(machine.macAddresses) ? machine.macAddresses.filter(Boolean) : [];
+  const primary = machine.macAddress || macs[0] || null;
+  const secondary = macs.find((mac) => mac && mac !== primary) || null;
+  if (primary && secondary) {
+    return `${primary} / ${secondary}`;
+  }
+  return primary || '--';
 }
 
 function formatDateTime(value) {
@@ -202,6 +227,112 @@ function formatRam(value) {
     return `${rounded} Go`;
   }
   return `${Math.round(value)} Mo`;
+}
+
+function formatCpuThreads(cpu) {
+  if (!cpu || typeof cpu !== 'object') {
+    return '--';
+  }
+  const cores = Number.isFinite(cpu.cores) ? cpu.cores : null;
+  const threads = Number.isFinite(cpu.threads) ? cpu.threads : null;
+  if (cores == null && threads == null) {
+    return '--';
+  }
+  if (cores != null && threads != null) {
+    return `${cores} / ${threads}`;
+  }
+  if (cores != null) {
+    return `${cores} / --`;
+  }
+  return `-- / ${threads}`;
+}
+
+function formatDiskSize(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  if (value >= 100) {
+    return `${Math.round(value)} Go`;
+  }
+  return `${Math.round(value * 10) / 10} Go`;
+}
+
+function formatTotalStorage(disks, volumes) {
+  let total = 0;
+  if (Array.isArray(disks) && disks.length > 0) {
+    total = disks.reduce((sum, disk) => {
+      if (disk && Number.isFinite(disk.sizeGb)) {
+        return sum + disk.sizeGb;
+      }
+      return sum;
+    }, 0);
+  }
+  if ((!Number.isFinite(total) || total <= 0) && Array.isArray(volumes)) {
+    total = volumes.reduce((sum, vol) => {
+      if (vol && Number.isFinite(vol.sizeGb)) {
+        return sum + vol.sizeGb;
+      }
+      return sum;
+    }, 0);
+  }
+  if (!Number.isFinite(total) || total <= 0) {
+    return '--';
+  }
+  return formatDiskSize(total) || '--';
+}
+
+function pickPrimaryDisk(disks) {
+  if (!Array.isArray(disks) || disks.length === 0) {
+    return null;
+  }
+  const filtered = disks.filter((disk) => {
+    if (!disk || typeof disk !== 'object') {
+      return false;
+    }
+    const media = `${disk.mediaType || ''} ${disk.mediaTypeDetail || ''} ${disk.interface || ''}`.toLowerCase();
+    if (media.includes('removable') || media.includes('usb')) {
+      return false;
+    }
+    return true;
+  });
+  return filtered[0] || disks[0] || null;
+}
+
+function pickPrimaryVolume(volumes) {
+  if (!Array.isArray(volumes) || volumes.length === 0) {
+    return null;
+  }
+  const system = volumes.find((vol) => String(vol.drive || '').toUpperCase() === 'C');
+  if (system) {
+    return system;
+  }
+  const sorted = [...volumes].filter((vol) => Number.isFinite(vol.sizeGb));
+  sorted.sort((a, b) => (b.sizeGb || 0) - (a.sizeGb || 0));
+  return sorted[0] || volumes[0] || null;
+}
+
+function formatPrimaryDisk(disks, volumes) {
+  const disk = pickPrimaryDisk(disks);
+  if (disk) {
+    const nameParts = [disk.model, disk.mediaTypeDetail].filter(Boolean);
+    const size = formatDiskSize(disk.sizeGb);
+    const name = nameParts.length ? nameParts.join(' ') : '--';
+    if (size) {
+      return `${name} (${size})`;
+    }
+    return name;
+  }
+  const volume = pickPrimaryVolume(volumes);
+  if (!volume) {
+    return '--';
+  }
+  const drive = volume.drive ? `${volume.drive}:` : 'Volume';
+  const size = formatDiskSize(volume.sizeGb);
+  const fs = volume.fileSystem ? ` (${volume.fileSystem})` : '';
+  if (size) {
+    return `${drive} ${size}${fs}`;
+  }
+  return `${drive}${fs}`;
 }
 
 function formatSlots(free, total) {
@@ -391,24 +522,9 @@ function buildDiagnosticsHtml(detail) {
     if (tests.networkPing || tests.networkPingTarget) {
       addRow('Ping', tests.networkPing, tests.networkPingTarget || null);
     }
-    if (tests.network || tests.networkDownMbps != null || tests.networkUpMbps != null) {
-      const parts = [];
-      const down = formatNetMbps(tests.networkDownMbps);
-      const up = formatNetMbps(tests.networkUpMbps);
-      if (down) { parts.push(`↓ ${down}`); }
-      if (up) { parts.push(`↑ ${up}`); }
-      addRow('iPerf', tests.network, parts.length ? parts.join(' · ') : null);
-    }
     if (tests.fsCheck) {
       addRow('Check disque', tests.fsCheck, null);
     }
-    if (tests.memDiag) {
-      addRow('Diag memoire', tests.memDiag, null);
-    }
-  }
-
-  if (thermal && (thermal.status || thermal.maxC != null)) {
-    addRow('Thermique', thermal.status, formatTemp(thermal.maxC));
   }
 
   if (!rows.length) {
@@ -440,13 +556,38 @@ function renderList() {
       const title = escapeHtml(formatPrimary(machine));
       const subtitle = escapeHtml(formatSubtitle(machine));
       const serial = escapeHtml(machine.serialNumber || '--');
-      const mac = escapeHtml(machine.macAddress || '--');
+      const mac = escapeHtml(formatMacSummary(machine));
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
-      const selected = state.selectedId === machine.id ? 'selected' : '';
+      const expanded = state.expandedId === machine.id;
+      const selected = expanded ? 'selected' : '';
       const delayClass = delayClasses[index % delayClasses.length];
+      const summary = summarizeComponents(machine.components);
+      const summaryHtml =
+        summary.total > 0
+          ? `
+            <div class="machine-summary">
+              <span class="summary-chip ok">OK ${summary.ok}</span>
+              <span class="summary-chip nok">NOK ${summary.nok}</span>
+              <span class="summary-chip nt">NT ${summary.other}</span>
+            </div>
+          `
+          : `
+            <div class="machine-summary">
+              <span class="summary-chip nt">NT --</span>
+            </div>
+          `;
+      const detailData = expanded ? state.details[machine.id] : null;
+      const detailHtml = expanded
+        ? detailData && detailData.error
+          ? '<div class="card-detail"><div class="empty">Impossible de charger les details.</div></div>'
+          : detailData
+            ? `<div class="card-detail">${buildDetailHtml(detailData)}</div>`
+            : '<div class="card-detail"><div class="loading">Chargement des details...</div></div>'
+        : '';
+      const toggleLabel = expanded ? 'Masquer les details' : 'Afficher les details';
 
       return `
-        <article class="machine-card ${delayClass} ${selected}" data-id="${machine.id}">
+        <article class="machine-card ${delayClass} ${selected}" data-id="${machine.id}" aria-expanded="${expanded}">
           <div class="card-top">
             <span class="badge" data-category="${category}">${label}</span>
             <span class="machine-meta"><span>${lastSeen}</span></span>
@@ -457,28 +598,28 @@ function renderList() {
             <span>SN: ${serial}</span>
             <span>MAC: ${mac}</span>
           </div>
+          ${summaryHtml}
+          <button class="card-toggle" type="button">${toggleLabel}</button>
+          ${detailHtml}
         </article>
       `;
     })
     .join('');
 }
 
-function renderDetail() {
-  if (!state.selectedId) {
-    return;
-  }
-  const detail = state.details[state.selectedId];
-  if (!detail) {
-    detailEl.innerHTML = '<div class="loading">Chargement des details...</div>';
-    return;
-  }
-
+function buildDetailHtml(detail) {
   const category = normalizeCategory(detail.category);
   const title = escapeHtml(formatPrimary(detail));
   const subtitle = escapeHtml(formatSubtitle(detail));
   const technicianLine = detail.technician
     ? `<p class="detail-tech"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></p>`
     : '';
+  const payload =
+    detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const cpuInfo = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
+  const gpuInfo = payload && payload.gpu && typeof payload.gpu === 'object' ? payload.gpu : null;
+  const diskInfo = payload && Array.isArray(payload.disks) ? payload.disks : [];
+  const volumeInfo = payload && Array.isArray(payload.volumes) ? payload.volumes : [];
   const macAddresses = Array.isArray(detail.macAddresses) ? detail.macAddresses : [];
   const macListHtml = macAddresses.length
     ? `<div class="mac-list">${macAddresses
@@ -490,7 +631,7 @@ function renderDetail() {
     detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
       ? detail.components
       : {};
-  const componentEntries = Object.entries(components);
+  const componentEntries = Object.entries(components).filter(([key]) => !hiddenComponents.has(key));
   const componentOrderMap = new Map(componentOrder.map((key, index) => [key, index]));
   const sortedComponentEntries = componentEntries.sort((a, b) => {
     const orderA = componentOrderMap.has(a[0]) ? componentOrderMap.get(a[0]) : 999;
@@ -522,6 +663,26 @@ function renderDetail() {
         <div class="detail-item">
           <span>RAM totale</span>
           <strong>${escapeHtml(formatRam(detail.ramMb))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>CPU</span>
+          <strong>${escapeHtml((cpuInfo && cpuInfo.name) || '--')}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Coeurs / Threads</span>
+          <strong>${escapeHtml(formatCpuThreads(cpuInfo))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>GPU</span>
+          <strong>${escapeHtml((gpuInfo && gpuInfo.name) || '--')}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Stockage total</span>
+          <strong>${escapeHtml(formatTotalStorage(diskInfo, volumeInfo))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Disque principal</span>
+          <strong>${escapeHtml(formatPrimaryDisk(diskInfo, volumeInfo))}</strong>
         </div>
         <div class="detail-item">
           <span>Slots RAM</span>
@@ -561,7 +722,7 @@ function renderDetail() {
 
   const diagnosticsHtml = buildDiagnosticsHtml(detail);
 
-  detailEl.innerHTML = `
+  return `
     <div class="detail-header">
       <h2 class="detail-title">${title}</h2>
       <span class="badge detail-category" data-category="${category}">${categoryLabels[category]}</span>
@@ -575,7 +736,7 @@ function renderDetail() {
       </div>
       <div class="detail-item">
         <span>MAC</span>
-        <strong>${escapeHtml(detail.macAddress || '--')}</strong>
+        <strong>${escapeHtml(formatMacSummary(detail))}</strong>
       </div>
       <div class="detail-item">
         <span>MACs</span>
@@ -630,26 +791,24 @@ async function loadMachines() {
     updateStats();
     renderList();
     updateLastUpdated();
-    if (state.selectedId) {
-      await selectMachine(state.selectedId);
+    if (state.expandedId) {
+      await ensureMachineDetail(state.expandedId);
     }
   } catch (error) {
     listEl.innerHTML = '<div class="empty">Erreur lors du chargement.</div>';
   }
 }
 
-async function selectMachine(id) {
+async function ensureMachineDetail(id) {
   const numericId = Number.parseInt(id, 10);
   if (!Number.isFinite(numericId)) {
     return;
   }
-  state.selectedId = numericId;
-  renderList();
   if (state.details[numericId]) {
-    renderDetail();
-  } else {
-    detailEl.innerHTML = '<div class="loading">Chargement des details...</div>';
+    renderList();
+    return;
   }
+  renderList();
   try {
     const response = await fetch(`/api/machines/${numericId}`);
     if (response.status === 401) {
@@ -661,9 +820,10 @@ async function selectMachine(id) {
     }
     const data = await response.json();
     state.details[numericId] = data.machine;
-    renderDetail();
+    renderList();
   } catch (error) {
-    detailEl.innerHTML = '<div class="empty">Impossible de charger les details.</div>';
+    state.details[numericId] = { error: true };
+    renderList();
   }
 }
 
@@ -710,7 +870,20 @@ listEl.addEventListener('click', (event) => {
   if (!card) {
     return;
   }
-  selectMachine(card.dataset.id);
+  if (event.target.closest('.card-detail')) {
+    return;
+  }
+  const id = Number.parseInt(card.dataset.id, 10);
+  if (!Number.isFinite(id)) {
+    return;
+  }
+  if (state.expandedId === id) {
+    state.expandedId = null;
+    renderList();
+    return;
+  }
+  state.expandedId = id;
+  ensureMachineDetail(id);
 });
 
 loadMachines();

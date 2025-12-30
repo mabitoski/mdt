@@ -242,7 +242,8 @@ const listMachinesQuery = `
     pad_status,
     badge_reader_status,
     last_seen,
-    last_ip
+    last_ip,
+    components
   FROM machines
   ORDER BY last_seen DESC
 `;
@@ -946,7 +947,16 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       : `host:${hostname.toLowerCase()}`;
 
   const now = new Date().toISOString();
-  const payload = safeJsonStringify(body, 64 * 1024);
+  const payloadMode = cleanString(
+    pickFirst(body, ['payloadMode', 'payload_mode', 'updateMode', 'ingestMode']),
+    16
+  );
+  const skipPayloadRaw = pickFirst(body, ['skipPayload', 'payloadSkip', 'partialUpdate', 'partial']);
+  const skipPayload =
+    (payloadMode && ['skip', 'partial', 'patch'].includes(payloadMode.toLowerCase())) ||
+    skipPayloadRaw === true ||
+    skipPayloadRaw === 'true';
+  const payload = skipPayload ? null : safeJsonStringify(body, 64 * 1024);
   const ipAddress = getClientIp(req);
 
   const values = [
@@ -993,7 +1003,15 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
 app.get('/api/machines', requireAuth, async (req, res) => {
   try {
     const result = await pool.query(listMachinesQuery);
-    const machines = result.rows.map((row) => ({
+    const machines = result.rows.map((row) => {
+      let components = null;
+      try {
+        components = row.components ? JSON.parse(row.components) : null;
+      } catch (error) {
+        components = null;
+      }
+
+      return {
       id: row.id,
       hostname: row.hostname,
       macAddress: row.mac_address,
@@ -1014,8 +1032,10 @@ app.get('/api/machines', requireAuth, async (req, res) => {
       padStatus: row.pad_status,
       badgeReaderStatus: row.badge_reader_status,
       lastSeen: row.last_seen,
-      lastIp: row.last_ip
-    }));
+      lastIp: row.last_ip,
+      components
+      };
+    });
 
     res.json({ machines });
   } catch (error) {

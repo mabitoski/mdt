@@ -232,7 +232,7 @@ body {
 
 .board {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
   align-items: start;
 }
@@ -338,16 +338,79 @@ body {
   background: rgba(255, 255, 255, 0.6);
 }
 
+.machine-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.card-toggle {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(60, 64, 60, 0.2);
+  color: var(--ink);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.machine-card[aria-expanded="true"] .card-toggle {
+  background: rgba(242, 139, 45, 0.14);
+  border-color: rgba(242, 139, 45, 0.35);
+  color: #9b4a16;
+}
+
+.card-detail {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(60, 64, 60, 0.18);
+}
+
+.summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.summary-chip.ok {
+  background: rgba(47, 124, 92, 0.16);
+  color: #1b4c38;
+}
+
+.summary-chip.nok {
+  background: rgba(231, 76, 60, 0.16);
+  color: #a33524;
+}
+
+.summary-chip.nt {
+  background: rgba(60, 64, 60, 0.12);
+  color: #4b4b4b;
+}
+
 .detail {
-  position: sticky;
-  top: 24px;
-  align-self: start;
+  position: static;
+  align-self: stretch;
   background: var(--card);
   border: 1px solid var(--stroke);
   border-radius: var(--radius);
   padding: 22px 24px;
   box-shadow: var(--shadow);
   min-height: 360px;
+}
+
+.detail-sheet {
+  margin-top: 8px;
 }
 
 .detail-empty {
