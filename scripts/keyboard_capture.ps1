@@ -16,8 +16,8 @@ flags: bit 0x01=extended key, 0x10=injected, see KBDLLHOOKSTRUCT.
 param(
     # Default log in %TEMP% to avoid path issues in MDT/fresh installs.
     [string]$LogPath = "$env:TEMP\\workflow\\keyboard\\keyboard_log.jsonl",
-    # Folder for configs (e.g., network share \\mdt.local\\conf\\keyboard); defaults to local "keyboard conf".
-    [string]$ConfigDir = "$PSScriptRoot\\keyboard conf",
+    # Folder for configs (e.g., network share \\mdt.local\\conf\\keyboard); defaults to local "keyboard_conf".
+    [string]$ConfigDir = "$PSScriptRoot\\keyboard_conf",
     # Config file name (will be created inside ConfigDir if relative)
     [string]$ConfigPath = "",
     # Keyboard layout: fr-azerty (default) or us-qwerty; or use a custom JSON via LayoutConfig.
@@ -25,10 +25,35 @@ param(
     # Optional JSON file defining layoutRows, scanMap, labels, widthOverrides.
     [string]$LayoutConfig = "",
     # If set, swallow keyboard events so they ne se propagent pas aux autres apps.
-    [switch]$BlockInput
+    [switch]$BlockInput,
+    # Show the PowerShell console (hidden by default).
+    [switch]$ShowConsole
 )
 
 Add-Type -AssemblyName System.Windows.Forms
+
+$nativeConsole = @"
+using System;
+using System.Runtime.InteropServices;
+public static class ConsoleWindow {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@
+
+try {
+    Add-Type -TypeDefinition $nativeConsole -ErrorAction Stop
+    if (-not $ShowConsole) {
+        $consoleHandle = [ConsoleWindow]::GetConsoleWindow()
+        if ($consoleHandle -ne [IntPtr]::Zero) {
+            [ConsoleWindow]::ShowWindow($consoleHandle, 0) | Out-Null
+        }
+    }
+} catch {
+    # Ignore console hide issues; continue with UI.
+}
 
 $csharp = @"
 using System;
@@ -160,6 +185,7 @@ $script:finalStatus = 'not_tested'
 $script:logStream = $null
 $script:labelOverrides = @{}
 $script:blockInputs = $BlockInput.IsPresent
+$script:minOkRatio = 0.5
 
 function Write-CompletionStatus {
     param(
@@ -647,6 +673,33 @@ function Normalize-KeyName {
     }
 }
 
+function Get-VerificationRatio {
+    param([pscustomobject]$Visualizer)
+
+    if (-not $Visualizer -or -not $Visualizer.Required) { return 1 }
+    $requiredCount = $Visualizer.Required.Count
+    if ($requiredCount -le 0) { return 1 }
+    $verifiedCount = 0
+    foreach ($key in $Visualizer.Required) {
+        if ($Visualizer.Verified.Contains($key)) { $verifiedCount++ }
+    }
+    return $verifiedCount / $requiredCount
+}
+
+function Update-OkButtonState {
+    param([pscustomobject]$Visualizer)
+
+    if (-not $Visualizer -or -not $Visualizer.OkButton) { return }
+    $ratio = Get-VerificationRatio -Visualizer $Visualizer
+    $percent = [math]::Round($ratio * 100)
+    $Visualizer.OkButton.Enabled = ($ratio -ge $script:minOkRatio)
+    if ($Visualizer.OkButton.Enabled) {
+        $Visualizer.OkButton.Text = 'OK'
+    } else {
+        $Visualizer.OkButton.Text = "OK ($percent%)"
+    }
+}
+
 function New-KeyboardVisualizer {
     param(
         [System.Collections.IEnumerable]$LayoutRows,
@@ -775,7 +828,7 @@ function New-KeyboardVisualizer {
 
     $form.Controls.Add($root)
 
-    return [pscustomobject]@{
+    $visualizer = [pscustomobject]@{
         Form            = $form
         RootPanel       = $root
         HeaderPanel     = $header
@@ -796,6 +849,8 @@ function New-KeyboardVisualizer {
         WidthOverrides  = $WidthOverrides
         LabelOverrides  = $LabelOverrides
     }
+    Update-OkButtonState -Visualizer $visualizer
+    return $visualizer
 }
 
 function Rebuild-KeyboardLayout {
@@ -823,6 +878,7 @@ function Rebuild-KeyboardLayout {
     $Visualizer.ScanToKey = $LayoutDef.ScanMap
     $Visualizer.Verified.Clear()
     $Visualizer.Required = $allKeysSet
+    Update-OkButtonState -Visualizer $Visualizer
 
     function New-KeyLabelInner {
         param([string]$KeyName, $VisualizerRef)
@@ -933,6 +989,7 @@ function Update-KeyboardVisualizer {
 
     if ($isDown) {
         $null = $Visualizer.Verified.Add($normalized)
+        Update-OkButtonState -Visualizer $Visualizer
     }
 
     $isVerified = $Visualizer.Verified.Contains($normalized)
@@ -1079,6 +1136,18 @@ $visualizer.Form.add_FormClosed({ $script:stopRequested = $true })
 $visualizer.Form.Show()
 $visualizer.OkButton.add_Click({
     if ($script:stopRequested) { return }
+    $ratio = Get-VerificationRatio -Visualizer $visualizer
+    if ($ratio -lt $script:minOkRatio) {
+        $minPercent = [math]::Round($script:minOkRatio * 100)
+        $percent = [math]::Round($ratio * 100)
+        [System.Windows.Forms.MessageBox]::Show(
+            "Testez au moins ${minPercent}% des touches avant de valider (actuel: ${percent}%).",
+            "MDT Live Ops",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return
+    }
     $missing = $visualizer.Required | Where-Object { -not $visualizer.Verified.Contains($_) }
     if ($missing.Count -gt 0) {
         Write-Warning ("[warn] Touches non vues: {0}" -f ($missing -join ', '))

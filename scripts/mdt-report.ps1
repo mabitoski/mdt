@@ -29,6 +29,7 @@ param(
   [string[]]$CameraTestArguments = $env:MDT_CAMERA_TEST_ARGS,
   [int]$CameraTestTimeoutSec = 20,
   [int]$MsinfoTimeoutSec = 0,
+  [string]$WinSatDataStorePath = $env:MDT_WINSAT_DATASTORE,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
   [string]$LogPath,
   [string]$Technician = $env:MDT_TECHNICIAN,
@@ -40,16 +41,20 @@ param(
   [switch]$KeyboardCaptureBlockInput,
   [int]$KeyboardCaptureTimeoutSec = 600,
   [switch]$SkipKeyboardCapture,
+  [switch]$SkipWinSatDataStore,
   [switch]$SkipStressScript,
   [switch]$SkipElevation,
-  [switch]$SkipTlsValidation
+  [switch]$SkipTlsValidation,
+  [switch]$FactoryReset,
+  [string]$FactoryResetConfirm,
+  [switch]$SkipFactoryResetPrompt
 )
 
-$scriptVersion = '1.4.3'
+$scriptVersion = '1.6.1'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
-  $ApiUrl = 'http://10.1.142.28:3000/api/ingest'
+  $ApiUrl = 'http://192.168.1.36:3000/api/ingest'
 }
 
 if (-not $NetworkPingTarget) {
@@ -58,6 +63,14 @@ if (-not $NetworkPingTarget) {
 
 if (-not $LogPath) {
   $LogPath = Join-Path $PSScriptRoot 'mdt-report.log'
+}
+
+if (-not $WinSatDataStorePath) {
+  try {
+    if ($env:SystemRoot) {
+      $WinSatDataStorePath = Join-Path $env:SystemRoot 'Performance\\WinSAT\\DataStore'
+    }
+  } catch { }
 }
 
 function Write-Log {
@@ -75,6 +88,124 @@ function Write-Log {
   }
 }
 
+$script:ProgressEnabled = $true
+try { $script:ProgressEnabled = [Environment]::UserInteractive } catch { }
+$script:ProgressTotal = 8
+$script:ProgressStep = 0
+
+function Step-Progress {
+  param([string]$Status)
+
+  if (-not $script:ProgressEnabled) { return }
+  $script:ProgressStep++
+  $percent = 0
+  if ($script:ProgressTotal -gt 0) {
+    $percent = [math]::Min(99, [math]::Round(($script:ProgressStep / $script:ProgressTotal) * 100))
+  }
+  Write-Progress -Activity 'MDT report' -Status $Status -PercentComplete $percent
+}
+
+function Complete-Progress {
+  if (-not $script:ProgressEnabled) { return }
+  Write-Progress -Activity 'MDT report' -Completed
+}
+
+function Send-ResetUiKeys {
+  param(
+    [int]$ProcessId,
+    [string]$WindowTitle,
+    [int]$DelaySec = 20
+  )
+
+  $isInteractive = $true
+  try { $isInteractive = [Environment]::UserInteractive } catch { }
+  if (-not $isInteractive) {
+    Write-Log 'Factory reset keystrokes skipped (non-interactive session).' 'WARN'
+    return
+  }
+
+  try {
+    $shell = New-Object -ComObject WScript.Shell
+    if ($DelaySec -gt 0) {
+      Write-Log "Waiting ${DelaySec}s before sending reset keys." 'WARN'
+      Start-Sleep -Seconds $DelaySec
+    }
+    try {
+      Add-Type -Namespace MDT -Name ConsoleNative -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+"@ -ErrorAction Stop | Out-Null
+      $consoleHandle = [MDT.ConsoleNative]::GetConsoleWindow()
+      if ($consoleHandle -ne [IntPtr]::Zero) {
+        [MDT.ConsoleNative]::ShowWindow($consoleHandle, 6) | Out-Null
+      }
+    } catch { }
+
+    $activated = $false
+    $targets = @()
+    if ($ProcessId) { $targets += $ProcessId }
+    if ($WindowTitle) { $targets += $WindowTitle }
+    $targets += @('Paramètres', 'Settings', 'Réinitialiser ce PC', 'Reset this PC')
+    foreach ($target in $targets) {
+      try {
+        if ($shell.AppActivate($target)) {
+          $activated = $true
+          break
+        }
+      } catch { }
+    }
+    if (-not $activated) {
+      Write-Log 'Factory reset window not activated; sending keys anyway.' 'WARN'
+    }
+
+    Start-Sleep -Milliseconds 800
+    for ($i = 0; $i -lt 5; $i++) {
+      $shell.SendKeys('{TAB}')
+      Start-Sleep -Milliseconds 150
+    }
+    $shell.SendKeys('{ENTER}')
+    Write-Log 'Waiting 10s before next reset step.' 'WARN'
+    Start-Sleep -Seconds 10
+    $shell.SendKeys('{TAB}')
+    Start-Sleep -Milliseconds 150
+    $shell.SendKeys('{ENTER}')
+    Write-Log 'Waiting 10s before final reset step.' 'WARN'
+    Start-Sleep -Seconds 10
+    $shell.SendKeys('{TAB}')
+    Start-Sleep -Milliseconds 150
+    $shell.SendKeys('{ENTER}')
+    Write-Log 'Factory reset keystrokes sent.' 'WARN'
+  } catch {
+    Write-Log "Factory reset keystrokes failed: $($_.Exception.Message)" 'WARN'
+  }
+}
+
+function Set-ConsoleFullscreen {
+  if (-not $script:IsInteractive) { return }
+  try {
+    Add-Type -Namespace MDT -Name ConsoleNative -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+"@ -ErrorAction Stop | Out-Null
+  } catch { }
+  try {
+    $handle = [MDT.ConsoleNative]::GetConsoleWindow()
+    if ($handle -ne [IntPtr]::Zero) {
+      [MDT.ConsoleNative]::ShowWindow($handle, 3) | Out-Null
+    }
+  } catch { }
+  try {
+    $raw = $Host.UI.RawUI
+    if ($raw -and $raw.MaxWindowSize.Width -gt 0 -and $raw.MaxWindowSize.Height -gt 0) {
+      $raw.WindowSize = $raw.MaxWindowSize
+    }
+  } catch { }
+}
+
 function Normalize-ArgumentList {
   param([string[]]$Values)
 
@@ -85,6 +216,335 @@ function Normalize-ArgumentList {
     return ($single -split '\s+') | Where-Object { $_ -ne '' }
   }
   return $Values
+}
+
+function Convert-WinsatNumber {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+  $clean = $Value.Trim()
+  if (-not $clean) { return $null }
+  $clean = $clean -replace '\s', ''
+  $clean = $clean.Replace(',', '.')
+  try {
+    return [double]::Parse($clean, [System.Globalization.CultureInfo]::InvariantCulture)
+  } catch {
+    return $null
+  }
+}
+
+function Update-MaxValue {
+  param(
+    [hashtable]$Target,
+    [string]$Key,
+    $Value
+  )
+
+  if ($null -eq $Value) { return }
+  if (-not $Target.ContainsKey($Key) -or $Target[$Key] -lt $Value) {
+    $Target[$Key] = $Value
+  }
+}
+
+function Read-WinsatXml {
+  param([string]$Path)
+
+  if (-not (Test-Path $Path)) { return $null }
+  try {
+    return [xml](Get-Content -Path $Path -Raw -Encoding Unicode)
+  } catch {
+    try {
+      return [xml](Get-Content -Path $Path -Raw)
+    } catch {
+      Write-Log "WinSAT XML parse failed: $Path ($($_.Exception.Message))" 'WARN'
+      return $null
+    }
+  }
+}
+
+function Get-WinsatXmlFiles {
+  param([string[]]$Roots)
+
+  $files = @()
+  foreach ($root in $Roots) {
+    if (-not $root) { continue }
+    if (-not (Test-Path $root)) { continue }
+    try {
+      $files += Get-ChildItem -Path $root -Filter '*.WinSAT.xml' -File -ErrorAction SilentlyContinue
+    } catch { }
+  }
+  return $files
+}
+
+function Select-WinsatFilesByType {
+  param([System.IO.FileInfo[]]$Files)
+
+  $selected = @{}
+  foreach ($file in $Files) {
+    $name = $file.Name
+    $type = $null
+    if ($name -match '(?i)Formal\\.Assessment') { $type = 'formal' }
+    elseif ($name -match '(?i)Cpu\\.Assessment') { $type = 'cpu' }
+    elseif ($name -match '(?i)Mem\\.Assessment') { $type = 'mem' }
+    elseif ($name -match '(?i)Disk\\.Assessment') { $type = 'disk' }
+    elseif ($name -match '(?i)Graphics3D\\.Assessment') { $type = 'graphics3d' }
+    elseif ($name -match '(?i)DWM\\.Assessment') { $type = 'dwm' }
+    if (-not $type) { continue }
+    if (-not $selected.ContainsKey($type) -or $file.LastWriteTime -gt $selected[$type].LastWriteTime) {
+      $selected[$type] = $file
+    }
+  }
+  return $selected
+}
+
+function Get-XmlText {
+  param(
+    [xml]$Doc,
+    [string]$XPath
+  )
+
+  if (-not $Doc) { return $null }
+  try {
+    $node = $Doc.SelectSingleNode($XPath)
+    if ($node -and $node.InnerText) { return $node.InnerText.Trim() }
+  } catch { }
+  return $null
+}
+
+function Get-WinsatFromDataStore {
+  param(
+    [string[]]$Paths
+  )
+
+  if ($SkipWinSatDataStore) { return $null }
+
+  $roots = @()
+  if ($Paths) {
+    foreach ($path in $Paths) {
+      if ($path) { $roots += $path }
+    }
+  }
+  $files = Get-WinsatXmlFiles -Roots $roots
+  if (-not $files -or $files.Count -eq 0) { return $null }
+
+  $selected = Select-WinsatFilesByType -Files $files
+  if (-not $selected -or $selected.Count -eq 0) { return $null }
+
+  $winsat = [ordered]@{
+    source = $null
+    files = @{}
+    winSPR = [ordered]@{}
+    metrics = [ordered]@{}
+    cpu = [ordered]@{}
+    cpuStatus = $null
+    memory = [ordered]@{}
+    disk = [ordered]@{}
+    graphics = [ordered]@{}
+    limitsApplied = @()
+    hasNoD3DTest = $false
+  }
+
+  $limits = New-Object 'System.Collections.Generic.HashSet[string]'
+  $sprFields = @('SystemScore', 'MemoryScore', 'CpuScore', 'CPUSubAggScore', 'VideoEncodeScore', 'GraphicsScore', 'GamingScore', 'DiskScore', 'Dx9SubScore', 'Dx10SubScore')
+
+  foreach ($entry in $selected.GetEnumerator()) {
+    $file = $entry.Value
+    $doc = Read-WinsatXml -Path $file.FullName
+    if (-not $doc) { continue }
+    if (-not $winsat.source) { $winsat.source = $file.Directory.FullName }
+    $winsat.files[$entry.Key] = $file.Name
+
+    foreach ($field in $sprFields) {
+      $raw = Get-XmlText -Doc $doc -XPath "//WinSPR/$field"
+      $value = Convert-WinsatNumber $raw
+      Update-MaxValue -Target $winsat.winSPR -Key $field -Value $value
+    }
+
+    if ($entry.Key -eq 'cpu' -and -not $winsat.cpuStatus) {
+      $cpuNode = $null
+      try { $cpuNode = $doc.SelectSingleNode('/WinSAT/CompletionStatus') } catch { }
+      if ($cpuNode) {
+        $cpuCode = $null
+        $cpuDesc = $null
+        try { $cpuCode = $cpuNode.InnerText.Trim() } catch { }
+        try { $cpuDesc = $cpuNode.GetAttribute('description') } catch { }
+        $cpuOk = $false
+        if ($cpuCode -eq '0') { $cpuOk = $true }
+        elseif ($cpuDesc -and $cpuDesc -match '(?i)réussite|success') { $cpuOk = $true }
+        $winsat.cpuStatus = if ($cpuOk) { 'ok' } else { 'nok' }
+      }
+    }
+
+    $limitNodes = $doc.SelectNodes('//WinSPR/LimitsApplied//LimitApplied')
+    if ($limitNodes) {
+      foreach ($node in $limitNodes) {
+        $limitText = $null
+        try {
+          $friendly = $node.GetAttribute('Friendly')
+          if ($friendly) { $limitText = $friendly.Trim() }
+        } catch { }
+        if (-not $limitText -and $node.InnerText) { $limitText = $node.InnerText.Trim() }
+        if ($limitText) { [void]$limits.Add($limitText) }
+      }
+    }
+
+    $cpuNodes = $doc.SelectNodes('//Metrics/CPUMetrics/*')
+    if ($cpuNodes) {
+      foreach ($node in $cpuNodes) {
+        $value = Convert-WinsatNumber $node.InnerText
+        Update-MaxValue -Target $winsat.cpu -Key $node.Name -Value $value
+      }
+    }
+
+    $memBandwidth = Convert-WinsatNumber (Get-XmlText -Doc $doc -XPath '//Metrics/MemoryMetrics/Bandwidth')
+    Update-MaxValue -Target $winsat.memory -Key 'bandwidthMBps' -Value $memBandwidth
+
+    $diskNodes = $doc.SelectNodes('//Metrics/DiskMetrics/AvgThroughput')
+    if ($diskNodes) {
+      foreach ($node in $diskNodes) {
+        $kind = $null
+        try { $kind = $node.GetAttribute('kind') } catch { }
+        $value = Convert-WinsatNumber $node.InnerText
+        if (-not $kind) { continue }
+        if ($kind -match 'Sequential\\s+Read|Séquentielles\\s+Lire') {
+          Update-MaxValue -Target $winsat.disk -Key 'seqReadMBps' -Value $value
+        } elseif ($kind -match 'Sequential\\s+Write|Séquentielles\\s+Ecriture|Séquentielles\\s+Écriture') {
+          Update-MaxValue -Target $winsat.disk -Key 'seqWriteMBps' -Value $value
+        } elseif ($kind -match 'Random\\s+Read|Aléatoires\\s+Lire') {
+          Update-MaxValue -Target $winsat.disk -Key 'randReadMBps' -Value $value
+        } elseif ($kind -match 'Random\\s+Write|Aléatoires\\s+Ecriture|Aléatoires\\s+Écriture') {
+          Update-MaxValue -Target $winsat.disk -Key 'randWriteMBps' -Value $value
+        }
+      }
+    }
+
+    $dwmFps = Convert-WinsatNumber (Get-XmlText -Doc $doc -XPath '//Metrics/GraphicsMetrics/DWMFps')
+    Update-MaxValue -Target $winsat.graphics -Key 'dwmFps' -Value $dwmFps
+    $videoMem = Convert-WinsatNumber (Get-XmlText -Doc $doc -XPath '//Metrics/GraphicsMetrics/VideoMemBandwidth')
+    Update-MaxValue -Target $winsat.graphics -Key 'videoMemBandwidthMBps' -Value $videoMem
+  }
+
+  if ($limits.Count -gt 0) {
+    $winsat.limitsApplied = @($limits)
+    foreach ($limit in $winsat.limitsApplied) {
+      if ($limit -match 'NoD3DTestRun|D3D|D3D test') {
+        $winsat.hasNoD3DTest = $true
+        break
+      }
+    }
+  }
+
+  if ($winsat.cpu.Count -gt 0) {
+    $cpuValues = @()
+    foreach ($val in $winsat.cpu.Values) {
+      if ($val -is [double]) { $cpuValues += $val }
+    }
+    if ($cpuValues.Count -gt 0) {
+      $winsat.cpu.maxMBps = [math]::Round(($cpuValues | Measure-Object -Maximum).Maximum, 1)
+    }
+  }
+
+  return $winsat
+}
+
+function Get-WinsatCpuFallback {
+  param([string[]]$Roots)
+
+  $files = Get-WinsatXmlFiles -Roots $Roots
+  if (-not $files -or $files.Count -eq 0) { return $null }
+  $selected = Select-WinsatFilesByType -Files $files
+  if (-not $selected -or $selected.Count -eq 0) { return $null }
+  $cpuFile = $null
+  if ($selected.ContainsKey('cpu')) { $cpuFile = $selected['cpu'] }
+  elseif ($selected.ContainsKey('formal')) { $cpuFile = $selected['formal'] }
+  if (-not $cpuFile) { return $null }
+
+  $doc = Read-WinsatXml -Path $cpuFile.FullName
+  if (-not $doc) { return $null }
+
+  $cpuStatus = $null
+  try {
+    $node = $doc.SelectSingleNode('/WinSAT/CompletionStatus')
+    if ($node) {
+      $code = $null
+      $desc = $null
+      try { $code = $node.InnerText.Trim() } catch { }
+      try { $desc = $node.GetAttribute('description') } catch { }
+      if ($code -eq '0' -or ($desc -and $desc -match '(?i)réussite|success')) {
+        $cpuStatus = 'ok'
+      } else {
+        $cpuStatus = 'nok'
+      }
+    }
+  } catch { }
+
+  $cpuScore = Convert-WinsatNumber (Get-XmlText -Doc $doc -XPath '//WinSPR/CpuScore')
+  $cpuMax = $null
+  $cpuNodes = $doc.SelectNodes('//Metrics/CPUMetrics/*')
+  if ($cpuNodes) {
+    foreach ($node in $cpuNodes) {
+      $value = Convert-WinsatNumber $node.InnerText
+      if ($null -eq $value) { continue }
+      if ($cpuMax -eq $null -or $value -gt $cpuMax) { $cpuMax = $value }
+    }
+  }
+
+  return @{
+    status = $cpuStatus
+    score = $cpuScore
+    maxMBps = if ($cpuMax -ne $null) { [math]::Round($cpuMax, 1) } else { $null }
+    file = $cpuFile.Name
+  }
+}
+
+function Get-WinsatCpuFallback {
+  param([string[]]$Roots)
+
+  $files = Get-WinsatXmlFiles -Roots $Roots
+  if (-not $files -or $files.Count -eq 0) { return $null }
+  $selected = Select-WinsatFilesByType -Files $files
+  if (-not $selected -or $selected.Count -eq 0) { return $null }
+  $cpuFile = $null
+  if ($selected.ContainsKey('cpu')) { $cpuFile = $selected['cpu'] }
+  elseif ($selected.ContainsKey('formal')) { $cpuFile = $selected['formal'] }
+  if (-not $cpuFile) { return $null }
+
+  $doc = Read-WinsatXml -Path $cpuFile.FullName
+  if (-not $doc) { return $null }
+
+  $cpuStatus = $null
+  try {
+    $node = $doc.SelectSingleNode('/WinSAT/CompletionStatus')
+    if ($node) {
+      $code = $null
+      $desc = $null
+      try { $code = $node.InnerText.Trim() } catch { }
+      try { $desc = $node.GetAttribute('description') } catch { }
+      if ($code -eq '0' -or ($desc -and $desc -match '(?i)réussite|success')) {
+        $cpuStatus = 'ok'
+      } else {
+        $cpuStatus = 'nok'
+      }
+    }
+  } catch { }
+
+  $cpuScore = Convert-WinsatNumber (Get-XmlText -Doc $doc -XPath '//WinSPR/CpuScore')
+  $cpuMax = $null
+  $cpuNodes = $doc.SelectNodes('//Metrics/CPUMetrics/*')
+  if ($cpuNodes) {
+    foreach ($node in $cpuNodes) {
+      $value = Convert-WinsatNumber $node.InnerText
+      if ($null -eq $value) { continue }
+      if ($cpuMax -eq $null -or $value -gt $cpuMax) { $cpuMax = $value }
+    }
+  }
+
+  return @{
+    status = $cpuStatus
+    score = $cpuScore
+    maxMBps = if ($cpuMax -ne $null) { [math]::Round($cpuMax, 1) } else { $null }
+    file = $cpuFile.Name
+  }
 }
 
 function Build-ArgumentList {
@@ -157,6 +617,127 @@ function Resolve-CameraTestExe {
   return $candidate
 }
 
+function Invoke-FactoryResetPrompt {
+  param(
+    [switch]$ForceReset,
+    [string]$ConfirmToken
+  )
+
+  if ($SkipFactoryResetPrompt) {
+    Write-Log 'Factory reset prompt skipped (SkipFactoryResetPrompt set).' 'WARN'
+    return
+  }
+
+  $shouldReset = $false
+  $forcePrompt = $false
+  if ($ForceReset) {
+    if ($ConfirmToken -and $ConfirmToken.ToUpperInvariant() -eq 'RESET') {
+      $shouldReset = $true
+    } else {
+      Write-Log 'Factory reset confirmation missing; falling back to prompt.' 'WARN'
+      $forcePrompt = $true
+    }
+  }
+  if (-not $ForceReset -or $forcePrompt) {
+    $prompted = $false
+    $answerYes = $false
+    $promptTitle = 'MDT Live Ops'
+    $promptText = 'Reset usine maintenant ?'
+    try {
+      $shell = New-Object -ComObject WScript.Shell
+      $popupResult = $shell.Popup($promptText, 0, $promptTitle, 0x4 + 0x30 + 0x1000)
+      $prompted = $true
+      if ($popupResult -eq 6) { $answerYes = $true }
+    } catch {
+      try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $result = [System.Windows.Forms.MessageBox]::Show(
+          $promptText,
+          $promptTitle,
+          [System.Windows.Forms.MessageBoxButtons]::YesNo,
+          [System.Windows.Forms.MessageBoxIcon]::Warning,
+          [System.Windows.Forms.MessageBoxDefaultButton]::Button2,
+          [System.Windows.Forms.MessageBoxOptions]::ServiceNotification
+        )
+        $prompted = $true
+        if ($result -eq [System.Windows.Forms.DialogResult]::Yes) { $answerYes = $true }
+      } catch {
+        $isInteractive = $true
+        try { $isInteractive = [Environment]::UserInteractive } catch { }
+        if (-not $isInteractive) {
+          Write-Log 'Factory reset skipped (non-interactive session).' 'WARN'
+          return
+        }
+        $answer = Read-Host 'Reset usine maintenant ? (oui/non)'
+        $prompted = $true
+        if ($answer -match '^(o|oui|y|yes)$') { $answerYes = $true }
+      }
+    }
+
+    if (-not $prompted) {
+      Write-Log 'Factory reset prompt failed.' 'WARN'
+      return
+    }
+    if (-not $answerYes) {
+      Write-Log 'Factory reset cancelled by user.' 'WARN'
+      return
+    }
+    $shouldReset = $true
+  }
+
+  if (-not $shouldReset) { return }
+
+  $resetCmd = Get-Command systemreset.exe -ErrorAction SilentlyContinue
+  if (-not $resetCmd) {
+    $candidates = @()
+    if ($env:SystemRoot) {
+      $candidates += Join-Path $env:SystemRoot 'System32\\systemreset.exe'
+      $candidates += Join-Path $env:SystemRoot 'SysNative\\systemreset.exe'
+    }
+    foreach ($candidate in $candidates) {
+      if ($candidate -and (Test-Path $candidate)) {
+        $resetCmd = [pscustomobject]@{ Source = $candidate }
+        break
+      }
+    }
+  }
+  if (-not $resetCmd) {
+    Write-Log 'Factory reset requested but systemreset.exe not found. Opening Settings > Recovery.' 'WARN'
+    try {
+      Start-Process -FilePath 'ms-settings:recovery' | Out-Null
+    } catch {
+      try { Start-Process -FilePath 'explorer.exe' -ArgumentList 'ms-settings:recovery' | Out-Null } catch { }
+    }
+    Send-ResetUiKeys -WindowTitle 'Paramètres' -DelaySec 20
+    return
+  }
+
+  Write-Log 'Factory reset requested. Launching systemreset.exe -factoryreset' 'WARN'
+  try {
+    $resetProc = $null
+    if (-not $script:IsAdmin) {
+      Write-Log 'Factory reset requires elevation; requesting UAC.' 'WARN'
+      $resetProc = Start-Process -FilePath $resetCmd.Source -ArgumentList '-factoryreset' -Verb RunAs -WindowStyle Normal -PassThru
+    } else {
+      $resetProc = Start-Process -FilePath $resetCmd.Source -ArgumentList '-factoryreset' -WindowStyle Normal -PassThru
+    }
+    if ($resetProc) {
+      Write-Log "Factory reset process started (PID=$($resetProc.Id))." 'WARN'
+      Send-ResetUiKeys -ProcessId $resetProc.Id -DelaySec 20
+      Start-Sleep -Seconds 2
+      $stillRunning = $null
+      try { $stillRunning = Get-Process -Id $resetProc.Id -ErrorAction SilentlyContinue } catch { }
+      if (-not $stillRunning) {
+        Write-Log 'Factory reset process exited quickly; opening Settings > Recovery.' 'WARN'
+        try { Start-Process -FilePath 'ms-settings:recovery' | Out-Null } catch { }
+      }
+    }
+  } catch {
+    Write-Log "Factory reset launch failed: $($_.Exception.Message)" 'WARN'
+    try { Start-Process -FilePath 'ms-settings:recovery' | Out-Null } catch { }
+  }
+}
+
 function Copy-ScriptsForElevation {
   param([string]$ScriptPath)
 
@@ -205,6 +786,10 @@ function Invoke-KeyboardCapture {
     return @{ status = 'not_tested'; exitCode = $null }
   }
 
+  if (-not $LogPath) {
+    $LogPath = Join-Path $env:TEMP ("mdt-keyboard-{0}.jsonl" -f [guid]::NewGuid().ToString('N'))
+  }
+
   $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-NoLogo', '-File', $ScriptPath)
   if ($LogPath) { $args += @('-LogPath', $LogPath) }
   if ($ConfigDir) { $args += @('-ConfigDir', $ConfigDir) }
@@ -213,10 +798,18 @@ function Invoke-KeyboardCapture {
   if ($BlockInput) { $args += '-BlockInput' }
 
   try {
-    $proc = Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal -PassThru
+    $workingDir = Split-Path $ScriptPath -Parent
+    $proc = Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal -WorkingDirectory $workingDir -PassThru
     if (-not $proc) {
       Write-Log 'Keyboard capture failed to start.' 'WARN'
       return @{ status = 'not_tested'; exitCode = $null }
+    }
+    try {
+      $null = $proc.WaitForInputIdle(5000)
+      $wshell = New-Object -ComObject WScript.Shell
+      $null = $wshell.AppActivate($proc.Id)
+    } catch {
+      Write-Log "Keyboard capture focus hint failed: $($_.Exception.Message)" 'WARN'
     }
     if ($TimeoutSec -gt 0) {
       if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
@@ -235,9 +828,166 @@ function Invoke-KeyboardCapture {
       default { 'not_tested' }
     }
     Write-Log "Keyboard capture finished: status=$status exitCode=$exitCode"
+    if ($status -ne 'ok' -and $status -ne 'nok') {
+      $logStatus = Get-KeyboardStatusFromLog -Path $LogPath
+      if ($logStatus) {
+        Write-Log "Keyboard capture status recovered from log: $logStatus"
+        return @{ status = $logStatus; exitCode = $exitCode; fromLog = $true }
+      }
+    }
     return @{ status = $status; exitCode = $exitCode }
   } catch {
     Write-Log "Keyboard capture launch failed: $($_.Exception.Message)" 'WARN'
+    return @{ status = 'not_tested'; exitCode = $null }
+  }
+}
+
+function Get-KeyboardStatusFromLog {
+  param([string]$Path)
+
+  if (-not $Path -or -not (Test-Path $Path)) { return $null }
+  try {
+    $lines = Get-Content -Path $Path -Tail 200
+  } catch {
+    return $null
+  }
+  if (-not $lines) { return $null }
+  $reversed = [System.Collections.ArrayList]@($lines)
+  $reversed.Reverse()
+  foreach ($line in $reversed) {
+    if (-not $line) { continue }
+    try {
+      $obj = $line | ConvertFrom-Json -ErrorAction Stop
+      if ($obj -and $obj.status) {
+        return ($obj.status.ToString().Trim().ToLowerInvariant())
+      }
+    } catch { }
+  }
+  return $null
+}
+
+function Start-KeyboardCaptureAsync {
+  param(
+    [string]$ScriptPath,
+    [string]$LogPath,
+    [string]$ConfigDir,
+    [string]$Layout,
+    [string]$LayoutConfig,
+    [switch]$BlockInput,
+    [int]$TimeoutSec = 600
+  )
+
+  if (-not $ScriptPath) { return @{ started = $false; status = 'not_tested' } }
+  if (-not (Test-Path $ScriptPath)) {
+    Write-Log "Keyboard capture script not found: $ScriptPath" 'WARN'
+    return @{ started = $false; status = 'not_tested' }
+  }
+
+  $isInteractive = $true
+  try { $isInteractive = [Environment]::UserInteractive } catch { }
+  if (-not $isInteractive) {
+    Write-Log 'Keyboard capture skipped (non-interactive session).' 'WARN'
+    return @{ started = $false; status = 'not_tested' }
+  }
+
+  $psCmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
+  if (-not $psCmd) {
+    Write-Log 'powershell.exe not found for keyboard capture' 'WARN'
+    return @{ started = $false; status = 'not_tested' }
+  }
+
+  if (-not $LogPath) {
+    $LogPath = Join-Path $env:TEMP ("mdt-keyboard-{0}.jsonl" -f [guid]::NewGuid().ToString('N'))
+  }
+
+  $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-NoLogo', '-File', $ScriptPath)
+  if ($LogPath) { $args += @('-LogPath', $LogPath) }
+  if ($ConfigDir) { $args += @('-ConfigDir', $ConfigDir) }
+  if ($Layout) { $args += @('-Layout', $Layout) }
+  if ($LayoutConfig) { $args += @('-LayoutConfig', $LayoutConfig) }
+  if ($BlockInput) { $args += '-BlockInput' }
+
+  try {
+    $workingDir = Split-Path $ScriptPath -Parent
+    $proc = Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal -WorkingDirectory $workingDir -PassThru
+    if (-not $proc) {
+      Write-Log 'Keyboard capture failed to start.' 'WARN'
+      return @{ started = $false; status = 'not_tested' }
+    }
+    try {
+      $null = $proc.WaitForInputIdle(5000)
+      $wshell = New-Object -ComObject WScript.Shell
+      $null = $wshell.AppActivate($proc.Id)
+    } catch {
+      Write-Log "Keyboard capture focus hint failed: $($_.Exception.Message)" 'WARN'
+    }
+    Write-Log "Keyboard capture started (PID=$($proc.Id))."
+    return @{
+      started = $true
+      process = $proc
+      timeoutSec = $TimeoutSec
+      startedAt = Get-Date
+      logPath = $LogPath
+    }
+  } catch {
+    Write-Log "Keyboard capture launch failed: $($_.Exception.Message)" 'WARN'
+    return @{ started = $false; status = 'not_tested' }
+  }
+}
+
+function Complete-KeyboardCapture {
+  param([hashtable]$State)
+
+  if (-not $State -or -not $State.started -or -not $State.process) {
+    return @{ status = 'not_tested'; exitCode = $null }
+  }
+
+  $proc = $State.process
+  $timeoutSec = if ($State.timeoutSec -ne $null) { [int]$State.timeoutSec } else { 0 }
+  $elapsed = 0
+  if ($State.startedAt) {
+    $elapsed = [int]([DateTime]::Now - $State.startedAt).TotalSeconds
+  }
+  $remaining = if ($timeoutSec -gt 0) { [math]::Max(0, $timeoutSec - $elapsed) } else { 0 }
+
+  try {
+    if ($timeoutSec -gt 0) {
+      if (-not $proc.WaitForExit($remaining * 1000)) {
+        Write-Log "Keyboard capture timed out after ${timeoutSec}s." 'WARN'
+        try { $proc.Kill() } catch { }
+        $logStatus = Get-KeyboardStatusFromLog -Path $State.logPath
+        if ($logStatus) {
+          Write-Log "Keyboard capture status recovered from log: $logStatus"
+          return @{ status = $logStatus; exitCode = $null; timedOut = $true; fromLog = $true }
+        }
+        return @{ status = 'not_tested'; exitCode = $null; timedOut = $true }
+      }
+    } else {
+      $proc.WaitForExit()
+    }
+    $exitCode = $proc.ExitCode
+    $status = switch ($exitCode) {
+      0 { 'ok' }
+      1 { 'nok' }
+      2 { 'not_tested' }
+      default { 'not_tested' }
+    }
+    Write-Log "Keyboard capture finished: status=$status exitCode=$exitCode"
+    if ($status -ne 'ok' -and $status -ne 'nok') {
+      $logStatus = Get-KeyboardStatusFromLog -Path $State.logPath
+      if ($logStatus) {
+        Write-Log "Keyboard capture status recovered from log: $logStatus"
+        return @{ status = $logStatus; exitCode = $exitCode; fromLog = $true }
+      }
+    }
+    return @{ status = $status; exitCode = $exitCode }
+  } catch {
+    Write-Log "Keyboard capture wait failed: $($_.Exception.Message)" 'WARN'
+    $logStatus = Get-KeyboardStatusFromLog -Path $State.logPath
+    if ($logStatus) {
+      Write-Log "Keyboard capture status recovered from log: $logStatus"
+      return @{ status = $logStatus; exitCode = $null; fromLog = $true }
+    }
     return @{ status = 'not_tested'; exitCode = $null }
   }
 }
@@ -317,8 +1067,31 @@ if (-not $script:IsAdmin -and -not $SkipElevation) {
   Write-Log 'Continuing without admin rights.' 'WARN'
 }
 
+Set-ConsoleFullscreen
 Write-Log "Start script version $scriptVersion"
 Write-Log "ApiUrl=$ApiUrl Category=$Category TestMode=$TestMode"
+Step-Progress -Status 'Initialisation'
+
+$winsatRoots = @()
+if (-not $SkipWinSatDataStore) {
+  if ($WinSatDataStorePath) { $winsatRoots += $WinSatDataStorePath }
+  if ($env:SystemRoot) {
+    try {
+      $winsatDefault = Join-Path $env:SystemRoot 'Performance\\WinSAT\\DataStore'
+      if ($winsatDefault -and ($winsatRoots -notcontains $winsatDefault)) { $winsatRoots += $winsatDefault }
+    } catch { }
+    try {
+      $winsatAlt = Join-Path $env:SystemRoot 'Performance\\DataStore'
+      if ($winsatAlt -and ($winsatRoots -notcontains $winsatAlt)) { $winsatRoots += $winsatAlt }
+    } catch { }
+  }
+  if ($winsatRoots -notcontains $PSScriptRoot) { $winsatRoots += $PSScriptRoot }
+}
+
+$winsatStore = $null
+if (-not $SkipWinSatDataStore -and $winsatRoots.Count -gt 0) {
+  $winsatStore = Get-WinsatFromDataStore -Paths $winsatRoots
+}
 
 if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
   $stressScriptPath = Join-Path $PSScriptRoot 'mdt-stress.ps1'
@@ -353,13 +1126,17 @@ if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
       CameraTestArguments = $CameraTestArguments
       CameraTestTimeoutSec = $CameraTestTimeoutSec
       MsinfoTimeoutSec = $MsinfoTimeoutSec
+      WinSatDataStorePath = $WinSatDataStorePath
       MacPreference = $MacPreference
       LogPath = $LogPath
       Technician = $Technician
     }
     if ($SkipTlsValidation) { $delegateParams.SkipTlsValidation = $true }
-    & $stressScriptPath @delegateParams
-    exit $LASTEXITCODE
+    if ($SkipWinSatDataStore) { $delegateParams.SkipWinSatDataStore = $true }
+  & $stressScriptPath @delegateParams
+  Complete-Progress
+  Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
+  exit $LASTEXITCODE
   } else {
     Write-Log "Stress script not found: $stressScriptPath" 'WARN'
   }
@@ -1173,11 +1950,6 @@ function Invoke-WinsatCapture {
 
   $cmd = Get-Command winsat -ErrorAction SilentlyContinue
   if (-not $cmd) { return @{ status = 'absent'; mbps = $null } }
-  if (-not $script:IsAdmin) {
-    Write-Log 'WinSAT skipped (admin required)' 'WARN'
-    return @{ status = 'denied'; mbps = $null }
-  }
-
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $cmd.Source
   $psi.Arguments = ($Arguments -join ' ')
@@ -1206,7 +1978,7 @@ function Invoke-WinsatCapture {
 
   $output = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
 
-  $matches = [regex]::Matches($output, '([0-9]+(?:[\.,][0-9]+)?)\s*MB/s')
+  $matches = [regex]::Matches($output, '([0-9]+(?:[\.,][0-9]+)?)\s*M(?:B|o)/s')
   $mbps = $null
   if ($matches.Count -gt 0) {
     $values = @()
@@ -1226,9 +1998,9 @@ function Invoke-WinsatCapture {
     $status = 'denied'
   } elseif ($outputLower -match 'already running|déjà en cours') {
     $status = 'not_tested'
-  } elseif ($outputLower -match 'not available|not supported|introuvable') {
+  } elseif ($outputLower -match 'not available|not supported|introuvable|n''est pas disponible|pas pris en charge') {
     $status = 'absent'
-  } elseif ($outputLower -match 'access is denied|permission') {
+  } elseif ($outputLower -match 'access is denied|permission|acc[eè]s refus[eé]|autorisation|droits') {
     $status = 'denied'
   } elseif ($proc.ExitCode -ne 0 -and $mbps -ne $null) {
     Write-Log "WinSAT exit code $($proc.ExitCode) but MB/s found; treating as ok." 'WARN'
@@ -1237,6 +2009,9 @@ function Invoke-WinsatCapture {
     $status = if ($proc.ExitCode -eq 0) { 'ok' } else { 'nok' }
   }
 
+  if ($status -ne 'ok') {
+    Write-Log "WinSAT exit code $($proc.ExitCode)" 'WARN'
+  }
   if ($status -ne 'ok' -and $output) {
     $snippet = ($output -split "`r?`n" | Where-Object { $_ -ne '' } | Select-Object -Last 4) -join ' | '
     if ($snippet) { Write-Log "WinSAT output: $snippet" 'WARN' }
@@ -1390,6 +2165,22 @@ function Run-WinsatLoop {
   return @{ status = $resultStatus; mbps = $bestMbps }
 }
 
+function Run-WinsatCpuLoop {
+  param(
+    [int]$Loops,
+    [int]$TimeoutSec
+  )
+
+  if ($Loops -le 0) { return $null }
+  Write-Log 'WinSAT CPU run: encryption'
+  $primary = Run-WinsatLoop -Arguments @('cpu', '-encryption') -Loops $Loops -TimeoutSec $TimeoutSec
+  if ($primary -and $primary.status -eq 'ok') { return $primary }
+  Write-Log 'WinSAT CPU run: compression'
+  $secondary = Run-WinsatLoop -Arguments @('cpu', '-compression') -Loops $Loops -TimeoutSec $TimeoutSec
+  if ($secondary) { return $secondary }
+  return $primary
+}
+
 function Invoke-WinsatScore {
   param(
     [string[]]$Arguments,
@@ -1398,11 +2189,6 @@ function Invoke-WinsatScore {
 
   $cmd = Get-Command winsat -ErrorAction SilentlyContinue
   if (-not $cmd) { return @{ status = 'absent'; score = $null } }
-  if (-not $script:IsAdmin) {
-    Write-Log 'WinSAT skipped (admin required)' 'WARN'
-    return @{ status = 'denied'; score = $null }
-  }
-
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $cmd.Source
   $psi.Arguments = ($Arguments -join ' ')
@@ -1556,16 +2342,28 @@ function Invoke-IperfTest {
 function Invoke-FsCheck {
   param(
     [string]$DriveLetter,
-    [int]$TimeoutSec
+    [int]$TimeoutSec,
+    [ValidateSet('scan', 'dirty')][string]$Mode = 'scan'
   )
+
+  if ($Mode -eq 'dirty') {
+    $cmd = Get-Command fsutil -ErrorAction SilentlyContinue
+    if (-not $cmd) { return @{ status = 'absent' } }
+    $result = Invoke-ExternalCommand -Path $cmd.Source -Arguments @('dirty', 'query', $DriveLetter) -TimeoutSec 10 -Name 'fsutil dirty'
+    if ($result.status -ne 'ok') { return @{ status = $result.status; output = $result.output } }
+    $output = $result.output
+    $outputLower = $output.ToLowerInvariant()
+    if ($outputLower -match 'is dirty|est sale') {
+      return @{ status = 'nok'; output = $output }
+    }
+    if ($outputLower -match 'is not dirty|n''est pas sale') {
+      return @{ status = 'ok'; output = $output }
+    }
+    return @{ status = 'ok'; output = $output }
+  }
 
   $cmd = Get-Command chkdsk -ErrorAction SilentlyContinue
   if (-not $cmd) { return @{ status = 'absent' } }
-  if (-not $script:IsAdmin) {
-    Write-Log 'chkdsk skipped (admin required)' 'WARN'
-    return @{ status = 'denied' }
-  }
-
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $cmd.Source
   $psi.Arguments = "$DriveLetter /scan"
@@ -1593,6 +2391,10 @@ function Invoke-FsCheck {
   }
 
   $output = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
+  $outputLower = $output.ToLowerInvariant()
+  if ($outputLower -match 'access is denied|acc[eè]s refus[eé]|permission|administrateur|administrator|elevation') {
+    return @{ status = 'denied'; output = $output }
+  }
   if ($proc.ExitCode -eq 0) {
     return @{ status = 'ok'; output = $output }
   }
@@ -1822,11 +2624,40 @@ function Get-DisplayInfo {
   return $info
 }
 
+$forceStress = -not $SkipStressScript
 $testLoops = 0
-if ($TestMode -eq 'quick') { $testLoops = 1 }
-if ($TestMode -eq 'stress') { $testLoops = [math]::Max($StressLoops, 2) }
+$skipWinsatLive = $false
+if (-not $forceStress -and $TestMode -eq 'quick' -and $winsatStore) {
+  $skipWinsatLive = $true
+  Write-Log 'WinSAT datastore present; skipping live WinSAT tests.' 'INFO'
+}
+if ($forceStress) {
+  $testLoops = [math]::Max($StressLoops, 2)
+  Write-Log "Stress tests forced (loops=$testLoops)." 'INFO'
+} elseif ($TestMode -eq 'quick' -and -not $skipWinsatLive) {
+  $testLoops = 1
+} elseif ($TestMode -eq 'stress') {
+  $testLoops = [math]::Max($StressLoops, 2)
+}
 
 $categoryValue = if ($Category -eq 'auto') { Get-ChassisCategory } else { $Category }
+$keyboardCaptureState = $null
+if (-not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
+  $keyboardScript = Resolve-KeyboardCapturePath -Value $KeyboardCapturePath
+  $layoutValue = if ($KeyboardCaptureLayout) { $KeyboardCaptureLayout } else { $null }
+  $layoutConfigValue = if ($KeyboardCaptureLayoutConfig) { $KeyboardCaptureLayoutConfig } else { $null }
+  $configDirValue = if ($KeyboardCaptureConfigDir) { $KeyboardCaptureConfigDir } else { $null }
+  $logPathValue = if ($KeyboardCaptureLogPath) { $KeyboardCaptureLogPath } else { $null }
+  Write-Log 'Launching keyboard capture for laptop (async)'
+  $keyboardCaptureState = Start-KeyboardCaptureAsync `
+    -ScriptPath $keyboardScript `
+    -LogPath $logPathValue `
+    -ConfigDir $configDirValue `
+    -Layout $layoutValue `
+    -LayoutConfig $layoutConfigValue `
+    -BlockInput:$KeyboardCaptureBlockInput `
+    -TimeoutSec $KeyboardCaptureTimeoutSec
+}
 
 $system = Get-CimInstanceSafe -ClassName 'Win32_ComputerSystem'
 $vendor = ($system | Select-Object -First 1).Manufacturer
@@ -1846,6 +2677,7 @@ $ramMb = Get-RamMb
 $slotsInfo = Get-RamSlots
 $batteryHealth = Get-BatteryHealth
 $batteryInfo = Get-BatteryInfo
+Step-Progress -Status 'Inventaire materiel'
 
 $cameraDevices = @()
 $cameraDevices += Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPClass='Camera'"
@@ -1869,6 +2701,7 @@ if ($cameraPresence -eq 'absent' -or $cameraPresence -eq 'nok') {
   }
 }
 Write-Log "Camera presence=$cameraPresence TestPath=$cameraTestPathValue TestStatus=$cameraTestStatus Final=$cameraStatus"
+Step-Progress -Status 'Peripheriques'
 
 $usbDevices = Get-CimInstanceSafe -ClassName 'Win32_USBController'
 $usbStatus = Get-StatusFromDevices $usbDevices
@@ -1905,6 +2738,7 @@ $badgeStatus = Get-StatusFromDevices $badgeDevices
 $diskSmart = $null
 $diskInventory = Get-DiskInventory
 $volumeInventory = Get-VolumeInventory
+Step-Progress -Status 'Stockage'
 
 $systemDrive = $env:SystemDrive
 if (-not $systemDrive) { $systemDrive = 'C:' }
@@ -1917,7 +2751,7 @@ $memTest = Run-WinsatLoop -Arguments @('mem') -Loops $testLoops -TimeoutSec $Mem
 $cpuTest = $null
 $gpuTest = $null
 if ($testLoops -gt 0) {
-  $cpuTest = Run-WinsatLoop -Arguments @('cpu') -Loops $testLoops -TimeoutSec $CpuTestTimeoutSec
+  $cpuTest = Run-WinsatCpuLoop -Loops $testLoops -TimeoutSec $CpuTestTimeoutSec
   $gpuTest = Invoke-WinsatScore -Arguments @('d3d') -TimeoutSec $GpuTestTimeoutSec
 }
 if ($gpuTest -and $gpuTest.status -eq 'timeout') {
@@ -1941,8 +2775,16 @@ $networkPingTargetValue = if ($NetworkPingTarget) { $NetworkPingTarget } else { 
 $networkPingResult = Test-NetworkPing -Target $networkPingTargetValue -Count $NetworkPingCount
 $iperfResult = $null
 
-$runFsCheck = $FsCheckMode -eq 'scan' -or ($FsCheckMode -eq 'auto' -and $TestMode -eq 'stress')
-$fsCheckResult = if ($runFsCheck) { Invoke-FsCheck -DriveLetter $driveLetter -TimeoutSec $FsCheckTimeoutSec } else { @{ status = 'not_tested' } }
+$fsCheckModeValue = $FsCheckMode
+if ($FsCheckMode -eq 'auto') {
+  $fsCheckModeValue = if ($TestMode -eq 'stress') { 'scan' } else { 'dirty' }
+}
+$fsCheckResult = if ($fsCheckModeValue -eq 'none') {
+  @{ status = 'not_tested' }
+} else {
+  Invoke-FsCheck -DriveLetter $driveLetter -TimeoutSec $FsCheckTimeoutSec -Mode $fsCheckModeValue
+}
+Step-Progress -Status 'Diagnostics'
 
 $powerPlan = Get-PowerPlanName
 $bootMode = Get-BootMode
@@ -2087,6 +2929,92 @@ if ($iperfResult) {
 if ($fsCheckResult) { $tests.fsCheck = $fsCheckResult.status }
 if ($memDiagStatus) { $tests.memDiag = $memDiagStatus }
 
+if (-not $winsatStore -and -not $SkipWinSatDataStore -and $winsatRoots.Count -gt 0) {
+  $winsatStore = Get-WinsatFromDataStore -Paths $winsatRoots
+  if ($winsatStore) { Write-Log 'WinSAT datastore refreshed after tests.' 'INFO' }
+}
+
+if ($winsatStore) {
+  if ($winsatStore.files -and $winsatStore.files.Keys.Count -gt 0) {
+    $fileList = ($winsatStore.files.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
+    Write-Log "WinSAT datastore parsed: $fileList"
+  } else {
+    Write-Log 'WinSAT datastore parsed with no file list.' 'WARN'
+  }
+  $cpuMax = $null
+  if ($winsatStore.cpu -and $winsatStore.cpu.maxMBps -ne $null) { $cpuMax = $winsatStore.cpu.maxMBps }
+  $cpuScore = $null
+  if ($winsatStore.winSPR -and $winsatStore.winSPR.CpuScore -ne $null) { $cpuScore = $winsatStore.winSPR.CpuScore }
+  $cpuStatus = $winsatStore.cpuStatus
+  Write-Log ("WinSAT CPU summary: maxMBps={0} cpuScore={1} cpuStatus={2}" -f $cpuMax, $cpuScore, $cpuStatus)
+  $cpuOk = $false
+  if ($cpuMax -ne $null) { $cpuOk = $true }
+  elseif ($cpuScore -ne $null) { $cpuOk = $true }
+  elseif ($cpuStatus -eq 'ok') { $cpuOk = $true }
+  if ($cpuOk) {
+    if (-not $tests.cpuTest -or $tests.cpuTest -ne 'ok') { $tests.cpuTest = 'ok' }
+    if ($tests.cpuMBps -eq $null -and $cpuMax -ne $null) { $tests.cpuMBps = $cpuMax }
+  }
+
+  $memBandwidth = $null
+  if ($winsatStore.memory -and $winsatStore.memory.bandwidthMBps -ne $null) { $memBandwidth = $winsatStore.memory.bandwidthMBps }
+  if ($memBandwidth -ne $null) {
+    if (-not $tests.ramTest -or $tests.ramTest -ne 'ok') { $tests.ramTest = 'ok' }
+    if ($tests.ramMBps -eq $null) { $tests.ramMBps = [math]::Round($memBandwidth, 1) }
+  }
+
+  $diskSeqRead = $null
+  if ($winsatStore.disk -and $winsatStore.disk.seqReadMBps -ne $null) { $diskSeqRead = $winsatStore.disk.seqReadMBps }
+  if ($diskSeqRead -ne $null) {
+    if (-not $tests.diskRead -or $tests.diskRead -ne 'ok') { $tests.diskRead = 'ok' }
+    if ($tests.diskReadMBps -eq $null) { $tests.diskReadMBps = [math]::Round($diskSeqRead, 1) }
+  }
+
+  if ($winsatStore.disk -and $winsatStore.disk.seqWriteMBps -ne $null -and $tests.diskWriteMBps -eq $null) {
+    $tests.diskWriteMBps = [math]::Round($winsatStore.disk.seqWriteMBps, 1)
+    if (-not $tests.diskWrite -or $tests.diskWrite -ne 'ok') { $tests.diskWrite = 'ok' }
+  }
+
+  if (-not $winsatStore.hasNoD3DTest) {
+    $graphicsScore = $null
+    if ($winsatStore.winSPR -and $winsatStore.winSPR.GamingScore -ne $null) { $graphicsScore = $winsatStore.winSPR.GamingScore }
+    if ($graphicsScore -eq $null -and $winsatStore.winSPR -and $winsatStore.winSPR.GraphicsScore -ne $null) {
+      $graphicsScore = $winsatStore.winSPR.GraphicsScore
+    }
+    if ($graphicsScore -ne $null) {
+      if (-not $tests.gpuTest -or $tests.gpuTest -ne 'ok') { $tests.gpuTest = 'ok' }
+      if ($tests.gpuScore -eq $null) { $tests.gpuScore = $graphicsScore }
+    }
+  }
+} else {
+  if (-not $SkipWinSatDataStore) {
+    $rootsLabel = if ($winsatRoots.Count -gt 0) { $winsatRoots -join ', ' } else { 'none' }
+    Write-Log "WinSAT datastore not found in: $rootsLabel" 'WARN'
+  }
+}
+
+if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
+  $cpuFallback = Get-WinsatCpuFallback -Roots $winsatRoots
+  if ($cpuFallback) {
+    Write-Log ("WinSAT CPU fallback: file={0} status={1} score={2} maxMBps={3}" -f $cpuFallback.file, $cpuFallback.status, $cpuFallback.score, $cpuFallback.maxMBps)
+    if ($cpuFallback.status -eq 'ok' -or $cpuFallback.score -ne $null -or $cpuFallback.maxMBps -ne $null) {
+      $tests.cpuTest = 'ok'
+      if ($tests.cpuMBps -eq $null -and $cpuFallback.maxMBps -ne $null) { $tests.cpuMBps = $cpuFallback.maxMBps }
+    }
+  }
+}
+
+if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
+  $cpuFallback = Get-WinsatCpuFallback -Roots $winsatRoots
+  if ($cpuFallback) {
+    Write-Log ("WinSAT CPU fallback: file={0} status={1} score={2} maxMBps={3}" -f $cpuFallback.file, $cpuFallback.status, $cpuFallback.score, $cpuFallback.maxMBps)
+    if ($cpuFallback.status -eq 'ok' -or $cpuFallback.score -ne $null -or $cpuFallback.maxMBps -ne $null) {
+      $tests.cpuTest = 'ok'
+      if ($tests.cpuMBps -eq $null -and $cpuFallback.maxMBps -ne $null) { $tests.cpuMBps = $cpuFallback.maxMBps }
+    }
+  }
+}
+
 $diag.diagnosticsPerformed = $tests.Keys.Count
 
 $stopwatch.Stop()
@@ -2113,8 +3041,14 @@ if ($usbStatus) { $payload.usbStatus = $usbStatus }
 if ($keyboardStatus) { $payload.keyboardStatus = $keyboardStatus }
 if ($padStatus) { $payload.padStatus = $padStatus }
 if ($badgeStatus) { $payload.badgeReaderStatus = $badgeStatus }
-if ($diskInventory.Count -gt 0) { $payload.disks = $diskInventory }
-if ($volumeInventory.Count -gt 0) { $payload.volumes = $volumeInventory }
+if ($diskInventory) {
+  $diskList = @($diskInventory)
+  if ($diskList.Count -gt 0) { $payload.disks = $diskList }
+}
+if ($volumeInventory) {
+  $volumeList = @($volumeInventory)
+  if ($volumeList.Count -gt 0) { $payload.volumes = $volumeList }
+}
 
 $payload.diag = $diag
 $payload.device = [ordered]@{
@@ -2157,10 +3091,14 @@ $payload.memory = [ordered]@{
   pagefile = $pageFileInfo
 }
 
-if ($memorySlots.Count -gt 0) { $payload.memorySlots = $memorySlots }
+if ($memorySlots) {
+  $memorySlotList = @($memorySlots)
+  if ($memorySlotList.Count -gt 0) { $payload.memorySlots = $memorySlotList }
+}
 if ($displayInfo.Count -gt 0) { $payload.display = $displayInfo }
 if ($thermalInfo) { $payload.thermal = $thermalInfo }
 if ($tests.Count -gt 0) { $payload.tests = $tests }
+if ($winsatStore) { $payload.winsat = $winsatStore }
 
 $components = @{}
 if ($cameraStatus) { $components.camera = $cameraStatus }
@@ -2188,10 +3126,12 @@ if ($components.Count -gt 0) {
 }
 
 $json = $payload | ConvertTo-Json -Depth 10
+Step-Progress -Status 'Assemblage payload'
 
 Write-Log "Payload size=$($json.Length)"
 
 $ingestOk = $false
+Step-Progress -Status 'Envoi API'
 try {
   $response = Invoke-RestMethod -Uri $ApiUrl -Method Post -ContentType 'application/json' -Body $json -TimeoutSec $TimeoutSec
   Write-Log 'Ingest OK'
@@ -2203,24 +3143,24 @@ try {
     Write-Log $_.ErrorDetails.Message 'ERROR'
   }
   Write-Error $_
+  Complete-Progress
+  Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
   exit 1
 }
 
 if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
-  $keyboardScript = Resolve-KeyboardCapturePath -Value $KeyboardCapturePath
-  $layoutValue = if ($KeyboardCaptureLayout) { $KeyboardCaptureLayout } else { $null }
-  $layoutConfigValue = if ($KeyboardCaptureLayoutConfig) { $KeyboardCaptureLayoutConfig } else { $null }
-  $configDirValue = if ($KeyboardCaptureConfigDir) { $KeyboardCaptureConfigDir } else { $null }
-  $logPathValue = if ($KeyboardCaptureLogPath) { $KeyboardCaptureLogPath } else { $null }
-  Write-Log 'Launching keyboard capture for laptop'
-  $keyboardResult = Invoke-KeyboardCapture `
-    -ScriptPath $keyboardScript `
-    -LogPath $logPathValue `
-    -ConfigDir $configDirValue `
-    -Layout $layoutValue `
-    -LayoutConfig $layoutConfigValue `
-    -BlockInput:$KeyboardCaptureBlockInput `
-    -TimeoutSec $KeyboardCaptureTimeoutSec
+  $keyboardResult = if ($keyboardCaptureState -and $keyboardCaptureState.started) {
+    Complete-KeyboardCapture -State $keyboardCaptureState
+  } else {
+    Invoke-KeyboardCapture `
+      -ScriptPath (Resolve-KeyboardCapturePath -Value $KeyboardCapturePath) `
+      -LogPath $KeyboardCaptureLogPath `
+      -ConfigDir $KeyboardCaptureConfigDir `
+      -Layout $KeyboardCaptureLayout `
+      -LayoutConfig $KeyboardCaptureLayoutConfig `
+      -BlockInput:$KeyboardCaptureBlockInput `
+      -TimeoutSec $KeyboardCaptureTimeoutSec
+  }
   if ($keyboardResult -and $keyboardResult.status -and $keyboardResult.status -ne 'not_tested') {
     $kbPayload = [ordered]@{}
     if ($hostname) { $kbPayload.hostname = $hostname }
@@ -2228,6 +3168,7 @@ if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
     if ($serialNumber) { $kbPayload.serialNumber = $serialNumber }
     $kbPayload.payloadMode = 'skip'
     $kbPayload.keyboardStatus = $keyboardResult.status
+    $kbPayload.components = @{ keyboard = $keyboardResult.status }
     $kbJson = $kbPayload | ConvertTo-Json -Depth 4
     try {
       Invoke-RestMethod -Uri $ApiUrl -Method Post -ContentType 'application/json' -Body $kbJson -TimeoutSec $TimeoutSec | Out-Null
@@ -2237,3 +3178,7 @@ if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
     }
   }
 }
+
+Step-Progress -Status 'Finalisation'
+Complete-Progress
+Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'

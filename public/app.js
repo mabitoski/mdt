@@ -618,8 +618,10 @@ function buildDetailHtml(detail) {
     detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
   const cpuInfo = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
   const gpuInfo = payload && payload.gpu && typeof payload.gpu === 'object' ? payload.gpu : null;
-  const diskInfo = payload && Array.isArray(payload.disks) ? payload.disks : [];
-  const volumeInfo = payload && Array.isArray(payload.volumes) ? payload.volumes : [];
+  const diskInfoRaw = payload ? payload.disks : null;
+  const diskInfo = Array.isArray(diskInfoRaw) ? diskInfoRaw : diskInfoRaw ? [diskInfoRaw] : [];
+  const volumeInfoRaw = payload ? payload.volumes : null;
+  const volumeInfo = Array.isArray(volumeInfoRaw) ? volumeInfoRaw : volumeInfoRaw ? [volumeInfoRaw] : [];
   const macAddresses = Array.isArray(detail.macAddresses) ? detail.macAddresses : [];
   const macListHtml = macAddresses.length
     ? `<div class="mac-list">${macAddresses

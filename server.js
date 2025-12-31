@@ -214,7 +214,13 @@ const upsertMachineQuery = `
     pad_status = COALESCE(excluded.pad_status, machines.pad_status),
     badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
     last_seen = excluded.last_seen,
-    components = COALESCE(excluded.components, machines.components),
+    components = CASE
+      WHEN excluded.components IS NULL THEN machines.components
+      ELSE (
+        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
+        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
+      )::text
+    END,
     payload = COALESCE(excluded.payload, machines.payload),
     last_ip = excluded.last_ip
   RETURNING id
@@ -694,6 +700,71 @@ function sanitizeComponents(value) {
   return Object.keys(sanitized).length > 0 ? sanitized : null;
 }
 
+function mergeComponentSets(base, override) {
+  const merged = {};
+  if (base && typeof base === 'object' && !Array.isArray(base)) {
+    Object.entries(base).forEach(([key, value]) => {
+      merged[key] = value;
+    });
+  }
+  if (override && typeof override === 'object' && !Array.isArray(override)) {
+    Object.entries(override).forEach(([key, value]) => {
+      merged[key] = value;
+    });
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+
+function buildDerivedComponents(body, sources) {
+  const derived = {};
+  const addStatus = (key, value) => {
+    const status = normalizeStatus(value);
+    if (status) {
+      derived[key] = status;
+    }
+  };
+  addStatus('camera', pickFirstFromSources(sources, ['cameraStatus', 'camera']));
+  addStatus('usb', pickFirstFromSources(sources, ['usbStatus', 'usb']));
+  addStatus('keyboard', pickFirstFromSources(sources, ['keyboardStatus', 'keyboard']));
+  addStatus(
+    'pad',
+    pickFirstFromSources(sources, [
+      'padStatus',
+      'touchpadStatus',
+      'trackpadStatus',
+      'paveTactile',
+      'touchpad'
+    ])
+  );
+  addStatus(
+    'badgeReader',
+    pickFirstFromSources(sources, ['badgeReaderStatus', 'badgeReader', 'badge', 'smartCardReader'])
+  );
+  addStatus('diskSmart', pickFirstFromSources(sources, ['diskSmart', 'smartDisk', 'smart']));
+
+  const tests =
+    body && typeof body.tests === 'object' && !Array.isArray(body.tests) ? body.tests : null;
+  if (tests) {
+    addStatus('diskReadTest', tests.diskRead);
+    addStatus('diskWriteTest', tests.diskWrite);
+    addStatus('ramTest', tests.ramTest);
+    addStatus('cpuTest', tests.cpuTest);
+    addStatus('gpuTest', tests.gpuTest);
+    addStatus('cpuStress', tests.cpuStress);
+    addStatus('gpuStress', tests.gpuStress);
+    addStatus('networkTest', tests.network);
+    addStatus('networkPing', tests.networkPing);
+    addStatus('fsCheck', tests.fsCheck);
+    addStatus('memDiag', tests.memDiag);
+  }
+
+  if (body && body.thermal && typeof body.thermal === 'object') {
+    addStatus('thermal', body.thermal.status);
+  }
+
+  return Object.keys(derived).length > 0 ? derived : null;
+}
+
 function safeJsonStringify(value, maxBytes) {
   try {
     const json = JSON.stringify(value);
@@ -842,6 +913,8 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     pickFirst(body, ['components', 'componentStatus', 'composants', 'etatComposants'])
   );
   const sources = [body, body.components, body.hardware];
+  const derivedComponents = buildDerivedComponents(body, sources);
+  const mergedComponents = mergeComponentSets(derivedComponents, components);
   let macAddresses = normalizeMacList(
     pickFirstFromSources(sources, ['macAddresses', 'macs', 'mac_addresses', 'macList', 'maclist'])
   );
@@ -981,7 +1054,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     badgeReaderStatus,
     now,
     now,
-    components ? JSON.stringify(components) : null,
+    mergedComponents ? JSON.stringify(mergedComponents) : null,
     payload,
     ipAddress
   ];

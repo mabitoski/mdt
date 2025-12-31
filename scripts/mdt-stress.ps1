@@ -28,6 +28,7 @@ param(
   [string[]]$CameraTestArguments = $env:MDT_CAMERA_TEST_ARGS,
   [int]$CameraTestTimeoutSec = 20,
   [int]$MsinfoTimeoutSec = 0,
+  [string]$WinSatDataStorePath = $env:MDT_WINSAT_DATASTORE,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
   [string]$LogPath,
   [string]$Technician = $env:MDT_TECHNICIAN,
@@ -38,6 +39,7 @@ param(
   [string]$KeyboardCaptureLayoutConfig,
   [switch]$KeyboardCaptureBlockInput,
   [switch]$SkipKeyboardCapture,
+  [switch]$SkipWinSatDataStore,
   [switch]$SkipElevation,
   [switch]$SkipTlsValidation
 )
@@ -73,6 +75,7 @@ $params = @{
   CameraTestArguments = $CameraTestArguments
   CameraTestTimeoutSec = $CameraTestTimeoutSec
   MsinfoTimeoutSec = $MsinfoTimeoutSec
+  WinSatDataStorePath = $WinSatDataStorePath
   MacPreference = $MacPreference
   LogPath = $LogPath
   Technician = $Technician
@@ -83,6 +86,7 @@ $params = @{
   KeyboardCaptureLayoutConfig = $KeyboardCaptureLayoutConfig
   KeyboardCaptureBlockInput = $KeyboardCaptureBlockInput
   SkipKeyboardCapture = $SkipKeyboardCapture
+  SkipWinSatDataStore = $SkipWinSatDataStore
   SkipElevation = $SkipElevation
   SkipStressScript = $true
 }
