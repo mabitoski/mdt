@@ -27,6 +27,7 @@ param(
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [string[]]$CameraTestArguments = $env:MDT_CAMERA_TEST_ARGS,
   [int]$CameraTestTimeoutSec = 20,
+  [string]$CameraTestOutputDir = $env:MDT_CAMERA_OUTDIR,
   [int]$MsinfoTimeoutSec = 0,
   [string]$WinSatDataStorePath = $env:MDT_WINSAT_DATASTORE,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
@@ -74,6 +75,7 @@ $params = @{
   CameraTestPath = $CameraTestPath
   CameraTestArguments = $CameraTestArguments
   CameraTestTimeoutSec = $CameraTestTimeoutSec
+  CameraTestOutputDir = $CameraTestOutputDir
   MsinfoTimeoutSec = $MsinfoTimeoutSec
   WinSatDataStorePath = $WinSatDataStorePath
   MacPreference = $MacPreference

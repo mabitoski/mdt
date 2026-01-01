@@ -614,6 +614,16 @@ function buildDetailHtml(detail) {
   const technicianLine = detail.technician
     ? `<p class="detail-tech"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></p>`
     : '';
+  const detailId = detail && detail.id != null ? String(detail.id) : '';
+  const exportButton = detailId
+    ? `
+      <div class="detail-actions">
+        <button class="detail-action" type="button" data-action="export-pdf" data-id="${detailId}">
+          Exporter PDF
+        </button>
+      </div>
+    `
+    : '';
   const payload =
     detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
   const cpuInfo = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
@@ -730,6 +740,7 @@ function buildDetailHtml(detail) {
       <span class="badge detail-category" data-category="${category}">${categoryLabels[category]}</span>
       <p class="machine-sub">${subtitle}</p>
       ${technicianLine}
+      ${exportButton}
     </div>
     <div class="detail-grid">
       <div class="detail-item">
@@ -774,6 +785,450 @@ function buildDetailHtml(detail) {
       </details>
     </div>
   `;
+}
+
+function buildReportDocument(detail) {
+  const category = normalizeCategory(detail.category);
+  const title = escapeHtml(formatPrimary(detail));
+  const subtitle = escapeHtml(formatSubtitle(detail));
+  const generatedAt = new Date().toLocaleString('fr-FR', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+  const technicianLine = detail.technician
+    ? `<div class="report-meta-row"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></div>`
+    : '';
+
+  const payload =
+    detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const cpuInfo = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
+  const gpuInfo = payload && payload.gpu && typeof payload.gpu === 'object' ? payload.gpu : null;
+  const diskInfoRaw = payload ? payload.disks : null;
+  const diskInfo = Array.isArray(diskInfoRaw) ? diskInfoRaw : diskInfoRaw ? [diskInfoRaw] : [];
+  const volumeInfoRaw = payload ? payload.volumes : null;
+  const volumeInfo = Array.isArray(volumeInfoRaw) ? volumeInfoRaw : volumeInfoRaw ? [volumeInfoRaw] : [];
+  const macAddresses = Array.isArray(detail.macAddresses) ? detail.macAddresses : [];
+  const macListHtml = macAddresses.length
+    ? `<div class="mac-list">${macAddresses
+        .map((mac) => `<span class="mac-chip">${escapeHtml(mac)}</span>`)
+        .join('')}</div>`
+    : '<strong>--</strong>';
+
+  const diagnosticsHtml = buildDiagnosticsHtml(detail);
+  const diagnosticsSection = diagnosticsHtml
+    ? diagnosticsHtml
+    : `
+      <div class="diagnostics">
+        <h3>Diagnostics et performances</h3>
+        <div class="empty">Aucun test disponible.</div>
+      </div>
+    `;
+
+  const components =
+    detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
+      ? detail.components
+      : {};
+  const componentEntries = Object.entries(components).filter(([key]) => !hiddenComponents.has(key));
+  const componentOrderMap = new Map(componentOrder.map((key, index) => [key, index]));
+  const sortedComponentEntries = componentEntries.sort((a, b) => {
+    const orderA = componentOrderMap.has(a[0]) ? componentOrderMap.get(a[0]) : 999;
+    const orderB = componentOrderMap.has(b[0]) ? componentOrderMap.get(b[0]) : 999;
+    if (orderA !== orderB) {
+      return orderA - orderB;
+    }
+    return a[0].localeCompare(b[0], 'fr');
+  });
+
+  const componentHtml = sortedComponentEntries.length
+    ? sortedComponentEntries
+        .map(([key, value]) => {
+          const label = componentLabels[key] || key;
+          return `
+            <div class="component-row">
+              <span>${escapeHtml(label)}</span>
+              ${renderStatusValue(value)}
+            </div>
+          `;
+        })
+        .join('')
+    : '<div class="empty">Aucun statut de composant.</div>';
+
+  const hardwareHtml = `
+    <div class="hardware">
+      <h3>Materiel clef</h3>
+      <div class="detail-grid hardware-grid">
+        <div class="detail-item">
+          <span>RAM totale</span>
+          <strong>${escapeHtml(formatRam(detail.ramMb))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>CPU</span>
+          <strong>${escapeHtml((cpuInfo && cpuInfo.name) || '--')}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Coeurs / Threads</span>
+          <strong>${escapeHtml(formatCpuThreads(cpuInfo))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>GPU</span>
+          <strong>${escapeHtml((gpuInfo && gpuInfo.name) || '--')}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Stockage total</span>
+          <strong>${escapeHtml(formatTotalStorage(diskInfo, volumeInfo))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Disque principal</span>
+          <strong>${escapeHtml(formatPrimaryDisk(diskInfo, volumeInfo))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Slots RAM</span>
+          <strong>${escapeHtml(formatSlots(detail.ramSlotsFree, detail.ramSlotsTotal))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Sante batterie</span>
+          <strong>${escapeHtml(formatBatteryHealth(detail.batteryHealth))}</strong>
+        </div>
+        <div class="detail-item">
+          <span>Camera</span>
+          ${renderStatus(detail.cameraStatus)}
+        </div>
+        <div class="detail-item">
+          <span>Ports USB</span>
+          ${renderStatus(detail.usbStatus)}
+        </div>
+        <div class="detail-item">
+          <span>Clavier</span>
+          ${renderStatus(detail.keyboardStatus)}
+        </div>
+        <div class="detail-item">
+          <span>Pave tactile</span>
+          ${renderStatus(detail.padStatus)}
+        </div>
+        <div class="detail-item">
+          <span>Lecteur badge</span>
+          ${renderStatus(detail.badgeReaderStatus)}
+        </div>
+      </div>
+    </div>
+  `;
+
+  const payloadHtml = detail.payload
+    ? `<pre>${escapeHtml(JSON.stringify(detail.payload, null, 2))}</pre>`
+    : '<div class="empty">Payload non disponible.</div>';
+
+  const summary = summarizeComponents(detail.components);
+  const summaryHtml =
+    summary.total > 0
+      ? `
+          <span class="summary-chip ok">OK ${summary.ok}</span>
+          <span class="summary-chip nok">NOK ${summary.nok}</span>
+          <span class="summary-chip nt">NT ${summary.other}</span>
+        `
+      : '<span class="summary-chip nt">NT --</span>';
+
+  const styles = `
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+      color: #1d211f;
+      background: radial-gradient(circle at top left, #fff5df 0%, #f7f1e7 35%, #e7f2ea 100%);
+    }
+    h1, h2, h3 {
+      font-family: "Space Grotesk", sans-serif;
+    }
+    .aura {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(circle at 80% 10%, rgba(242, 139, 45, 0.2), transparent 35%),
+        radial-gradient(circle at 10% 70%, rgba(47, 124, 92, 0.18), transparent 40%);
+      mix-blend-mode: multiply;
+      opacity: 0.75;
+      z-index: -1;
+    }
+    .report {
+      padding: 28px 32px 40px;
+      max-width: 980px;
+      margin: 24px auto;
+      background: rgba(255, 255, 255, 0.75);
+      border-radius: 18px;
+      border: 1px solid rgba(57, 64, 60, 0.16);
+      box-shadow: 0 24px 50px rgba(25, 30, 29, 0.1);
+    }
+    .report-header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid rgba(60, 64, 60, 0.18);
+      padding-bottom: 16px;
+      margin-bottom: 18px;
+    }
+    .report-kicker {
+      text-transform: uppercase;
+      letter-spacing: 0.28em;
+      font-size: 0.7rem;
+      color: #2f7c5c;
+      font-weight: 600;
+    }
+    .report-title {
+      margin: 8px 0 6px;
+      font-size: 2rem;
+    }
+    .report-sub {
+      margin: 0;
+      color: #6b6f6c;
+      font-size: 1rem;
+    }
+    .report-meta {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+      font-size: 0.85rem;
+      color: #4d4f4e;
+    }
+    .report-meta-row {
+      display: flex;
+      gap: 10px;
+      align-items: baseline;
+    }
+    .report-meta-row span {
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.7rem;
+      color: #6b6f6c;
+    }
+    .summary-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      background: rgba(47, 124, 92, 0.15);
+      color: #1b4c38;
+    }
+    .summary-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .summary-chip.ok { background: rgba(47, 124, 92, 0.16); color: #1b4c38; }
+    .summary-chip.nok { background: rgba(231, 76, 60, 0.16); color: #a33524; }
+    .summary-chip.nt { background: rgba(60, 64, 60, 0.12); color: #4b4b4b; }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 18px;
+      margin-bottom: 18px;
+    }
+    .detail-item {
+      display: grid;
+      gap: 4px;
+    }
+    .detail-item span {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #6b6f6c;
+    }
+    .detail-item strong {
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+    .mac-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .mac-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(60, 64, 60, 0.08);
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #1d211f;
+    }
+    .hardware, .diagnostics, .components, .payload, .identifiers {
+      margin-bottom: 18px;
+    }
+    .component-list {
+      display: grid;
+      gap: 8px;
+    }
+    .component-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 10px;
+      background: rgba(255, 255, 255, 0.6);
+      border-radius: 12px;
+      font-size: 0.9rem;
+      align-items: center;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .status-pill[data-status="ok"] { background: rgba(47, 124, 92, 0.15); color: #1b4c38; }
+    .status-pill[data-status="nok"] { background: rgba(214, 73, 53, 0.16); color: #8d1f12; }
+    .status-pill[data-status="absent"],
+    .status-pill[data-status="unknown"],
+    .status-pill[data-status="not_tested"],
+    .status-pill[data-status="denied"] { background: rgba(60, 64, 60, 0.12); color: #4b4b4b; }
+    .status-pill[data-status="timeout"] { background: rgba(242, 139, 45, 0.2); color: #9b4a16; }
+    .payload pre {
+      white-space: pre-wrap;
+      background: rgba(255, 255, 255, 0.6);
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 0.78rem;
+    }
+    .status-stack {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .status-stack .metric {
+      font-size: 0.82rem;
+      color: #6b6f6c;
+      font-weight: 600;
+    }
+    .empty { color: #6b6f6c; font-size: 0.9rem; }
+    @media print {
+      body { background: #ffffff; }
+      .report {
+        margin: 0;
+        max-width: 100%;
+        border: none;
+        box-shadow: none;
+        background: #ffffff;
+        padding: 0;
+      }
+      .aura { display: none; }
+    }
+  `;
+
+  return `<!doctype html>
+  <html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <title>Rapport ${title}</title>
+    <style>${styles}</style>
+  </head>
+  <body>
+    <div class="aura"></div>
+    <div class="report">
+      <header class="report-header">
+        <div>
+          <div class="report-kicker">MDT Live Ops</div>
+          <h1 class="report-title">${title}</h1>
+          <p class="report-sub">${subtitle}</p>
+          <div class="report-meta">
+            <div class="report-meta-row"><span>Genere</span><strong>${escapeHtml(generatedAt)}</strong></div>
+            <div class="report-meta-row"><span>Dernier passage</span><strong>${escapeHtml(
+              formatDateTime(detail.lastSeen)
+            )}</strong></div>
+            <div class="report-meta-row"><span>Premier passage</span><strong>${escapeHtml(
+              formatDateTime(detail.createdAt)
+            )}</strong></div>
+            ${technicianLine}
+          </div>
+        </div>
+        <div class="summary-row">
+          <span class="badge" data-category="${category}">${categoryLabels[category]}</span>
+          ${summaryHtml}
+        </div>
+      </header>
+      <section class="identifiers">
+        <h3>Identifiants</h3>
+        <div class="detail-grid">
+          <div class="detail-item">
+            <span>Serial</span>
+            <strong>${escapeHtml(detail.serialNumber || '--')}</strong>
+          </div>
+          <div class="detail-item">
+            <span>MAC</span>
+            <strong>${escapeHtml(formatMacSummary(detail))}</strong>
+          </div>
+          <div class="detail-item">
+            <span>MACs</span>
+            ${macListHtml}
+          </div>
+          <div class="detail-item">
+            <span>OS</span>
+            <strong>${escapeHtml(detail.osVersion || '--')}</strong>
+          </div>
+          <div class="detail-item">
+            <span>IP</span>
+            <strong>${escapeHtml(detail.lastIp || '--')}</strong>
+          </div>
+        </div>
+      </section>
+      ${hardwareHtml}
+      ${diagnosticsSection}
+      <div class="components">
+        <h3>Etat des composants</h3>
+        <div class="component-list">${componentHtml}</div>
+      </div>
+      <div class="payload">
+        <h3>Payload complet</h3>
+        ${payloadHtml}
+      </div>
+    </div>
+    <script>
+      window.addEventListener('load', () => {
+        setTimeout(() => {
+          window.focus();
+          window.print();
+        }, 200);
+      });
+    </script>
+  </body>
+  </html>`;
+}
+
+function openReportPdf(detail) {
+  if (!detail) {
+    return;
+  }
+  const reportWindow = window.open('', '_blank', 'width=980,height=900');
+  if (!reportWindow) {
+    window.alert('Popup bloque. Autorise les popups pour exporter le PDF.');
+    return;
+  }
+  reportWindow.document.open();
+  reportWindow.document.write(buildReportDocument(detail));
+  reportWindow.document.close();
 }
 
 async function loadMachines() {
@@ -868,6 +1323,21 @@ sortSelect.addEventListener('change', (event) => {
 });
 
 listEl.addEventListener('click', (event) => {
+  const exportBtn = event.target.closest('[data-action="export-pdf"]');
+  if (exportBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = Number.parseInt(exportBtn.dataset.id, 10);
+    if (!Number.isFinite(id)) {
+      return;
+    }
+    const detail = state.details[id];
+    if (!detail || detail.error) {
+      return;
+    }
+    openReportPdf(detail);
+    return;
+  }
   const card = event.target.closest('.machine-card');
   if (!card) {
     return;

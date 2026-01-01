@@ -28,6 +28,7 @@ param(
   [string]$CameraTestPath = $env:MDT_CAMERA_TEST_PATH,
   [string[]]$CameraTestArguments = $env:MDT_CAMERA_TEST_ARGS,
   [int]$CameraTestTimeoutSec = 20,
+  [string]$CameraTestOutputDir = $env:MDT_CAMERA_OUTDIR,
   [int]$MsinfoTimeoutSec = 0,
   [string]$WinSatDataStorePath = $env:MDT_WINSAT_DATASTORE,
   [ValidateSet('auto', 'ethernet', 'wifi', 'any')][string]$MacPreference = 'auto',
@@ -50,7 +51,7 @@ param(
   [switch]$SkipFactoryResetPrompt
 )
 
-$scriptVersion = '1.6.1'
+$scriptVersion = '1.6.5'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -161,15 +162,21 @@ public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
     }
 
     Start-Sleep -Milliseconds 800
-    for ($i = 0; $i -lt 5; $i++) {
+    for ($i = 0; $i -lt 6; $i++) {
       $shell.SendKeys('{TAB}')
       Start-Sleep -Milliseconds 150
     }
     $shell.SendKeys('{ENTER}')
     Write-Log 'Waiting 10s before next reset step.' 'WARN'
     Start-Sleep -Seconds 10
+    $shell.SendKeys('{SPACE}')
+    Start-Sleep -Milliseconds 150
     $shell.SendKeys('{TAB}')
     Start-Sleep -Milliseconds 150
+    $shell.SendKeys('{TAB}')
+    Start-Sleep -Milliseconds 150
+    $shell.SendKeys('{ENTER}')
+    Start-Sleep -Milliseconds 200
     $shell.SendKeys('{ENTER}')
     Write-Log 'Waiting 10s before final reset step.' 'WARN'
     Start-Sleep -Seconds 10
@@ -593,7 +600,7 @@ function Resolve-CameraTestExe {
 
   $candidate = $Value
   if ([string]::IsNullOrWhiteSpace($candidate)) {
-    $candidate = Join-Path $PSScriptRoot 'camera_capture.exe'
+    $candidate = Join-Path $PSScriptRoot 'camera.exe'
   }
 
   if (-not [System.IO.Path]::IsPathRooted($candidate)) {
@@ -601,6 +608,12 @@ function Resolve-CameraTestExe {
   }
 
   if (-not (Test-Path $candidate)) {
+    if ($candidate -match 'camera\\.exe$') {
+      $fallback = $candidate -replace 'camera\\.exe$', 'camera_capture.exe'
+      if (Test-Path $fallback) {
+        $candidate = $fallback
+      }
+    }
     if (-not [System.IO.Path]::GetExtension($candidate)) {
       $exeCandidate = "${candidate}.exe"
       if (Test-Path $exeCandidate) {
@@ -615,6 +628,88 @@ function Resolve-CameraTestExe {
     return $null
   }
   return $candidate
+}
+
+function Resolve-CameraOutputDir {
+  param([string]$Value)
+
+  $candidate = $Value
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    $candidate = $env:CAMERA_OUTDIR
+  }
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    $candidate = $env:DIAG_TOOL_OUTDIR
+  }
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    if ($env:TEMP) {
+      $candidate = Join-Path $env:TEMP 'mdt-camera'
+    } else {
+      $candidate = Join-Path $PSScriptRoot 'mdt-camera'
+    }
+  }
+  if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+    $candidate = Join-Path (Get-Location) $candidate
+  }
+  return $candidate
+}
+
+function Get-CameraStatusFromOutput {
+  param(
+    [string]$OutputDir,
+    [string]$FallbackStatus
+  )
+
+  if (-not $OutputDir -or -not (Test-Path $OutputDir)) {
+    return if ($FallbackStatus -eq 'ok') { 'ok' } else { 'nok' }
+  }
+
+  $errorLog = Join-Path $OutputDir 'camera_error.log'
+  if (Test-Path $errorLog) { return 'nok' }
+
+  $problemFile = Get-ChildItem -Path $OutputDir -Filter '*.problem.txt' -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if ($problemFile) { return 'nok' }
+
+  $photoFile = Get-ChildItem -Path $OutputDir -Filter '*.jpg' -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if ($photoFile) { return 'ok' }
+
+  return if ($FallbackStatus -eq 'ok') { 'ok' } else { 'nok' }
+}
+
+function Invoke-CameraTest {
+  param(
+    [string]$Path,
+    [string[]]$Arguments = @(),
+    [int]$TimeoutSec = 20,
+    [string]$OutputBaseDir
+  )
+
+  if (-not $Path) {
+    return @{ status = 'not_tested'; outputDir = $null; exitCode = $null }
+  }
+
+  $baseDir = Resolve-CameraOutputDir -Value $OutputBaseDir
+  $runDir = Join-Path $baseDir ("run-" + [guid]::NewGuid().ToString('N'))
+  try { New-Item -ItemType Directory -Path $runDir -Force | Out-Null } catch { }
+
+  $args = Normalize-ArgumentList $Arguments
+  $hasOutdir = $false
+  foreach ($arg in $args) {
+    if ($arg -match '^-{1,2}outdir($|=)') {
+      $hasOutdir = $true
+      break
+    }
+  }
+  if (-not $hasOutdir -and $runDir) {
+    $args = @('--outdir', $runDir) + $args
+  }
+
+  Write-Log "Camera test output dir: $runDir"
+  $result = Invoke-ExternalCommand -Path $Path -Arguments $args -TimeoutSec $TimeoutSec -Name 'Camera'
+  $status = Get-CameraStatusFromOutput -OutputDir $runDir -FallbackStatus $result.status
+
+  return @{ status = $status; outputDir = $runDir; exitCode = $result.exitCode }
 }
 
 function Invoke-FactoryResetPrompt {
@@ -2684,23 +2779,30 @@ $cameraDevices += Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPC
 $cameraDevices += Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPClass='Image'"
 $cameraPresence = Get-StatusFromDevices $cameraDevices
 $cameraTestStatus = $null
+$cameraTestOutputDir = $null
 $cameraStatus = $null
 $cameraTestPathValue = Resolve-CameraTestExe -Value $CameraTestPath
 if ($cameraPresence -eq 'absent' -or $cameraPresence -eq 'nok') {
   $cameraStatus = $cameraPresence
 } else {
-  $cameraTestStatus = Invoke-ExternalTest `
-    -Path $cameraTestPathValue `
-    -Arguments (Normalize-ArgumentList $CameraTestArguments) `
-    -TimeoutSec $CameraTestTimeoutSec `
-    -Name 'Camera'
-  if ($cameraTestStatus) {
-    $cameraStatus = $cameraTestStatus
-  } else {
+  if (-not $cameraTestPathValue) {
     $cameraStatus = 'not_tested'
+  } else {
+    $cameraTestResult = Invoke-CameraTest `
+      -Path $cameraTestPathValue `
+      -Arguments (Normalize-ArgumentList $CameraTestArguments) `
+      -TimeoutSec $CameraTestTimeoutSec `
+      -OutputBaseDir $CameraTestOutputDir
+    if ($cameraTestResult -and $cameraTestResult.status) {
+      $cameraStatus = $cameraTestResult.status
+      $cameraTestStatus = $cameraTestResult.status
+      $cameraTestOutputDir = $cameraTestResult.outputDir
+    } else {
+      $cameraStatus = 'not_tested'
+    }
   }
 }
-Write-Log "Camera presence=$cameraPresence TestPath=$cameraTestPathValue TestStatus=$cameraTestStatus Final=$cameraStatus"
+Write-Log ("Camera presence={0} TestPath={1} TestStatus={2} OutputDir={3} Final={4}" -f $cameraPresence, $cameraTestPathValue, $cameraTestStatus, $cameraTestOutputDir, $cameraStatus)
 Step-Progress -Status 'Peripheriques'
 
 $usbDevices = Get-CimInstanceSafe -ClassName 'Win32_USBController'
