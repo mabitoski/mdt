@@ -51,7 +51,7 @@ param(
   [switch]$SkipFactoryResetPrompt
 )
 
-$scriptVersion = '1.6.5'
+$scriptVersion = '1.7.6'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -111,6 +111,84 @@ function Complete-Progress {
   Write-Progress -Activity 'MDT report' -Completed
 }
 
+function Initialize-WindowApi {
+  try {
+    Add-Type -Namespace MDT -Name WindowApi -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool SetForegroundWindow(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindowAsync(System.IntPtr hWnd, int nCmdShow);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr GetForegroundWindow();
+"@ -ErrorAction Stop | Out-Null
+  } catch { }
+}
+
+function MaximizeForegroundWindow {
+  try {
+    $handle = [MDT.WindowApi]::GetForegroundWindow()
+    if ($handle -ne [IntPtr]::Zero) {
+      [MDT.WindowApi]::ShowWindowAsync($handle, 3) | Out-Null
+    }
+  } catch { }
+}
+
+function Try-ActivateWindow {
+  param(
+    [int]$ProcessId,
+    [string[]]$Titles,
+    [int]$RetryCount = 6,
+    [int]$DelayMs = 400
+  )
+
+  $shell = $null
+  try { $shell = New-Object -ComObject WScript.Shell } catch { }
+  for ($i = 0; $i -lt $RetryCount; $i++) {
+    if ($ProcessId) {
+      try {
+        $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($proc -and $proc.MainWindowHandle -and $proc.MainWindowHandle -ne [IntPtr]::Zero) {
+          try { [MDT.WindowApi]::ShowWindowAsync($proc.MainWindowHandle, 5) | Out-Null } catch { }
+          try { [MDT.WindowApi]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null } catch { }
+          return $true
+        }
+      } catch { }
+    }
+    if ($shell -and $Titles) {
+      foreach ($title in $Titles) {
+        if (-not $title) { continue }
+        try {
+          if ($shell.AppActivate($title)) {
+            return $true
+          }
+        } catch { }
+      }
+    }
+    Start-Sleep -Milliseconds $DelayMs
+  }
+  return $false
+}
+
+function Send-KeysSafe {
+  param(
+    [object]$Shell,
+    [string]$Keys,
+    [string]$Label
+  )
+
+  if (-not $Shell -or [string]::IsNullOrWhiteSpace($Keys)) {
+    return $false
+  }
+  try {
+    $Shell.SendKeys($Keys)
+    return $true
+  } catch {
+    $name = if ($Label) { $Label } else { $Keys }
+    Write-Log "SendKeys failed ($name): $($_.Exception.Message)" 'WARN'
+    return $false
+  }
+}
+
 function Send-ResetUiKeys {
   param(
     [int]$ProcessId,
@@ -162,28 +240,12 @@ public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
     }
 
     Start-Sleep -Milliseconds 800
-    for ($i = 0; $i -lt 6; $i++) {
+    for ($i = 0; $i -lt 5; $i++) {
       $shell.SendKeys('{TAB}')
       Start-Sleep -Milliseconds 150
     }
     $shell.SendKeys('{ENTER}')
-    Write-Log 'Waiting 10s before next reset step.' 'WARN'
-    Start-Sleep -Seconds 10
-    $shell.SendKeys('{SPACE}')
-    Start-Sleep -Milliseconds 150
-    $shell.SendKeys('{TAB}')
-    Start-Sleep -Milliseconds 150
-    $shell.SendKeys('{TAB}')
-    Start-Sleep -Milliseconds 150
-    $shell.SendKeys('{ENTER}')
-    Start-Sleep -Milliseconds 200
-    $shell.SendKeys('{ENTER}')
-    Write-Log 'Waiting 10s before final reset step.' 'WARN'
-    Start-Sleep -Seconds 10
-    $shell.SendKeys('{TAB}')
-    Start-Sleep -Milliseconds 150
-    $shell.SendKeys('{ENTER}')
-    Write-Log 'Factory reset keystrokes sent.' 'WARN'
+    Write-Log 'Factory reset initial keystrokes sent (manual continuation expected).' 'WARN'
   } catch {
     Write-Log "Factory reset keystrokes failed: $($_.Exception.Message)" 'WARN'
   }
