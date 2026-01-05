@@ -21,19 +21,19 @@ const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
 const ALLOW_LOCAL_ADMIN = process.env.ALLOW_LOCAL_ADMIN !== '0';
 const LOCAL_ADMIN_USER = process.env.LOCAL_ADMIN_USER || 'admin';
 const LOCAL_ADMIN_PASSWORD = process.env.LOCAL_ADMIN_PASSWORD || 'admin';
+const DEFAULT_LDAP_SEARCH_FILTER = '(sAMAccountName={{username}})';
+const DEFAULT_LDAP_SEARCH_ATTRIBUTES = 'dn,cn,mail';
 const LDAP_URL = process.env.LDAP_URL || '';
 const LDAP_BIND_DN = process.env.LDAP_BIND_DN || '';
 const LDAP_BIND_PASSWORD = process.env.LDAP_BIND_PASSWORD || '';
 const LDAP_SEARCH_BASE = process.env.LDAP_SEARCH_BASE || '';
 const LDAP_SEARCH_FILTER =
-  process.env.LDAP_SEARCH_FILTER || '(sAMAccountName={{username}})';
-const LDAP_SEARCH_ATTRIBUTES = (process.env.LDAP_SEARCH_ATTRIBUTES || 'dn,cn,mail')
-  .split(',')
-  .map((attr) => attr.trim())
-  .filter(Boolean);
+  process.env.LDAP_SEARCH_FILTER || DEFAULT_LDAP_SEARCH_FILTER;
+const LDAP_SEARCH_ATTRIBUTES_RAW =
+  process.env.LDAP_SEARCH_ATTRIBUTES || DEFAULT_LDAP_SEARCH_ATTRIBUTES;
 const LDAP_TLS_REJECT_UNAUTHORIZED =
   process.env.LDAP_TLS_REJECT_UNAUTHORIZED !== '0';
-const LDAP_ENABLED = Boolean(LDAP_URL && LDAP_SEARCH_BASE);
+const ENV_LDAP_ENABLED = Boolean(LDAP_URL && LDAP_SEARCH_BASE);
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const PGSSLMODE = (process.env.PGSSLMODE || '').toLowerCase();
 const PGSSL =
@@ -111,6 +111,21 @@ async function initDb() {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ldap_settings (
+      id SMALLINT PRIMARY KEY,
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      url TEXT,
+      bind_dn TEXT,
+      bind_password TEXT,
+      search_base TEXT,
+      search_filter TEXT,
+      search_attributes TEXT,
+      tls_reject_unauthorized BOOLEAN NOT NULL DEFAULT true,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
   const columns = [
     ['ram_mb', 'INTEGER'],
     ['ram_slots_total', 'INTEGER'],
@@ -132,6 +147,22 @@ async function initDb() {
 
   for (const [name, type] of columns) {
     await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS ${name} ${type}`);
+  }
+
+  const ldapColumns = [
+    ['enabled', 'BOOLEAN NOT NULL DEFAULT false'],
+    ['url', 'TEXT'],
+    ['bind_dn', 'TEXT'],
+    ['bind_password', 'TEXT'],
+    ['search_base', 'TEXT'],
+    ['search_filter', 'TEXT'],
+    ['search_attributes', 'TEXT'],
+    ['tls_reject_unauthorized', 'BOOLEAN NOT NULL DEFAULT true'],
+    ['updated_at', 'TIMESTAMPTZ NOT NULL DEFAULT NOW()']
+  ];
+
+  for (const [name, type] of ldapColumns) {
+    await pool.query(`ALTER TABLE ldap_settings ADD COLUMN IF NOT EXISTS ${name} ${type}`);
   }
 
   await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_machine_key ON machines(machine_key)');
@@ -340,6 +371,26 @@ function requireAuth(req, res, next) {
   return res.status(401).json({ ok: false, error: 'unauthorized' });
 }
 
+function requireAdmin(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+  if (req.session.user.type !== 'local') {
+    return res.status(403).json({ ok: false, error: 'forbidden' });
+  }
+  return next();
+}
+
+function requireAdminPage(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.redirect('/login');
+  }
+  if (req.session.user.type !== 'local') {
+    return res.redirect('/');
+  }
+  return next();
+}
+
 function cleanString(value, maxLength) {
   if (typeof value !== 'string') {
     return null;
@@ -349,6 +400,13 @@ function cleanString(value, maxLength) {
     return null;
   }
   return trimmed.slice(0, maxLength);
+}
+
+function normalizeOptionalString(value, maxLength) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  return value.trim().slice(0, maxLength);
 }
 
 function normalizeMac(value) {
@@ -484,6 +542,116 @@ function escapeLdapFilter(value) {
   });
 }
 
+const LDAP_FIELD_LIMIT = 512;
+
+function normalizeLdapSearchFilter(value) {
+  const normalized = normalizeOptionalString(value, LDAP_FIELD_LIMIT);
+  return normalized || DEFAULT_LDAP_SEARCH_FILTER;
+}
+
+function normalizeLdapSearchAttributesString(value) {
+  const normalized = normalizeOptionalString(value, LDAP_FIELD_LIMIT);
+  const raw = normalized || DEFAULT_LDAP_SEARCH_ATTRIBUTES;
+  const list = raw
+    .split(',')
+    .map((attr) => attr.trim())
+    .filter(Boolean);
+  return list.length ? list.join(',') : DEFAULT_LDAP_SEARCH_ATTRIBUTES;
+}
+
+function parseLdapSearchAttributes(value) {
+  const raw = normalizeLdapSearchAttributesString(value);
+  return raw
+    .split(',')
+    .map((attr) => attr.trim())
+    .filter(Boolean);
+}
+
+async function loadLdapSettingsFromDb() {
+  try {
+    const result = await pool.query(`
+      SELECT
+        id,
+        enabled,
+        url,
+        bind_dn,
+        bind_password,
+        search_base,
+        search_filter,
+        search_attributes,
+        tls_reject_unauthorized,
+        updated_at
+      FROM ldap_settings
+      WHERE id = 1
+      LIMIT 1
+    `);
+    return result.rows[0] || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function mapLdapSettings(row) {
+  if (!row) {
+    return null;
+  }
+  const searchAttributesRaw = normalizeLdapSearchAttributesString(row.search_attributes);
+  return {
+    source: 'db',
+    enabled: Boolean(row.enabled),
+    url: row.url || '',
+    bindDn: row.bind_dn || '',
+    bindPassword: row.bind_password || '',
+    searchBase: row.search_base || '',
+    searchFilter: normalizeLdapSearchFilter(row.search_filter),
+    searchAttributesRaw,
+    searchAttributes: parseLdapSearchAttributes(searchAttributesRaw),
+    tlsRejectUnauthorized: row.tls_reject_unauthorized !== false,
+    updatedAt: row.updated_at || null
+  };
+}
+
+function getEnvLdapConfig() {
+  const searchAttributesRaw = normalizeLdapSearchAttributesString(LDAP_SEARCH_ATTRIBUTES_RAW);
+  return {
+    source: 'env',
+    enabled: ENV_LDAP_ENABLED,
+    url: LDAP_URL,
+    bindDn: LDAP_BIND_DN,
+    bindPassword: LDAP_BIND_PASSWORD,
+    searchBase: LDAP_SEARCH_BASE,
+    searchFilter: normalizeLdapSearchFilter(LDAP_SEARCH_FILTER),
+    searchAttributesRaw,
+    searchAttributes: parseLdapSearchAttributes(searchAttributesRaw),
+    tlsRejectUnauthorized: LDAP_TLS_REJECT_UNAUTHORIZED,
+    updatedAt: null
+  };
+}
+
+async function getEffectiveLdapConfig() {
+  const row = await loadLdapSettingsFromDb();
+  const mapped = mapLdapSettings(row);
+  if (mapped) {
+    return mapped;
+  }
+  return getEnvLdapConfig();
+}
+
+function formatLdapConfigForResponse(config) {
+  return {
+    enabled: Boolean(config.enabled),
+    url: config.url || '',
+    bindDn: config.bindDn || '',
+    searchBase: config.searchBase || '',
+    searchFilter: normalizeLdapSearchFilter(config.searchFilter),
+    searchAttributes: normalizeLdapSearchAttributesString(config.searchAttributesRaw),
+    tlsRejectUnauthorized: config.tlsRejectUnauthorized !== false,
+    bindPasswordSet: Boolean(config.bindPassword),
+    source: config.source || 'env',
+    updatedAt: config.updatedAt
+  };
+}
+
 function isLocalAdmin(username, password) {
   if (!ALLOW_LOCAL_ADMIN) {
     return false;
@@ -491,29 +659,30 @@ function isLocalAdmin(username, password) {
   return username === LOCAL_ADMIN_USER && password === LOCAL_ADMIN_PASSWORD;
 }
 
-function authenticateLdap(username, password) {
-  if (!LDAP_ENABLED) {
+async function authenticateLdap(username, password, configOverride = null) {
+  const config = configOverride || (await getEffectiveLdapConfig());
+  if (!config.enabled || !config.url || !config.searchBase) {
     return Promise.reject(new Error('ldap_not_configured'));
   }
 
-  const searchFilter = LDAP_SEARCH_FILTER.replace(
+  const searchFilter = normalizeLdapSearchFilter(config.searchFilter).replace(
     '{{username}}',
     escapeLdapFilter(username)
   );
   const options = {
-    url: LDAP_URL,
-    searchBase: LDAP_SEARCH_BASE,
+    url: config.url,
+    searchBase: config.searchBase,
     searchFilter,
-    searchAttributes: LDAP_SEARCH_ATTRIBUTES,
+    searchAttributes: config.searchAttributes,
     reconnect: true,
     tlsOptions: {
-      rejectUnauthorized: LDAP_TLS_REJECT_UNAUTHORIZED
+      rejectUnauthorized: config.tlsRejectUnauthorized !== false
     }
   };
 
-  if (LDAP_BIND_DN && LDAP_BIND_PASSWORD) {
-    options.bindDN = LDAP_BIND_DN;
-    options.bindCredentials = LDAP_BIND_PASSWORD;
+  if (config.bindDn && config.bindPassword) {
+    options.bindDN = config.bindDn;
+    options.bindCredentials = config.bindPassword;
   }
 
   return new Promise((resolve, reject) => {
@@ -792,6 +961,14 @@ app.get('/index.html', requireAuth, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
+app.get('/admin', requireAuth, requireAdminPage, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'admin.html'));
+});
+
+app.get('/admin.html', requireAuth, requireAdminPage, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'admin.html'));
+});
+
 app.get('/login', (req, res) => {
   if (req.session && req.session.user) {
     return res.redirect('/');
@@ -810,16 +987,19 @@ app.post('/login', async (req, res) => {
   let user = null;
   if (isLocalAdmin(username, password)) {
     user = { username, type: 'local' };
-  } else if (LDAP_ENABLED) {
+  } else {
     try {
-      const ldapUser = await authenticateLdap(username, password);
-      user = {
-        username,
-        type: 'ldap',
-        displayName: ldapUser.cn || ldapUser.displayName || ldapUser.uid || username,
-        dn: ldapUser.dn || null,
-        mail: ldapUser.mail || null
-      };
+      const ldapConfig = await getEffectiveLdapConfig();
+      if (ldapConfig.enabled && ldapConfig.url && ldapConfig.searchBase) {
+        const ldapUser = await authenticateLdap(username, password, ldapConfig);
+        user = {
+          username,
+          type: 'ldap',
+          displayName: ldapUser.cn || ldapUser.displayName || ldapUser.uid || username,
+          dn: ldapUser.dn || null,
+          mail: ldapUser.mail || null
+        };
+      }
     } catch (error) {
       user = null;
     }
@@ -849,16 +1029,19 @@ app.post('/api/login', async (req, res) => {
   let user = null;
   if (isLocalAdmin(username, password)) {
     user = { username, type: 'local' };
-  } else if (LDAP_ENABLED) {
+  } else {
     try {
-      const ldapUser = await authenticateLdap(username, password);
-      user = {
-        username,
-        type: 'ldap',
-        displayName: ldapUser.cn || ldapUser.displayName || ldapUser.uid || username,
-        dn: ldapUser.dn || null,
-        mail: ldapUser.mail || null
-      };
+      const ldapConfig = await getEffectiveLdapConfig();
+      if (ldapConfig.enabled && ldapConfig.url && ldapConfig.searchBase) {
+        const ldapUser = await authenticateLdap(username, password, ldapConfig);
+        user = {
+          username,
+          type: 'ldap',
+          displayName: ldapUser.cn || ldapUser.displayName || ldapUser.uid || username,
+          dn: ldapUser.dn || null,
+          mail: ldapUser.mail || null
+        };
+      }
     } catch (error) {
       user = null;
     }
@@ -888,6 +1071,92 @@ app.use(express.static(PUBLIC_DIR, { extensions: ['html'], index: false }));
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true });
+});
+
+app.get('/api/me', requireAuth, (req, res) => {
+  res.json({ ok: true, user: req.session.user });
+});
+
+app.get('/api/admin/ldap', requireAuth, requireAdmin, async (req, res) => {
+  const config = await getEffectiveLdapConfig();
+  res.json({ ok: true, config: formatLdapConfigForResponse(config) });
+});
+
+app.put('/api/admin/ldap', requireAuth, requireAdmin, async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const url = normalizeOptionalString(body.url, LDAP_FIELD_LIMIT);
+  const bindDn = normalizeOptionalString(body.bindDn, LDAP_FIELD_LIMIT);
+  const searchBase = normalizeOptionalString(body.searchBase, LDAP_FIELD_LIMIT);
+  const searchFilter = normalizeLdapSearchFilter(body.searchFilter);
+  const searchAttributes = normalizeLdapSearchAttributesString(body.searchAttributes);
+  const tlsRejectUnauthorized =
+    typeof body.tlsRejectUnauthorized === 'boolean' ? body.tlsRejectUnauthorized : true;
+  const enabled =
+    typeof body.enabled === 'boolean' ? body.enabled : Boolean(url && searchBase);
+  const clearBindPassword = body.clearBindPassword === true;
+  const currentConfig = await getEffectiveLdapConfig();
+  let bindPassword = currentConfig.bindPassword || '';
+
+  if (typeof body.bindPassword === 'string' && body.bindPassword.trim() !== '') {
+    bindPassword = body.bindPassword;
+  } else if (clearBindPassword) {
+    bindPassword = '';
+  }
+
+  if (enabled && (!url || !searchBase)) {
+    return res.status(400).json({ ok: false, error: 'missing_required' });
+  }
+
+  await pool.query(
+    `
+      INSERT INTO ldap_settings (
+        id,
+        enabled,
+        url,
+        bind_dn,
+        bind_password,
+        search_base,
+        search_filter,
+        search_attributes,
+        tls_reject_unauthorized,
+        updated_at
+      ) VALUES (
+        1,
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        NOW()
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        enabled = EXCLUDED.enabled,
+        url = EXCLUDED.url,
+        bind_dn = EXCLUDED.bind_dn,
+        bind_password = EXCLUDED.bind_password,
+        search_base = EXCLUDED.search_base,
+        search_filter = EXCLUDED.search_filter,
+        search_attributes = EXCLUDED.search_attributes,
+        tls_reject_unauthorized = EXCLUDED.tls_reject_unauthorized,
+        updated_at = NOW()
+    `,
+    [
+      enabled,
+      url,
+      bindDn,
+      bindPassword,
+      searchBase,
+      searchFilter,
+      searchAttributes,
+      tlsRejectUnauthorized
+    ]
+  );
+
+  const updated = await getEffectiveLdapConfig();
+  return res.json({ ok: true, config: formatLdapConfigForResponse(updated) });
 });
 
 app.post('/api/ingest', ingestLimiter, async (req, res) => {

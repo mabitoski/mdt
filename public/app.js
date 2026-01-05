@@ -18,6 +18,7 @@ const statLaptop = document.getElementById('stat-laptop');
 const statDesktop = document.getElementById('stat-desktop');
 const statUnknown = document.getElementById('stat-unknown');
 const filterButtons = document.querySelectorAll('.filter-btn');
+const adminLink = document.getElementById('admin-link');
 
 const categoryLabels = {
   laptop: 'Portable',
@@ -97,6 +98,36 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function setAdminLinkVisible(visible) {
+  if (!adminLink) {
+    return;
+  }
+  adminLink.hidden = !visible;
+}
+
+async function initAdminLink() {
+  if (!adminLink) {
+    return;
+  }
+  setAdminLinkVisible(false);
+  try {
+    const response = await fetch('/api/me');
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      return;
+    }
+    const data = await response.json();
+    if (data.user && data.user.type === 'local') {
+      setAdminLinkVisible(true);
+    }
+  } catch (error) {
+    setAdminLinkVisible(false);
+  }
 }
 
 function normalizeStatusKey(value) {
@@ -1358,4 +1389,5 @@ listEl.addEventListener('click', (event) => {
   ensureMachineDetail(id);
 });
 
+initAdminLink();
 loadMachines();

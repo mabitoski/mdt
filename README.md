@@ -133,6 +133,10 @@ LDAP (optionnel) :
 - `LDAP_SEARCH_ATTRIBUTES` : defaut `dn,cn,mail`
 - `LDAP_TLS_REJECT_UNAUTHORIZED=0` pour accepter un certificat non valide
 
+Administration (UI) :
+- Connecte-toi avec le compte local admin puis utilise le bouton "Config LDAP" (page `/admin`).
+- La configuration enregistree via l'UI est stockee en base (table `ldap_settings`) et prend le pas sur les variables d'environnement.
+
 ## Notes securite
 
 L'endpoint d'ingestion est volontairement ouvert. Pour un usage en production :
