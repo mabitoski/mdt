@@ -1322,7 +1322,7 @@ function drawPill(doc, x, y, text, styles, fontSize = 9) {
 function drawSectionTitle(doc, title) {
   const margin = doc.page.margins.left;
   const width = doc.page.width - margin - doc.page.margins.right;
-  ensureSpace(doc, 28);
+  ensureSpace(doc, 32);
   doc.fontSize(12).fillColor('#1D211F').text(title, margin, doc.y, { width });
   doc.moveDown(0.2);
   doc
@@ -1330,7 +1330,7 @@ function drawSectionTitle(doc, title) {
     .lineTo(margin + width, doc.y)
     .strokeColor('#E0E0E0')
     .stroke();
-  doc.moveDown(0.6);
+  doc.moveDown(0.9);
   doc.x = margin;
 }
 
@@ -1338,7 +1338,7 @@ function drawKeyValueGrid(doc, rows, columns = 2) {
   const margin = doc.page.margins.left;
   const width = doc.page.width - margin - doc.page.margins.right;
   const colWidth = width / columns;
-  const rowHeight = 26;
+  const rowHeight = 32;
   const totalRows = Math.ceil(rows.length / columns);
   ensureSpace(doc, totalRows * rowHeight + 8);
   const startY = doc.y;
@@ -1354,15 +1354,16 @@ function drawKeyValueGrid(doc, rows, columns = 2) {
     });
   });
 
-  doc.y = startY + totalRows * rowHeight + 6;
+  doc.y = startY + totalRows * rowHeight + 10;
   doc.x = margin;
 }
 
 function drawStatusRows(doc, rows) {
   const margin = doc.page.margins.left;
   const width = doc.page.width - margin - doc.page.margins.right;
+  const rowHeight = 20;
   rows.forEach((row) => {
-    ensureSpace(doc, 20);
+    ensureSpace(doc, rowHeight + 8);
     const y = doc.y;
     const statusKey = normalizeStatusKey(row.status) || 'unknown';
     const statusLabel = STATUS_LABELS[statusKey] || STATUS_LABELS.unknown;
@@ -1375,7 +1376,8 @@ function drawStatusRows(doc, rows) {
     const pillWidth = doc.widthOfString(pillText) + 12;
     const pillX = margin + width - pillWidth;
     drawPill(doc, pillX, y, pillText, STATUS_STYLES[statusKey] || STATUS_STYLES.unknown);
-    doc.moveDown(1);
+    doc.y = y + rowHeight;
+    doc.moveDown(0.4);
     doc.x = margin;
   });
 }
