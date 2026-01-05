@@ -1305,6 +1305,14 @@ function ensureSpace(doc, height) {
   }
 }
 
+function ensureNewPage(doc) {
+  const top = doc.page.margins.top;
+  if (doc.y > top + 6) {
+    doc.addPage();
+  }
+  doc.x = doc.page.margins.left;
+}
+
 function drawPill(doc, x, y, text, styles, fontSize = 9) {
   const paddingX = 6;
   const paddingY = 2;
@@ -1450,6 +1458,7 @@ function drawReportPdf(doc, data) {
     doc.moveDown(0.6);
   }
 
+  ensureNewPage(doc);
   drawSectionTitle(doc, 'Etat des composants');
   if (data.components.length) {
     drawStatusRows(doc, data.components);
