@@ -1323,7 +1323,7 @@ function drawSectionTitle(doc, title) {
   const margin = doc.page.margins.left;
   const width = doc.page.width - margin - doc.page.margins.right;
   ensureSpace(doc, 28);
-  doc.fontSize(12).fillColor('#1D211F').text(title);
+  doc.fontSize(12).fillColor('#1D211F').text(title, margin, doc.y, { width });
   doc.moveDown(0.2);
   doc
     .moveTo(margin, doc.y)
@@ -1331,6 +1331,7 @@ function drawSectionTitle(doc, title) {
     .strokeColor('#E0E0E0')
     .stroke();
   doc.moveDown(0.6);
+  doc.x = margin;
 }
 
 function drawKeyValueGrid(doc, rows, columns = 2) {
@@ -1354,6 +1355,7 @@ function drawKeyValueGrid(doc, rows, columns = 2) {
   });
 
   doc.y = startY + totalRows * rowHeight + 6;
+  doc.x = margin;
 }
 
 function drawStatusRows(doc, rows) {
@@ -1374,6 +1376,7 @@ function drawStatusRows(doc, rows) {
     const pillX = margin + width - pillWidth;
     drawPill(doc, pillX, y, pillText, STATUS_STYLES[statusKey] || STATUS_STYLES.unknown);
     doc.moveDown(1);
+    doc.x = margin;
   });
 }
 
