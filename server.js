@@ -385,6 +385,7 @@ const COMPONENT_ORDER = [
   'badgeReader'
 ];
 const HIDDEN_COMPONENTS = new Set(['diskSmart', 'networkTest', 'memDiag', 'thermal']);
+const VALID_PAD_STATUSES = new Set(['ok', 'nok']);
 
 app.set('trust proxy', process.env.TRUST_PROXY === '1');
 app.use(express.json({ limit: JSON_LIMIT }));
@@ -1961,6 +1962,52 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       payload
     }
   });
+});
+
+app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const rawStatus = typeof req.body?.status === 'string' ? req.body.status.trim().toLowerCase() : '';
+  if (!VALID_PAD_STATUSES.has(rawStatus)) {
+    return res.status(400).json({ ok: false, error: 'invalid_status' });
+  }
+
+  let row;
+  try {
+    const result = await pool.query('SELECT components FROM machines WHERE id = $1', [id]);
+    row = result.rows && result.rows[0] ? result.rows[0] : null;
+  } catch (error) {
+    console.error('Failed to fetch components for pad update', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+
+  if (!row) {
+    return res.status(404).json({ ok: false, error: 'not_found' });
+  }
+
+  let components = {};
+  try {
+    components = row.components ? JSON.parse(row.components) : {};
+  } catch (error) {
+    components = {};
+  }
+  components.pad = rawStatus;
+
+  try {
+    await pool.query('UPDATE machines SET pad_status = $1, components = $2 WHERE id = $3', [
+      rawStatus,
+      JSON.stringify(components),
+      id
+    ]);
+  } catch (error) {
+    console.error('Failed to update pad status', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+
+  return res.json({ ok: true, status: rawStatus, components });
 });
 
 app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {

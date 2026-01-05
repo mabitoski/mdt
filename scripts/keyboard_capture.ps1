@@ -182,6 +182,7 @@ $seenKeys = [System.Collections.Generic.HashSet[string]]::new()
 $keyInfo = @{}
 $script:completionWritten = $false
 $script:finalStatus = 'not_tested'
+$script:padStatus = 'not_tested'
 $script:logStream = $null
 $script:labelOverrides = @{}
 $script:blockInputs = $BlockInput.IsPresent
@@ -199,6 +200,7 @@ function Write-CompletionStatus {
         ts      = (Get-Date).ToUniversalTime().ToString("o")
         status  = $Status
         missing = $Missing
+        padStatus = $script:padStatus
     }
     $line = $payload | ConvertTo-Json -Compress
     if ($script:logStream) {
@@ -819,8 +821,29 @@ function New-KeyboardVisualizer {
     $nokButton.UseMnemonic = $false
     $nokButton.UseVisualStyleBackColor = $false
 
+    $padLabel = New-Object System.Windows.Forms.Label
+    $padLabel.Text = "Pave tactile"
+    $padLabel.ForeColor = [System.Drawing.Color]::White
+    $padLabel.Font = New-Object System.Drawing.Font('Segoe UI',10,[System.Drawing.FontStyle]::Regular)
+    $padLabel.AutoSize = $true
+    $padLabel.Margin = '18,8,6,0'
+
+    $padCombo = New-Object System.Windows.Forms.ComboBox
+    $padCombo.DropDownStyle = 'DropDownList'
+    $padCombo.Width = 120
+    $padCombo.TabStop = $false
+    $padCombo.Margin = '0,4,0,0'
+    $padCombo.add_KeyDown({ param($s,$e) $e.Handled = $true; $e.SuppressKeyPress = $true })
+    $padCombo.add_KeyPress({ param($s,$e) $e.Handled = $true })
+    [void]$padCombo.Items.Add('Non teste')
+    [void]$padCombo.Items.Add('OK')
+    [void]$padCombo.Items.Add('NOK')
+    $padCombo.SelectedIndex = 0
+
     $footer.Controls.Add($okButton)
     $footer.Controls.Add($nokButton)
+    $footer.Controls.Add($padLabel)
+    $footer.Controls.Add($padCombo)
 
     $root.Controls.Add($header)
     $root.Controls.Add($kbPanel)
@@ -846,6 +869,7 @@ function New-KeyboardVisualizer {
         Required        = [System.Collections.Generic.HashSet[string]]::new()
         OkButton        = $okButton
         NokButton       = $nokButton
+        PadStatusSelector = $padCombo
         WidthOverrides  = $WidthOverrides
         LabelOverrides  = $LabelOverrides
     }
@@ -1121,6 +1145,15 @@ $visualizer.NumpadSelector.add_SelectedIndexChanged({
     $npRows = Get-SelectedNumpadRows -sel $npSel
     Rebuild-KeyboardLayout -Visualizer $visualizer -LayoutDef $layoutSel -NumpadRows $npRows
     Write-Host "[info] Numpad sélectionné: $npSel"
+})
+$visualizer.PadStatusSelector.add_SelectedIndexChanged({
+    $selected = $visualizer.PadStatusSelector.SelectedItem
+    switch ($selected) {
+        'OK' { $script:padStatus = 'ok' }
+        'NOK' { $script:padStatus = 'nok' }
+        default { $script:padStatus = 'not_tested' }
+    }
+    Write-Host "[info] Pavé tactile: $script:padStatus"
 })
 $initialNpRows = Get-SelectedNumpadRows -sel $selectedNumpad
 Rebuild-KeyboardLayout -Visualizer $visualizer -LayoutDef $layoutDef -NumpadRows $initialNpRows

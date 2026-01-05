@@ -989,21 +989,19 @@ function Invoke-KeyboardCapture {
       default { 'not_tested' }
     }
     Write-Log "Keyboard capture finished: status=$status exitCode=$exitCode"
-    if ($status -ne 'ok' -and $status -ne 'nok') {
-      $logStatus = Get-KeyboardStatusFromLog -Path $LogPath
-      if ($logStatus) {
-        Write-Log "Keyboard capture status recovered from log: $logStatus"
-        return @{ status = $logStatus; exitCode = $exitCode; fromLog = $true }
-      }
+    $logResult = Get-KeyboardResultFromLog -Path $LogPath
+    if ($status -ne 'ok' -and $status -ne 'nok' -and $logResult -and $logResult.status) {
+      Write-Log "Keyboard capture status recovered from log: $($logResult.status)"
+      return @{ status = $logResult.status; padStatus = $logResult.padStatus; exitCode = $exitCode; fromLog = $true }
     }
-    return @{ status = $status; exitCode = $exitCode }
+    return @{ status = $status; padStatus = $logResult.padStatus; exitCode = $exitCode }
   } catch {
     Write-Log "Keyboard capture launch failed: $($_.Exception.Message)" 'WARN'
     return @{ status = 'not_tested'; exitCode = $null }
   }
 }
 
-function Get-KeyboardStatusFromLog {
+function Get-KeyboardResultFromLog {
   param([string]$Path)
 
   if (-not $Path -or -not (Test-Path $Path)) { return $null }
@@ -1019,8 +1017,15 @@ function Get-KeyboardStatusFromLog {
     if (-not $line) { continue }
     try {
       $obj = $line | ConvertFrom-Json -ErrorAction Stop
-      if ($obj -and $obj.status) {
-        return ($obj.status.ToString().Trim().ToLowerInvariant())
+      if ($obj -and ($obj.status -or $obj.padStatus)) {
+        $statusValue = $null
+        $padValue = $null
+        if ($obj.status) { $statusValue = $obj.status.ToString().Trim().ToLowerInvariant() }
+        if ($obj.padStatus) { $padValue = $obj.padStatus.ToString().Trim().ToLowerInvariant() }
+        return @{
+          status = $statusValue
+          padStatus = $padValue
+        }
       }
     } catch { }
   }
@@ -1116,10 +1121,10 @@ function Complete-KeyboardCapture {
       if (-not $proc.WaitForExit($remaining * 1000)) {
         Write-Log "Keyboard capture timed out after ${timeoutSec}s." 'WARN'
         try { $proc.Kill() } catch { }
-        $logStatus = Get-KeyboardStatusFromLog -Path $State.logPath
-        if ($logStatus) {
-          Write-Log "Keyboard capture status recovered from log: $logStatus"
-          return @{ status = $logStatus; exitCode = $null; timedOut = $true; fromLog = $true }
+        $logResult = Get-KeyboardResultFromLog -Path $State.logPath
+        if ($logResult -and $logResult.status) {
+          Write-Log "Keyboard capture status recovered from log: $($logResult.status)"
+          return @{ status = $logResult.status; padStatus = $logResult.padStatus; exitCode = $null; timedOut = $true; fromLog = $true }
         }
         return @{ status = 'not_tested'; exitCode = $null; timedOut = $true }
       }
@@ -1134,20 +1139,18 @@ function Complete-KeyboardCapture {
       default { 'not_tested' }
     }
     Write-Log "Keyboard capture finished: status=$status exitCode=$exitCode"
-    if ($status -ne 'ok' -and $status -ne 'nok') {
-      $logStatus = Get-KeyboardStatusFromLog -Path $State.logPath
-      if ($logStatus) {
-        Write-Log "Keyboard capture status recovered from log: $logStatus"
-        return @{ status = $logStatus; exitCode = $exitCode; fromLog = $true }
-      }
+    $logResult = Get-KeyboardResultFromLog -Path $State.logPath
+    if ($status -ne 'ok' -and $status -ne 'nok' -and $logResult -and $logResult.status) {
+      Write-Log "Keyboard capture status recovered from log: $($logResult.status)"
+      return @{ status = $logResult.status; padStatus = $logResult.padStatus; exitCode = $exitCode; fromLog = $true }
     }
-    return @{ status = $status; exitCode = $exitCode }
+    return @{ status = $status; padStatus = $logResult.padStatus; exitCode = $exitCode }
   } catch {
     Write-Log "Keyboard capture wait failed: $($_.Exception.Message)" 'WARN'
-    $logStatus = Get-KeyboardStatusFromLog -Path $State.logPath
-    if ($logStatus) {
-      Write-Log "Keyboard capture status recovered from log: $logStatus"
-      return @{ status = $logStatus; exitCode = $null; fromLog = $true }
+    $logResult = Get-KeyboardResultFromLog -Path $State.logPath
+    if ($logResult -and $logResult.status) {
+      Write-Log "Keyboard capture status recovered from log: $($logResult.status)"
+      return @{ status = $logResult.status; padStatus = $logResult.padStatus; exitCode = $null; fromLog = $true }
     }
     return @{ status = 'not_tested'; exitCode = $null }
   }
@@ -3337,6 +3340,11 @@ if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
     $kbPayload.payloadMode = 'skip'
     $kbPayload.keyboardStatus = $keyboardResult.status
     $kbPayload.components = @{ keyboard = $keyboardResult.status }
+    if ($keyboardResult.padStatus -and $keyboardResult.padStatus -ne 'not_tested') {
+      $kbPayload.padStatus = $keyboardResult.padStatus
+      $kbPayload.components.pad = $keyboardResult.padStatus
+      $padStatus = $keyboardResult.padStatus
+    }
     $kbJson = $kbPayload | ConvertTo-Json -Depth 4
     try {
       Invoke-RestMethod -Uri $ApiUrl -Method Post -ContentType 'application/json' -Body $kbJson -TimeoutSec $TimeoutSec | Out-Null

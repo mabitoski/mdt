@@ -704,6 +704,37 @@ body {
   color: #9b4a16;
 }
 
+.detail-action.is-loading {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.pad-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pad-control span {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.detail-action.pad-action.active[data-status="ok"] {
+  background: rgba(47, 124, 92, 0.16);
+  border-color: rgba(47, 124, 92, 0.4);
+  color: #1b4c38;
+}
+
+.detail-action.pad-action.active[data-status="nok"] {
+  background: rgba(231, 76, 60, 0.16);
+  border-color: rgba(231, 76, 60, 0.4);
+  color: #8d1f12;
+}
+
 .detail-action:focus-visible {
   outline: 2px solid rgba(242, 139, 45, 0.5);
   outline-offset: 2px;

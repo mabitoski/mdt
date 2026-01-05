@@ -437,6 +437,85 @@ function renderStatusValue(value) {
   return `<strong>${escapeHtml(value)}</strong>`;
 }
 
+function getPadStatus(detail) {
+  if (!detail || typeof detail !== 'object') {
+    return null;
+  }
+  if (detail.padStatus) {
+    return detail.padStatus;
+  }
+  if (detail.components && typeof detail.components === 'object') {
+    return detail.components.pad || null;
+  }
+  return null;
+}
+
+function applyPadStatusUpdate(id, status) {
+  state.machines = state.machines.map((machine) => {
+    if (machine.id !== id) {
+      return machine;
+    }
+    const components = machine.components && typeof machine.components === 'object'
+      ? { ...machine.components }
+      : {};
+    components.pad = status;
+    return {
+      ...machine,
+      padStatus: status,
+      components
+    };
+  });
+
+  if (state.details[id]) {
+    const detail = state.details[id];
+    const components = detail.components && typeof detail.components === 'object'
+      ? { ...detail.components }
+      : {};
+    components.pad = status;
+    state.details[id] = {
+      ...detail,
+      padStatus: status,
+      components
+    };
+  }
+}
+
+function setPadButtonsLoading(id, loading) {
+  const buttons = listEl.querySelectorAll(`[data-action="set-pad"][data-id="${id}"]`);
+  buttons.forEach((button) => {
+    button.disabled = loading;
+    button.classList.toggle('is-loading', loading);
+  });
+}
+
+async function updatePadStatus(id, status) {
+  setPadButtonsLoading(id, true);
+  try {
+    const response = await fetch(`/api/machines/${id}/pad`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('pad_update_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('pad_update_failed');
+    }
+    applyPadStatusUpdate(id, data.status);
+    renderList();
+  } catch (error) {
+    window.alert("Impossible d'enregistrer le pavé tactile.");
+  } finally {
+    setPadButtonsLoading(id, false);
+  }
+}
+
 function updateStats() {
   const total = state.machines.length;
   const laptop = state.machines.filter((m) => normalizeCategory(m.category) === 'laptop').length;
@@ -648,12 +727,36 @@ function buildDetailHtml(detail) {
     ? `<p class="detail-tech"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></p>`
     : '';
   const detailId = detail && detail.id != null ? String(detail.id) : '';
-  const exportButton = detailId
+  const padStatus = getPadStatus(detail);
+  const padOkActive = padStatus === 'ok' ? 'active' : '';
+  const padNokActive = padStatus === 'nok' ? 'active' : '';
+  const actionBar = detailId
     ? `
       <div class="detail-actions">
         <button class="detail-action" type="button" data-action="export-pdf" data-id="${detailId}">
           Telecharger PDF
         </button>
+        <div class="pad-control" data-id="${detailId}">
+          <span>Pave tactile</span>
+          <button
+            class="detail-action pad-action ${padOkActive}"
+            type="button"
+            data-action="set-pad"
+            data-status="ok"
+            data-id="${detailId}"
+          >
+            OK
+          </button>
+          <button
+            class="detail-action pad-action ${padNokActive}"
+            type="button"
+            data-action="set-pad"
+            data-status="nok"
+            data-id="${detailId}"
+          >
+            NOK
+          </button>
+        </div>
       </div>
     `
     : '';
@@ -751,7 +854,7 @@ function buildDetailHtml(detail) {
         </div>
         <div class="detail-item">
           <span>Pave tactile</span>
-          ${renderStatus(detail.padStatus)}
+          ${renderStatus(padStatus)}
         </div>
         <div class="detail-item">
           <span>Lecteur badge</span>
@@ -773,7 +876,7 @@ function buildDetailHtml(detail) {
       <span class="badge detail-category" data-category="${category}">${categoryLabels[category]}</span>
       <p class="machine-sub">${subtitle}</p>
       ${technicianLine}
-      ${exportButton}
+      ${actionBar}
     </div>
     <div class="detail-grid">
       <div class="detail-item">
@@ -1376,6 +1479,18 @@ sortSelect.addEventListener('change', (event) => {
 });
 
 listEl.addEventListener('click', (event) => {
+  const padBtn = event.target.closest('[data-action="set-pad"]');
+  if (padBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = Number.parseInt(padBtn.dataset.id, 10);
+    const status = padBtn.dataset.status;
+    if (!Number.isFinite(id) || !status) {
+      return;
+    }
+    updatePadStatus(id, status);
+    return;
+  }
   const exportBtn = event.target.closest('[data-action="export-pdf"]');
   if (exportBtn) {
     event.preventDefault();
