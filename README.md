@@ -190,7 +190,7 @@ Options utiles :
 - `-MsinfoTimeoutSec` : timeout de msinfo32 si fallback MAC (defaut `0`, desactive par defaut)
 - `-MacPreference` : `auto`, `ethernet`, `wifi`, `any` (defaut `auto`)
 - `-LogPath` : chemin du fichier de log (defaut `scripts/mdt-report.log`)
-- `-Technician` : nom/prenom du technicien (ou env `MDT_TECHNICIAN`)
+- `-Technician` : nom/prenom du technicien (ou env `MDT_TECHNICIAN`, sinon `Rémi`)
 - `-SkipKeyboardCapture` : ne lance pas `keyboard_capture.ps1` sur les laptops
 - `-KeyboardCapturePath` / `-KeyboardCaptureLogPath` / `-KeyboardCaptureConfigDir` : options du script clavier
 - `-KeyboardCaptureLayout` / `-KeyboardCaptureLayoutConfig` / `-KeyboardCaptureBlockInput` : layout et blocage des touches

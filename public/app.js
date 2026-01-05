@@ -588,6 +588,7 @@ function renderList() {
       const subtitle = escapeHtml(formatSubtitle(machine));
       const serial = escapeHtml(machine.serialNumber || '--');
       const mac = escapeHtml(formatMacSummary(machine));
+      const technician = escapeHtml(machine.technician || '--');
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
       const expanded = state.expandedId === machine.id;
       const selected = expanded ? 'selected' : '';
@@ -628,6 +629,7 @@ function renderList() {
           <div class="machine-meta">
             <span>SN: ${serial}</span>
             <span>MAC: ${mac}</span>
+            <span>Tech: ${technician}</span>
           </div>
           ${summaryHtml}
           <button class="card-toggle" type="button">${toggleLabel}</button>
@@ -650,7 +652,7 @@ function buildDetailHtml(detail) {
     ? `
       <div class="detail-actions">
         <button class="detail-action" type="button" data-action="export-pdf" data-id="${detailId}">
-          Exporter PDF
+          Telecharger PDF
         </button>
       </div>
     `
@@ -1249,17 +1251,37 @@ function buildReportDocument(detail) {
 }
 
 function openReportPdf(detail) {
-  if (!detail) {
+  if (!detail || !detail.id) {
     return;
   }
-  const reportWindow = window.open('', '_blank', 'width=980,height=900');
-  if (!reportWindow) {
-    window.alert('Popup bloque. Autorise les popups pour exporter le PDF.');
-    return;
-  }
-  reportWindow.document.open();
-  reportWindow.document.write(buildReportDocument(detail));
-  reportWindow.document.close();
+  const url = `/api/machines/${detail.id}/report.pdf`;
+  fetch(url)
+    .then((response) => {
+      if (response.status === 401) {
+        window.location.href = '/login';
+        return null;
+      }
+      if (!response.ok) {
+        throw new Error('pdf_failed');
+      }
+      return response.blob();
+    })
+    .then((blob) => {
+      if (!blob) {
+        return;
+      }
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `mdt-report-${detail.id}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    })
+    .catch(() => {
+      window.alert("Impossible de generer le PDF.");
+    });
 }
 
 async function loadMachines() {

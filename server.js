@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const session = require('express-session');
 const LdapAuth = require('ldapauth-fork');
+const PDFDocument = require('pdfkit');
 const { Pool } = require('pg');
 
 const app = express();
@@ -324,6 +325,66 @@ const ingestLimiter = rateLimit({
 
 const LAPTOP_CHASSIS_CODES = new Set([8, 9, 10, 11, 12, 14, 18, 21, 31]);
 const DESKTOP_CHASSIS_CODES = new Set([3, 4, 5, 6, 7, 15, 16]);
+const CATEGORY_LABELS = {
+  laptop: 'Portable',
+  desktop: 'Tour',
+  unknown: 'Inconnu'
+};
+const STATUS_LABELS = {
+  ok: 'OK',
+  nok: 'NOK',
+  absent: 'Absent',
+  not_tested: 'Non teste',
+  denied: 'Refuse',
+  timeout: 'Timeout',
+  scheduled: 'Planifie',
+  unknown: '--'
+};
+const STATUS_STYLES = {
+  ok: { background: '#DDF3E6', color: '#1B4C38' },
+  nok: { background: '#F9D9D3', color: '#8D1F12' },
+  absent: { background: '#EFEFEF', color: '#4B4B4B' },
+  not_tested: { background: '#EFEFEF', color: '#4B4B4B' },
+  denied: { background: '#EFEFEF', color: '#4B4B4B' },
+  timeout: { background: '#FBE2C8', color: '#9B4A16' },
+  scheduled: { background: '#DDF3E6', color: '#1B4C38' },
+  unknown: { background: '#EFEFEF', color: '#4B4B4B' }
+};
+const COMPONENT_LABELS = {
+  diskReadTest: 'Lecture disque',
+  diskWriteTest: 'Ecriture disque',
+  ramTest: 'RAM (WinSAT)',
+  cpuTest: 'CPU (WinSAT)',
+  gpuTest: 'GPU (WinSAT)',
+  cpuStress: 'CPU (stress)',
+  gpuStress: 'GPU (stress)',
+  networkPing: 'Ping',
+  fsCheck: 'Check disque',
+  gpu: 'GPU',
+  usb: 'Ports USB',
+  keyboard: 'Clavier',
+  camera: 'Camera',
+  pad: 'Pave tactile',
+  badgeReader: 'Lecteur badge'
+};
+const COMPONENT_ORDER = [
+  'diskReadTest',
+  'diskWriteTest',
+  'ramTest',
+  'cpuTest',
+  'gpuTest',
+  'cpuStress',
+  'gpuStress',
+  'networkPing',
+  'fsCheck',
+  'gpu',
+  'usb',
+  'keyboard',
+  'camera',
+  'pad',
+  'badgeReader'
+];
+const HIDDEN_COMPONENTS = new Set(['diskSmart', 'networkTest', 'memDiag', 'thermal']);
 
 app.set('trust proxy', process.env.TRUST_PROXY === '1');
 app.use(express.json({ limit: JSON_LIMIT }));
@@ -953,6 +1014,444 @@ function getClientIp(req) {
   return req.ip.startsWith('::ffff:') ? req.ip.slice(7) : req.ip;
 }
 
+function safeString(value, fallback = '--') {
+  if (value == null) {
+    return fallback;
+  }
+  const text = String(value).trim();
+  return text ? text : fallback;
+}
+
+function sanitizeFilename(value) {
+  const raw = safeString(value, 'report');
+  const normalized = raw.normalize('NFKD').replace(/[^\w.-]+/g, '-');
+  const trimmed = normalized.replace(/-+/g, '-').replace(/^[-.]+|[-.]+$/g, '');
+  return trimmed ? trimmed.slice(0, 80) : 'report';
+}
+
+function normalizeStatusKey(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'ok' : 'nok';
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return 'ok';
+    }
+    if (value === 0) {
+      return 'nok';
+    }
+  }
+  const key = String(value).trim().toLowerCase();
+  return STATUS_LABELS[key] ? key : null;
+}
+
+function summarizeComponents(components) {
+  const summary = { ok: 0, nok: 0, other: 0, total: 0 };
+  if (!components || typeof components !== 'object' || Array.isArray(components)) {
+    return summary;
+  }
+  Object.values(components).forEach((value) => {
+    const key = normalizeStatusKey(value);
+    if (!key) {
+      return;
+    }
+    if (key === 'ok') {
+      summary.ok += 1;
+    } else if (key === 'nok') {
+      summary.nok += 1;
+    } else {
+      summary.other += 1;
+    }
+    summary.total += 1;
+  });
+  return summary;
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return '--';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '--';
+  }
+  return date.toLocaleString('fr-FR', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function formatRam(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--';
+  }
+  const gb = value / 1024;
+  if (gb >= 1) {
+    const rounded = gb % 1 === 0 ? gb.toFixed(0) : gb.toFixed(1);
+    return `${rounded} Go`;
+  }
+  return `${Math.round(value)} Mo`;
+}
+
+function formatCpuThreads(cpu) {
+  if (!cpu || typeof cpu !== 'object') {
+    return '--';
+  }
+  const cores = Number.isFinite(cpu.cores) ? cpu.cores : null;
+  const threads = Number.isFinite(cpu.threads) ? cpu.threads : null;
+  if (cores == null && threads == null) {
+    return '--';
+  }
+  if (cores != null && threads != null) {
+    return `${cores} / ${threads}`;
+  }
+  if (cores != null) {
+    return `${cores} / --`;
+  }
+  return `-- / ${threads}`;
+}
+
+function formatDiskSize(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  if (value >= 100) {
+    return `${Math.round(value)} Go`;
+  }
+  return `${Math.round(value * 10) / 10} Go`;
+}
+
+function formatTotalStorage(disks, volumes) {
+  let total = 0;
+  if (Array.isArray(disks) && disks.length > 0) {
+    total = disks.reduce((sum, disk) => {
+      if (disk && Number.isFinite(disk.sizeGb)) {
+        return sum + disk.sizeGb;
+      }
+      return sum;
+    }, 0);
+  }
+  if ((!Number.isFinite(total) || total <= 0) && Array.isArray(volumes)) {
+    total = volumes.reduce((sum, vol) => {
+      if (vol && Number.isFinite(vol.sizeGb)) {
+        return sum + vol.sizeGb;
+      }
+      return sum;
+    }, 0);
+  }
+  if (!Number.isFinite(total) || total <= 0) {
+    return '--';
+  }
+  return formatDiskSize(total) || '--';
+}
+
+function pickPrimaryDisk(disks) {
+  if (!Array.isArray(disks) || disks.length === 0) {
+    return null;
+  }
+  const filtered = disks.filter((disk) => {
+    if (!disk || typeof disk !== 'object') {
+      return false;
+    }
+    const media = `${disk.mediaType || ''} ${disk.mediaTypeDetail || ''} ${disk.interface || ''}`.toLowerCase();
+    if (media.includes('removable') || media.includes('usb')) {
+      return false;
+    }
+    return true;
+  });
+  return filtered[0] || disks[0] || null;
+}
+
+function pickPrimaryVolume(volumes) {
+  if (!Array.isArray(volumes) || volumes.length === 0) {
+    return null;
+  }
+  const system = volumes.find((vol) => String(vol.drive || '').toUpperCase() === 'C');
+  if (system) {
+    return system;
+  }
+  const sorted = [...volumes].filter((vol) => Number.isFinite(vol.sizeGb));
+  sorted.sort((a, b) => (b.sizeGb || 0) - (a.sizeGb || 0));
+  return sorted[0] || volumes[0] || null;
+}
+
+function formatPrimaryDisk(disks, volumes) {
+  const disk = pickPrimaryDisk(disks);
+  if (disk) {
+    const nameParts = [disk.model, disk.mediaTypeDetail].filter(Boolean);
+    const size = formatDiskSize(disk.sizeGb);
+    const name = nameParts.length ? nameParts.join(' ') : '--';
+    if (size) {
+      return `${name} (${size})`;
+    }
+    return name;
+  }
+  const volume = pickPrimaryVolume(volumes);
+  if (!volume) {
+    return '--';
+  }
+  const drive = volume.drive ? `${volume.drive}:` : 'Volume';
+  const size = formatDiskSize(volume.sizeGb);
+  const fs = volume.fileSystem ? ` (${volume.fileSystem})` : '';
+  if (size) {
+    return `${drive} ${size}${fs}`;
+  }
+  return `${drive}${fs}`;
+}
+
+function formatSlots(free, total) {
+  const freeValue = typeof free === 'number' && Number.isFinite(free) ? free : null;
+  const totalValue = typeof total === 'number' && Number.isFinite(total) ? total : null;
+  if (freeValue === null && totalValue === null) {
+    return '--';
+  }
+  if (freeValue !== null && totalValue !== null) {
+    return `${freeValue}/${totalValue} libres`;
+  }
+  if (freeValue !== null) {
+    return `${freeValue} libres`;
+  }
+  return `${totalValue} total`;
+}
+
+function formatBatteryHealth(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '--';
+  }
+  return `${Math.round(value)}%`;
+}
+
+function formatMetric(value, unit) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+  return `${rounded} ${unit}`;
+}
+
+function formatMbps(value) {
+  return formatMetric(value, 'MB/s');
+}
+
+function formatScore(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+  return `Score ${rounded}`;
+}
+
+function buildDiagnosticsRows(payload) {
+  const rows = [];
+  const tests =
+    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+      ? payload.tests
+      : null;
+  if (!tests) {
+    return rows;
+  }
+
+  const addRow = (label, status, extra) => {
+    if (status == null && !extra) {
+      return;
+    }
+    rows.push({ label, status, extra });
+  };
+
+  addRow('Lecture disque', tests.diskRead, formatMbps(tests.diskReadMBps));
+  addRow('Ecriture disque', tests.diskWrite, formatMbps(tests.diskWriteMBps));
+  addRow('RAM (WinSAT)', tests.ramTest, formatMbps(tests.ramMBps));
+  addRow('CPU (WinSAT)', tests.cpuTest, formatMbps(tests.cpuMBps));
+  addRow('GPU (WinSAT)', tests.gpuTest, formatScore(tests.gpuScore));
+  addRow('CPU (stress)', tests.cpuStress, null);
+  addRow('GPU (stress)', tests.gpuStress, null);
+  addRow('Ping', tests.networkPing, tests.networkPingTarget || null);
+  addRow('Check disque', tests.fsCheck, null);
+
+  return rows;
+}
+
+function buildComponentRows(components) {
+  if (!components || typeof components !== 'object' || Array.isArray(components)) {
+    return [];
+  }
+  const entries = Object.entries(components).filter(([key]) => !HIDDEN_COMPONENTS.has(key));
+  const orderMap = new Map(COMPONENT_ORDER.map((key, index) => [key, index]));
+  return entries
+    .sort((a, b) => {
+      const orderA = orderMap.has(a[0]) ? orderMap.get(a[0]) : 999;
+      const orderB = orderMap.has(b[0]) ? orderMap.get(b[0]) : 999;
+      if (orderA !== orderB) {
+        return orderA - orderB;
+      }
+      return a[0].localeCompare(b[0], 'fr');
+    })
+    .map(([key, value]) => ({
+      label: COMPONENT_LABELS[key] || key,
+      status: value
+    }));
+}
+
+function ensureSpace(doc, height) {
+  const bottom = doc.page.height - doc.page.margins.bottom;
+  if (doc.y + height > bottom) {
+    doc.addPage();
+  }
+}
+
+function drawPill(doc, x, y, text, styles, fontSize = 9) {
+  const paddingX = 6;
+  const paddingY = 2;
+  doc.save();
+  doc.fontSize(fontSize);
+  const textWidth = doc.widthOfString(text);
+  const width = textWidth + paddingX * 2;
+  const height = fontSize + paddingY * 2 + 2;
+  doc.roundedRect(x, y - paddingY, width, height, height / 2).fill(styles.background);
+  doc.fillColor(styles.color).text(text, x + paddingX, y, { lineBreak: false });
+  doc.restore();
+  return width;
+}
+
+function drawSectionTitle(doc, title) {
+  const margin = doc.page.margins.left;
+  const width = doc.page.width - margin - doc.page.margins.right;
+  ensureSpace(doc, 28);
+  doc.fontSize(12).fillColor('#1D211F').text(title);
+  doc.moveDown(0.2);
+  doc
+    .moveTo(margin, doc.y)
+    .lineTo(margin + width, doc.y)
+    .strokeColor('#E0E0E0')
+    .stroke();
+  doc.moveDown(0.6);
+}
+
+function drawKeyValueGrid(doc, rows, columns = 2) {
+  const margin = doc.page.margins.left;
+  const width = doc.page.width - margin - doc.page.margins.right;
+  const colWidth = width / columns;
+  const rowHeight = 26;
+  const totalRows = Math.ceil(rows.length / columns);
+  ensureSpace(doc, totalRows * rowHeight + 8);
+  const startY = doc.y;
+
+  rows.forEach((row, index) => {
+    const col = index % columns;
+    const rowIndex = Math.floor(index / columns);
+    const x = margin + col * colWidth;
+    const y = startY + rowIndex * rowHeight;
+    doc.fontSize(8).fillColor('#6B6F6C').text(row.label.toUpperCase(), x, y);
+    doc.fontSize(10).fillColor('#1D211F').text(safeString(row.value), x, y + 10, {
+      width: colWidth - 8
+    });
+  });
+
+  doc.y = startY + totalRows * rowHeight + 6;
+}
+
+function drawStatusRows(doc, rows) {
+  const margin = doc.page.margins.left;
+  const width = doc.page.width - margin - doc.page.margins.right;
+  rows.forEach((row) => {
+    ensureSpace(doc, 20);
+    const y = doc.y;
+    const statusKey = normalizeStatusKey(row.status) || 'unknown';
+    const statusLabel = STATUS_LABELS[statusKey] || STATUS_LABELS.unknown;
+    const extraText = row.extra ? ` ${row.extra}` : '';
+    const pillText = `${statusLabel}${extraText}`.trim();
+    doc.fontSize(10).fillColor('#1D211F').text(row.label, margin, y, {
+      width: width * 0.62
+    });
+    doc.fontSize(9);
+    const pillWidth = doc.widthOfString(pillText) + 12;
+    const pillX = margin + width - pillWidth;
+    drawPill(doc, pillX, y, pillText, STATUS_STYLES[statusKey] || STATUS_STYLES.unknown);
+    doc.moveDown(1);
+  });
+}
+
+function drawReportPdf(doc, data) {
+  const margin = doc.page.margins.left;
+  const width = doc.page.width - margin - doc.page.margins.right;
+
+  doc.rect(0, 0, doc.page.width, 72).fill('#1D211F');
+  doc.fillColor('#FFFFFF');
+  doc.fontSize(9).text('MDT Live Ops', margin, 16);
+  doc.fontSize(18).text(data.title, margin, 30, { width });
+  doc.fontSize(10).text(data.subtitle, margin, 52, { width });
+  doc.fontSize(9).text(`Genere: ${data.generatedAt}`, margin, 16, { width, align: 'right' });
+
+  doc.fillColor('#1D211F');
+  doc.y = 86;
+
+  let x = margin;
+  x += drawPill(doc, x, doc.y, CATEGORY_LABELS[data.category] || CATEGORY_LABELS.unknown, {
+    background: '#E7F2EA',
+    color: '#1B4C38'
+  });
+  x += 8;
+  if (data.summary.total > 0) {
+    x += drawPill(doc, x, doc.y, `OK ${data.summary.ok}`, STATUS_STYLES.ok);
+    x += 6;
+    x += drawPill(doc, x, doc.y, `NOK ${data.summary.nok}`, STATUS_STYLES.nok);
+    x += 6;
+    x += drawPill(doc, x, doc.y, `NT ${data.summary.other}`, STATUS_STYLES.unknown);
+  }
+
+  doc.moveDown(1.4);
+
+  drawSectionTitle(doc, 'Identifiants');
+  drawKeyValueGrid(doc, [
+    { label: 'Serial', value: data.serialNumber },
+    { label: 'MAC', value: data.macPrimary },
+    { label: 'MACs', value: data.macList },
+    { label: 'OS', value: data.osVersion },
+    { label: 'IP', value: data.lastIp },
+    { label: 'Dernier passage', value: data.lastSeen },
+    { label: 'Premier passage', value: data.createdAt }
+  ]);
+
+  drawSectionTitle(doc, 'Materiel clef');
+  drawKeyValueGrid(doc, [
+    { label: 'Categorie', value: CATEGORY_LABELS[data.category] || CATEGORY_LABELS.unknown },
+    { label: 'Technicien', value: data.technician },
+    { label: 'RAM totale', value: data.ramTotal },
+    { label: 'Slots RAM', value: data.ramSlots },
+    { label: 'CPU', value: data.cpuName },
+    { label: 'Coeurs / Threads', value: data.cpuThreads },
+    { label: 'GPU', value: data.gpuName },
+    { label: 'Stockage total', value: data.storageTotal },
+    { label: 'Disque principal', value: data.storagePrimary },
+    { label: 'Batterie', value: data.batteryHealth },
+    { label: 'Camera', value: STATUS_LABELS[normalizeStatusKey(data.cameraStatus) || 'unknown'] },
+    { label: 'USB', value: STATUS_LABELS[normalizeStatusKey(data.usbStatus) || 'unknown'] },
+    { label: 'Clavier', value: STATUS_LABELS[normalizeStatusKey(data.keyboardStatus) || 'unknown'] },
+    { label: 'Pave tactile', value: STATUS_LABELS[normalizeStatusKey(data.padStatus) || 'unknown'] },
+    { label: 'Lecteur badge', value: STATUS_LABELS[normalizeStatusKey(data.badgeReaderStatus) || 'unknown'] }
+  ], 2);
+
+  drawSectionTitle(doc, 'Diagnostics');
+  if (data.diagnostics.length) {
+    drawStatusRows(doc, data.diagnostics);
+  } else {
+    doc.fontSize(10).fillColor('#6B6F6C').text('Aucun test disponible.');
+    doc.moveDown(0.6);
+  }
+
+  drawSectionTitle(doc, 'Etat des composants');
+  if (data.components.length) {
+    drawStatusRows(doc, data.components);
+  } else {
+    doc.fontSize(10).fillColor('#6B6F6C').text('Aucun statut de composant.');
+  }
+}
 app.get('/', requireAuth, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
@@ -1448,6 +1947,99 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       payload
     }
   });
+});
+
+app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  let row;
+  try {
+    const result = await pool.query(getMachineByIdQuery, [id]);
+    row = result.rows && result.rows[0] ? result.rows[0] : null;
+  } catch (error) {
+    console.error('Failed to fetch machine detail for PDF', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+
+  if (!row) {
+    return res.status(404).json({ ok: false, error: 'not_found' });
+  }
+
+  let components = null;
+  let payload = null;
+  try {
+    components = row.components ? JSON.parse(row.components) : null;
+  } catch (error) {
+    components = null;
+  }
+  try {
+    payload = row.payload ? JSON.parse(row.payload) : null;
+  } catch (error) {
+    payload = null;
+  }
+
+  const macAddresses = normalizeMacList(row.mac_addresses);
+  const macList = Array.isArray(macAddresses) ? macAddresses.filter(Boolean) : [];
+  const macPrimary = row.mac_address || macList[0] || '--';
+  const category = normalizeCategory(row.category);
+  const title = safeString(row.hostname || row.serial_number || row.mac_address || macList[0], `Machine ${row.id}`);
+  const subtitle = [row.vendor, row.model].filter(Boolean).join(' ') || 'Modele non renseigne';
+  const payloadCpu = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
+  const payloadGpu = payload && payload.gpu && typeof payload.gpu === 'object' ? payload.gpu : null;
+  const diskInfoRaw = payload ? payload.disks : null;
+  const diskInfo = Array.isArray(diskInfoRaw) ? diskInfoRaw : diskInfoRaw ? [diskInfoRaw] : [];
+  const volumeInfoRaw = payload ? payload.volumes : null;
+  const volumeInfo = Array.isArray(volumeInfoRaw) ? volumeInfoRaw : volumeInfoRaw ? [volumeInfoRaw] : [];
+
+  const reportData = {
+    id: row.id,
+    title,
+    subtitle,
+    category,
+    serialNumber: row.serial_number || '--',
+    macPrimary,
+    macList: macList.length ? macList.join(', ') : '--',
+    osVersion: row.os_version || '--',
+    lastIp: row.last_ip || '--',
+    lastSeen: formatDateTime(row.last_seen),
+    createdAt: formatDateTime(row.created_at),
+    technician: row.technician || '--',
+    ramTotal: formatRam(row.ram_mb),
+    ramSlots: formatSlots(row.ram_slots_free, row.ram_slots_total),
+    cpuName: (payloadCpu && payloadCpu.name) || '--',
+    cpuThreads: formatCpuThreads(payloadCpu),
+    gpuName: (payloadGpu && payloadGpu.name) || '--',
+    storageTotal: formatTotalStorage(diskInfo, volumeInfo),
+    storagePrimary: formatPrimaryDisk(diskInfo, volumeInfo),
+    batteryHealth: formatBatteryHealth(row.battery_health),
+    cameraStatus: row.camera_status,
+    usbStatus: row.usb_status,
+    keyboardStatus: row.keyboard_status,
+    padStatus: row.pad_status,
+    badgeReaderStatus: row.badge_reader_status,
+    diagnostics: buildDiagnosticsRows(payload),
+    components: buildComponentRows(components),
+    summary: summarizeComponents(components),
+    generatedAt: formatDateTime(new Date())
+  };
+
+  const filename = `mdt-report-${sanitizeFilename(title)}.pdf`;
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Cache-Control', 'no-store');
+
+  const doc = new PDFDocument({ size: 'A4', margin: 40 });
+  doc.info.Title = `Rapport MDT - ${title}`;
+  doc.info.Author = 'MDT Web';
+  doc.on('error', (error) => {
+    console.error('PDF generation error', error);
+  });
+  doc.pipe(res);
+  drawReportPdf(doc, reportData);
+  doc.end();
 });
 
 app.use((err, req, res, next) => {

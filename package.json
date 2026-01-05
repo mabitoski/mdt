@@ -13,6 +13,7 @@
     "express-session": "^1.18.0",
     "helmet": "^7.1.0",
     "ldapauth-fork": "^5.0.1",
+    "pdfkit": "^0.14.0",
     "pg": "^8.16.3"
   }
 }

@@ -55,7 +55,7 @@ $scriptVersion = '1.7.6'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
-  $ApiUrl = 'http://192.168.1.36:3000/api/ingest'
+  $ApiUrl = 'http://10.1.10.27:3000/api/ingest'
 }
 
 if (-not $NetworkPingTarget) {
@@ -64,6 +64,10 @@ if (-not $NetworkPingTarget) {
 
 if (-not $LogPath) {
   $LogPath = Join-Path $PSScriptRoot 'mdt-report.log'
+}
+
+if ([string]::IsNullOrWhiteSpace($Technician)) {
+  $Technician = 'Rémi'
 }
 
 if (-not $WinSatDataStorePath) {
