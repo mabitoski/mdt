@@ -66,7 +66,7 @@ if (-not $LogPath) {
   $LogPath = Join-Path $PSScriptRoot 'mdt-report.log'
 }
 
-$Technician = 'Rémi'
+$Technician = 'Melisse'
 
 if (-not $WinSatDataStorePath) {
   try {
