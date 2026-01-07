@@ -621,6 +621,60 @@ body {
   color: var(--muted);
 }
 
+.log-changes {
+  display: grid;
+  gap: 10px;
+}
+
+.log-change-row {
+  display: grid;
+  gap: 6px;
+}
+
+.log-change-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.log-change-values {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+.log-change-before,
+.log-change-after {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  font-weight: 600;
+}
+
+.log-change-before {
+  border: 1px solid rgba(60, 64, 60, 0.2);
+  color: var(--muted);
+}
+
+.log-change-after {
+  border: 1px solid rgba(47, 124, 92, 0.25);
+  color: #1b4c38;
+  background: rgba(47, 124, 92, 0.12);
+}
+
+.log-change-arrow {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.log-change-empty {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
 .log-details {
   border-top: 1px dashed rgba(60, 64, 60, 0.18);
   padding-top: 10px;

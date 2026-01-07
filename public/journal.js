@@ -152,6 +152,54 @@ function stringifyJson(value) {
   }
 }
 
+function truncateValue(value, maxLength) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function formatValue(value, maxLength = 140) {
+  if (value == null) {
+    return '--';
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return truncateValue(trimmed || '--', maxLength);
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  try {
+    return truncateValue(JSON.stringify(value), maxLength);
+  } catch (error) {
+    return '[complex]';
+  }
+}
+
+function renderChangeRows(changes) {
+  if (!Array.isArray(changes) || changes.length === 0) {
+    return '<div class="log-change-empty">Aucun champ modifie.</div>';
+  }
+  return changes
+    .map((change) => {
+      const label = formatFieldName(change.field);
+      const before = formatValue(change.before);
+      const after = formatValue(change.after);
+      return `
+        <div class="log-change-row">
+          <span class="log-change-label">${escapeHtml(label)}</span>
+          <div class="log-change-values">
+            <span class="log-change-before">${escapeHtml(before)}</span>
+            <span class="log-change-arrow">-></span>
+            <span class="log-change-after">${escapeHtml(after)}</span>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
 function updateLastUpdated() {
   if (!lastUpdatedEl) {
     return;
@@ -213,13 +261,8 @@ function renderLogs() {
 
   const rows = state.logs.map((log, index) => {
     const action = log.action || '--';
-    const changedFields = Array.isArray(log.changedFields) ? log.changedFields : [];
-    const chips = changedFields.slice(0, 12).map((field) => {
-      return `<span class="log-chip">${escapeHtml(formatFieldName(field))}</span>`;
-    });
-    if (changedFields.length > 12) {
-      chips.push(`<span class="log-chip">+${changedFields.length - 12}</span>`);
-    }
+    const changes = Array.isArray(log.changes) ? log.changes : [];
+    const changeRows = renderChangeRows(changes);
 
     return `
       <article class="log-card" data-id="${escapeHtml(log.id)}">
@@ -251,8 +294,8 @@ function renderLogs() {
             <strong>${escapeHtml(log.requestId || '--')}</strong>
           </div>
         </div>
-        <div class="log-chips">
-          ${chips.join('') || '<span class="log-chip">Aucun champ</span>'}
+        <div class="log-changes">
+          ${changeRows}
         </div>
         <details class="log-details" data-id="${escapeHtml(log.id)}" data-loaded="false">
           <summary>Voir le detail</summary>
@@ -293,9 +336,20 @@ function wireDetailToggles() {
         if (!data || !data.log) {
           throw new Error('detail_missing');
         }
+        const changedFields = Array.isArray(data.log.changedFields)
+          ? data.log.changedFields
+          : [];
+        const changes = changedFields.map((field) => ({
+          field,
+          before: data.log.oldData ? data.log.oldData[field] : null,
+          after: data.log.newData ? data.log.newData[field] : null
+        }));
         const oldData = stringifyJson(data.log.oldData);
         const newData = stringifyJson(data.log.newData);
         content.innerHTML = `
+          <div class="log-changes">
+            ${renderChangeRows(changes)}
+          </div>
           <div class="log-json-block">
             <span>Avant</span>
             <pre>${escapeHtml(oldData)}</pre>

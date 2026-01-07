@@ -1914,7 +1914,9 @@ app.get('/api/logs', requireAuth, async (req, res) => {
           audit_log.actor_ip,
           audit_log.request_id,
           audit_log.source,
-          audit_log.changed_fields
+          audit_log.changed_fields,
+          audit_log.old_data,
+          audit_log.new_data
         FROM audit_log
         LEFT JOIN machines ON machines.machine_key = audit_log.machine_key
         ${whereClause}
@@ -1924,21 +1926,32 @@ app.get('/api/logs', requireAuth, async (req, res) => {
       values
     );
 
-    const logs = result.rows.map((row) => ({
-      id: row.id,
-      occurredAt: row.occurred_at,
-      table: row.table_name,
-      action: row.action,
-      rowId: row.row_id,
-      machineKey: row.machine_key,
-      hostname: row.hostname,
-      actor: row.actor,
-      actorType: row.actor_type,
-      actorIp: row.actor_ip,
-      requestId: row.request_id,
-      source: row.source,
-      changedFields: row.changed_fields || []
-    }));
+    const logs = result.rows.map((row) => {
+      const oldData = sanitizeAuditData(row.old_data, false);
+      const newData = sanitizeAuditData(row.new_data, false);
+      const changedFields = Array.isArray(row.changed_fields) ? row.changed_fields : [];
+      const changes = changedFields.map((field) => ({
+        field,
+        before: oldData ? oldData[field] : null,
+        after: newData ? newData[field] : null
+      }));
+      return {
+        id: row.id,
+        occurredAt: row.occurred_at,
+        table: row.table_name,
+        action: row.action,
+        rowId: row.row_id,
+        machineKey: row.machine_key,
+        hostname: row.hostname,
+        actor: row.actor,
+        actorType: row.actor_type,
+        actorIp: row.actor_ip,
+        requestId: row.request_id,
+        source: row.source,
+        changedFields,
+        changes
+      };
+    });
 
     return res.json({ ok: true, logs });
   } catch (error) {
