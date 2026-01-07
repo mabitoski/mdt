@@ -43,6 +43,7 @@ const PGSSL =
   PGSSLMODE === 'verify-full' ||
   PGSSLMODE === 'verify-ca';
 const PGSSL_REJECT_UNAUTHORIZED = process.env.PGSSL_REJECT_UNAUTHORIZED !== '0';
+const AUDIT_LOG_ENABLED = process.env.AUDIT_LOG_ENABLED !== '0';
 
 if (!Number.isFinite(PORT)) {
   throw new Error('PORT must be a number');
@@ -59,6 +60,13 @@ pool.on('error', (error) => {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function generateRequestId() {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return crypto.randomBytes(16).toString('hex');
 }
 
 async function waitForDatabase() {
@@ -169,6 +177,134 @@ async function initDb() {
   await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_machine_key ON machines(machine_key)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_category ON machines(category)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen)');
+
+  if (AUDIT_LOG_ENABLED) {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id BIGSERIAL PRIMARY KEY,
+        occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        table_name TEXT NOT NULL,
+        action TEXT NOT NULL,
+        row_id TEXT,
+        machine_key TEXT,
+        actor TEXT,
+        actor_type TEXT,
+        actor_ip TEXT,
+        actor_user_agent TEXT,
+        request_id TEXT,
+        source TEXT,
+        old_data JSONB,
+        new_data JSONB,
+        changed_fields TEXT[]
+      );
+    `);
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_audit_log_table_time ON audit_log(table_name, occurred_at DESC)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_audit_log_request_id ON audit_log(request_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_audit_log_machine_key ON audit_log(machine_key)');
+
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION audit_log_trigger() RETURNS trigger AS $$
+      DECLARE
+        v_old_raw jsonb;
+        v_new_raw jsonb;
+        v_old jsonb;
+        v_new jsonb;
+        v_changed text[];
+        v_actor text;
+        v_actor_type text;
+        v_actor_ip text;
+        v_request_id text;
+        v_source text;
+        v_user_agent text;
+        v_row_id text;
+        v_machine_key text;
+      BEGIN
+        v_actor = nullif(current_setting('app.audit_actor', true), '');
+        v_actor_type = nullif(current_setting('app.audit_actor_type', true), '');
+        v_actor_ip = nullif(current_setting('app.audit_actor_ip', true), '');
+        v_request_id = nullif(current_setting('app.audit_request_id', true), '');
+        v_source = nullif(current_setting('app.audit_source', true), '');
+        v_user_agent = nullif(current_setting('app.audit_user_agent', true), '');
+
+        IF TG_OP = 'INSERT' THEN
+          v_new_raw = to_jsonb(NEW);
+          v_old_raw = NULL;
+        ELSIF TG_OP = 'UPDATE' THEN
+          v_new_raw = to_jsonb(NEW);
+          v_old_raw = to_jsonb(OLD);
+        ELSE
+          v_old_raw = to_jsonb(OLD);
+          v_new_raw = NULL;
+        END IF;
+
+        SELECT array_agg(key) INTO v_changed
+        FROM (
+          SELECT key FROM jsonb_object_keys(COALESCE(v_new_raw, '{}'::jsonb)) AS key
+          UNION
+          SELECT key FROM jsonb_object_keys(COALESCE(v_old_raw, '{}'::jsonb)) AS key
+        ) keys
+        WHERE COALESCE(v_new_raw -> key, 'null'::jsonb)
+          IS DISTINCT FROM COALESCE(v_old_raw -> key, 'null'::jsonb);
+
+        v_old = v_old_raw;
+        v_new = v_new_raw;
+        IF TG_TABLE_NAME = 'ldap_settings' THEN
+          v_old = v_old - 'bind_password';
+          v_new = v_new - 'bind_password';
+        END IF;
+
+        v_row_id = COALESCE(v_new_raw ->> 'id', v_old_raw ->> 'id');
+        v_machine_key = COALESCE(v_new_raw ->> 'machine_key', v_old_raw ->> 'machine_key');
+
+        INSERT INTO audit_log (
+          table_name,
+          action,
+          row_id,
+          machine_key,
+          actor,
+          actor_type,
+          actor_ip,
+          actor_user_agent,
+          request_id,
+          source,
+          old_data,
+          new_data,
+          changed_fields
+        ) VALUES (
+          TG_TABLE_NAME,
+          TG_OP,
+          v_row_id,
+          v_machine_key,
+          v_actor,
+          v_actor_type,
+          v_actor_ip,
+          v_user_agent,
+          v_request_id,
+          v_source,
+          v_old,
+          v_new,
+          v_changed
+        );
+
+        RETURN NULL;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+
+    await pool.query('DROP TRIGGER IF EXISTS audit_log_machines ON machines');
+    await pool.query(`
+      CREATE TRIGGER audit_log_machines
+      AFTER INSERT OR UPDATE OR DELETE ON machines
+      FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
+    `);
+
+    await pool.query('DROP TRIGGER IF EXISTS audit_log_ldap_settings ON ldap_settings');
+    await pool.query(`
+      CREATE TRIGGER audit_log_ldap_settings
+      AFTER INSERT OR UPDATE OR DELETE ON ldap_settings
+      FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
+    `);
+  }
 }
 
 const upsertMachineQuery = `
@@ -390,6 +526,12 @@ const VALID_PAD_STATUSES = new Set(['ok', 'nok']);
 app.set('trust proxy', process.env.TRUST_PROXY === '1');
 app.use(express.json({ limit: JSON_LIMIT }));
 app.use(express.urlencoded({ extended: false, limit: '16kb' }));
+app.use((req, res, next) => {
+  const headerId = cleanString(req.get('x-request-id'), 128);
+  req.requestId = headerId || generateRequestId();
+  res.setHeader('X-Request-Id', req.requestId);
+  next();
+});
 app.use(
   session({
     name: SESSION_NAME,
@@ -1008,11 +1150,70 @@ function safeJsonStringify(value, maxBytes) {
   return JSON.stringify({ truncated: true });
 }
 
+function limitString(value, maxLength) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed;
+}
+
 function getClientIp(req) {
   if (!req.ip) {
     return null;
   }
   return req.ip.startsWith('::ffff:') ? req.ip.slice(7) : req.ip;
+}
+
+function buildAuditContext(req, overrides = {}) {
+  const actor = limitString(
+    overrides.actor || (req.session && req.session.user ? req.session.user.username : null),
+    128
+  );
+  const actorType = limitString(
+    overrides.actorType || (req.session && req.session.user ? req.session.user.type : null),
+    32
+  );
+  const actorIp = limitString(getClientIp(req), 64);
+  const userAgent = limitString(req.get('user-agent'), 256);
+  const requestId = limitString(req.requestId, 128);
+  const source = limitString(overrides.source || `${req.method} ${req.originalUrl}`, 256);
+  return {
+    actor,
+    actorType,
+    actorIp,
+    userAgent,
+    requestId,
+    source
+  };
+}
+
+async function setAuditContext(client, context) {
+  if (!AUDIT_LOG_ENABLED || !context) {
+    return;
+  }
+  await client.query(
+    `
+      SELECT
+        set_config('app.audit_actor', $1, true),
+        set_config('app.audit_actor_type', $2, true),
+        set_config('app.audit_actor_ip', $3, true),
+        set_config('app.audit_user_agent', $4, true),
+        set_config('app.audit_request_id', $5, true),
+        set_config('app.audit_source', $6, true)
+    `,
+    [
+      context.actor || '',
+      context.actorType || '',
+      context.actorIp || '',
+      context.userAgent || '',
+      context.requestId || '',
+      context.source || ''
+    ]
+  );
 }
 
 function safeString(value, fallback = '--') {
@@ -1621,53 +1822,74 @@ app.put('/api/admin/ldap', requireAuth, requireAdmin, async (req, res) => {
     return res.status(400).json({ ok: false, error: 'missing_required' });
   }
 
-  await pool.query(
-    `
-      INSERT INTO ldap_settings (
-        id,
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    await client.query(
+      `
+        INSERT INTO ldap_settings (
+          id,
+          enabled,
+          url,
+          bind_dn,
+          bind_password,
+          search_base,
+          search_filter,
+          search_attributes,
+          tls_reject_unauthorized,
+          updated_at
+        ) VALUES (
+          1,
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          NOW()
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          enabled = EXCLUDED.enabled,
+          url = EXCLUDED.url,
+          bind_dn = EXCLUDED.bind_dn,
+          bind_password = EXCLUDED.bind_password,
+          search_base = EXCLUDED.search_base,
+          search_filter = EXCLUDED.search_filter,
+          search_attributes = EXCLUDED.search_attributes,
+          tls_reject_unauthorized = EXCLUDED.tls_reject_unauthorized,
+          updated_at = NOW()
+      `,
+      [
         enabled,
         url,
-        bind_dn,
-        bind_password,
-        search_base,
-        search_filter,
-        search_attributes,
-        tls_reject_unauthorized,
-        updated_at
-      ) VALUES (
-        1,
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        $7,
-        $8,
-        NOW()
-      )
-      ON CONFLICT (id) DO UPDATE SET
-        enabled = EXCLUDED.enabled,
-        url = EXCLUDED.url,
-        bind_dn = EXCLUDED.bind_dn,
-        bind_password = EXCLUDED.bind_password,
-        search_base = EXCLUDED.search_base,
-        search_filter = EXCLUDED.search_filter,
-        search_attributes = EXCLUDED.search_attributes,
-        tls_reject_unauthorized = EXCLUDED.tls_reject_unauthorized,
-        updated_at = NOW()
-    `,
-    [
-      enabled,
-      url,
-      bindDn,
-      bindPassword,
-      searchBase,
-      searchFilter,
-      searchAttributes,
-      tlsRejectUnauthorized
-    ]
-  );
+        bindDn,
+        bindPassword,
+        searchBase,
+        searchFilter,
+        searchAttributes,
+        tlsRejectUnauthorized
+      ]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback LDAP settings update', rollbackError);
+      }
+    }
+    console.error('Failed to update LDAP settings', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
 
   const updated = await getEffectiveLdapConfig();
   return res.json({ ok: true, config: formatLdapConfigForResponse(updated) });
@@ -1842,8 +2064,19 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     ipAddress
   ];
 
+  let client;
   try {
-    const result = await pool.query(upsertMachineQuery, values);
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(
+      client,
+      buildAuditContext(req, {
+        actor: technician || machineKey,
+        actorType: technician ? 'technician' : 'ingest'
+      })
+    );
+    const result = await client.query(upsertMachineQuery, values);
+    await client.query('COMMIT');
     const id = result.rows && result.rows[0] ? result.rows[0].id : null;
     return res.status(200).json({
       ok: true,
@@ -1851,8 +2084,19 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       machineKey
     });
   } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback ingest', rollbackError);
+      }
+    }
     console.error('Failed to ingest payload', error);
     return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 });
 
@@ -1975,39 +2219,48 @@ app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
     return res.status(400).json({ ok: false, error: 'invalid_status' });
   }
 
-  let row;
+  let client;
   try {
-    const result = await pool.query('SELECT components FROM machines WHERE id = $1', [id]);
-    row = result.rows && result.rows[0] ? result.rows[0] : null;
-  } catch (error) {
-    console.error('Failed to fetch components for pad update', error);
-    return res.status(500).json({ ok: false, error: 'db_error' });
-  }
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const result = await client.query('SELECT components FROM machines WHERE id = $1', [id]);
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
 
-  if (!row) {
-    return res.status(404).json({ ok: false, error: 'not_found' });
-  }
+    let components = {};
+    try {
+      components = row.components ? JSON.parse(row.components) : {};
+    } catch (error) {
+      components = {};
+    }
+    components.pad = rawStatus;
 
-  let components = {};
-  try {
-    components = row.components ? JSON.parse(row.components) : {};
-  } catch (error) {
-    components = {};
-  }
-  components.pad = rawStatus;
-
-  try {
-    await pool.query('UPDATE machines SET pad_status = $1, components = $2 WHERE id = $3', [
+    await client.query('UPDATE machines SET pad_status = $1, components = $2 WHERE id = $3', [
       rawStatus,
       JSON.stringify(components),
       id
     ]);
+    await client.query('COMMIT');
+    return res.json({ ok: true, status: rawStatus, components });
   } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback pad status update', rollbackError);
+      }
+    }
     console.error('Failed to update pad status', error);
     return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
-
-  return res.json({ ok: true, status: rawStatus, components });
 });
 
 app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
