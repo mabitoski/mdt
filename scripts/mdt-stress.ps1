@@ -7,6 +7,7 @@ param(
   [int]$MemTestTimeoutSec = 180,
   [int]$CpuTestTimeoutSec = 180,
   [int]$GpuTestTimeoutSec = 240,
+  [int]$DxDiagTimeoutSec = 300,
   [int]$FsCheckTimeoutSec = 120,
   [ValidateSet('auto', 'none', 'scan')][string]$FsCheckMode = 'auto',
   [ValidateSet('none', 'schedule')][string]$MemDiagMode = 'none',
@@ -41,8 +42,17 @@ param(
   [switch]$KeyboardCaptureBlockInput,
   [switch]$SkipKeyboardCapture,
   [switch]$SkipWinSatDataStore,
+  [switch]$SkipGpuAssessment,
   [switch]$SkipElevation,
-  [switch]$SkipTlsValidation
+  [switch]$SkipTlsValidation,
+  [string]$ArtifactRoot = $env:MDT_ARTIFACT_ROOT,
+  [string]$ObjectStorageEndpoint = $env:MDT_OBJECT_STORAGE_ENDPOINT,
+  [string]$ObjectStorageBucket = $env:MDT_OBJECT_STORAGE_BUCKET,
+  [string]$ObjectStorageAccessKey = $env:MDT_OBJECT_STORAGE_ACCESS_KEY,
+  [string]$ObjectStorageSecretKey = $env:MDT_OBJECT_STORAGE_SECRET_KEY,
+  [string]$ObjectStoragePrefix = $env:MDT_OBJECT_STORAGE_PREFIX,
+  [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
+  [switch]$SkipRawUpload
 )
 
 $scriptPath = Join-Path $PSScriptRoot 'mdt-report.ps1'
@@ -55,6 +65,7 @@ $params = @{
   MemTestTimeoutSec = $MemTestTimeoutSec
   CpuTestTimeoutSec = $CpuTestTimeoutSec
   GpuTestTimeoutSec = $GpuTestTimeoutSec
+  DxDiagTimeoutSec = $DxDiagTimeoutSec
   FsCheckTimeoutSec = $FsCheckTimeoutSec
   FsCheckMode = $FsCheckMode
   MemDiagMode = $MemDiagMode
@@ -89,9 +100,18 @@ $params = @{
   KeyboardCaptureBlockInput = $KeyboardCaptureBlockInput
   SkipKeyboardCapture = $SkipKeyboardCapture
   SkipWinSatDataStore = $SkipWinSatDataStore
+  SkipGpuAssessment = $SkipGpuAssessment
   SkipElevation = $SkipElevation
   SkipStressScript = $true
+  ArtifactRoot = $ArtifactRoot
+  ObjectStorageEndpoint = $ObjectStorageEndpoint
+  ObjectStorageBucket = $ObjectStorageBucket
+  ObjectStorageAccessKey = $ObjectStorageAccessKey
+  ObjectStorageSecretKey = $ObjectStorageSecretKey
+  ObjectStoragePrefix = $ObjectStoragePrefix
+  ObjectStorageMcPath = $ObjectStorageMcPath
 }
 if ($SkipTlsValidation) { $params.SkipTlsValidation = $true }
+if ($SkipRawUpload) { $params.SkipRawUpload = $true }
 
 & $scriptPath @params

@@ -172,6 +172,7 @@ Options utiles :
 - `-TestMode` : `none`, `quick`, `stress` (par defaut `quick`)
 - `-DiskTestTimeoutSec` / `-MemTestTimeoutSec` : timeout des tests WinSAT
 - `-CpuTestTimeoutSec` / `-GpuTestTimeoutSec` : timeout WinSAT CPU/GPU
+- `-DxDiagTimeoutSec` : timeout dxdiag pour l'evaluation GPU
 - `-StressLoops` : nombre de boucles en mode `stress`
 - `-FsCheckMode` : `auto` (stress uniquement), `scan`, `none`
 - `-FsCheckTimeoutSec` : timeout du `chkdsk /scan`
@@ -192,15 +193,26 @@ Options utiles :
 - `-LogPath` : chemin du fichier de log (defaut `scripts/mdt-report.log`)
 - `-Technician` : nom/prenom du technicien (ou env `MDT_TECHNICIAN`, sinon `Rémi`)
 - `-SkipKeyboardCapture` : ne lance pas `keyboard_capture.ps1` sur les laptops
+- `-SkipGpuAssessment` : desactive l'evaluation GPU (ou `MDT_SKIP_GPU_ASSESSMENT=1`)
 - `-KeyboardCapturePath` / `-KeyboardCaptureLogPath` / `-KeyboardCaptureConfigDir` : options du script clavier
 - `-KeyboardCaptureLayout` / `-KeyboardCaptureLayoutConfig` / `-KeyboardCaptureBlockInput` : layout et blocage des touches
 - `-SkipElevation` : n'essaie pas d'elever en admin si le script est lance en utilisateur
+
+Artefacts bruts (alcyone) :
+- `MDT_ARTIFACT_ROOT` : dossier local de staging (defaut `%TEMP%\\mdt-fusion\\artifacts`)
+- `MDT_OBJECT_STORAGE_ENDPOINT` / `MDT_OBJECT_STORAGE_BUCKET` / `MDT_OBJECT_STORAGE_ACCESS_KEY` / `MDT_OBJECT_STORAGE_SECRET_KEY` / `MDT_OBJECT_STORAGE_PREFIX` : cible MinIO
+- `MDT_OBJECT_STORAGE_MC_PATH` : chemin vers `mc.exe` (sinon telechargement auto)
+- `MDT_SKIP_RAW_UPLOAD=1` : desactive l'upload
+
+Par defaut, la config pointe vers Alcyone; override possible via les variables ci-dessus.
+
+Le script copie les logs, le payload JSON, les artefacts camera/clavier, DxDiag, l'evaluation GPU et les fichiers WinSAT vers le dossier de staging, puis effectue un mirror vers Alcyone.
 
 Notes clavier :
 - `mdt-report.ps1` lance `keyboard_capture.ps1` a la fin si la categorie est `laptop`.
 
 Notes tests :
-- Les tests utilisent WMI/CIM et WinSAT (disponible en OS complet).
+- Les tests utilisent WMI/CIM, DxDiag et WinSAT (disponible en OS complet).
 - En WinPE, certains tests peuvent renvoyer `absent`.
 
 ## Camera (exe)

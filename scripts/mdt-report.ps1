@@ -8,6 +8,7 @@ param(
   [int]$MemTestTimeoutSec = 180,
   [int]$CpuTestTimeoutSec = 180,
   [int]$GpuTestTimeoutSec = 240,
+  [int]$DxDiagTimeoutSec = 300,
   [int]$FsCheckTimeoutSec = 120,
   [ValidateSet('auto', 'none', 'scan')][string]$FsCheckMode = 'auto',
   [ValidateSet('none', 'schedule')][string]$MemDiagMode = 'none',
@@ -43,15 +44,24 @@ param(
   [int]$KeyboardCaptureTimeoutSec = 600,
   [switch]$SkipKeyboardCapture,
   [switch]$SkipWinSatDataStore,
+  [switch]$SkipGpuAssessment,
   [switch]$SkipStressScript,
   [switch]$SkipElevation,
   [switch]$SkipTlsValidation,
   [switch]$FactoryReset,
   [string]$FactoryResetConfirm,
-  [switch]$SkipFactoryResetPrompt
+  [switch]$SkipFactoryResetPrompt,
+  [string]$ArtifactRoot = $env:MDT_ARTIFACT_ROOT,
+  [string]$ObjectStorageEndpoint = $env:MDT_OBJECT_STORAGE_ENDPOINT,
+  [string]$ObjectStorageBucket = $env:MDT_OBJECT_STORAGE_BUCKET,
+  [string]$ObjectStorageAccessKey = $env:MDT_OBJECT_STORAGE_ACCESS_KEY,
+  [string]$ObjectStorageSecretKey = $env:MDT_OBJECT_STORAGE_SECRET_KEY,
+  [string]$ObjectStoragePrefix = $env:MDT_OBJECT_STORAGE_PREFIX,
+  [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
+  [switch]$SkipRawUpload
 )
 
-$scriptVersion = '1.7.6'
+$scriptVersion = '1.7.7'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -67,6 +77,18 @@ if (-not $LogPath) {
 }
 
 $Technician = 'Rémi'
+if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
+  $SkipRawUpload = $true
+}
+if (-not $PSBoundParameters.ContainsKey('SkipGpuAssessment') -and $env:MDT_SKIP_GPU_ASSESSMENT -eq '1') {
+  $SkipGpuAssessment = $true
+}
+
+if (-not $ObjectStorageEndpoint) { $ObjectStorageEndpoint = 'http://10.1.10.28:9000' }
+if (-not $ObjectStorageBucket) { $ObjectStorageBucket = 'alcyone-archive' }
+if (-not $ObjectStorageAccessKey) { $ObjectStorageAccessKey = 'codexminio' }
+if (-not $ObjectStorageSecretKey) { $ObjectStorageSecretKey = 'semngIYo36sZq27tixYVXeFF' }
+if (-not $ObjectStoragePrefix) { $ObjectStoragePrefix = 'run' }
 
 if (-not $WinSatDataStorePath) {
   try {
@@ -717,6 +739,259 @@ function Resolve-CameraOutputDir {
   return $candidate
 }
 
+function Ensure-Directory {
+  param([string]$Path)
+
+  if (-not $Path) { return $null }
+  try {
+    if (-not (Test-Path -Path $Path)) {
+      New-Item -Path $Path -ItemType Directory -Force | Out-Null
+    }
+    return $Path
+  } catch {
+    Write-Log "Ensure-Directory failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+}
+
+function Resolve-ArtifactRoot {
+  param([string]$Value)
+
+  $candidate = $Value
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    if ($env:TEMP) {
+      $candidate = Join-Path $env:TEMP 'mdt-fusion\artifacts'
+    } else {
+      $candidate = Join-Path $PSScriptRoot 'mdt-fusion\artifacts'
+    }
+  }
+  $candidate = [Environment]::ExpandEnvironmentVariables($candidate)
+  if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+    $candidate = Join-Path (Get-Location) $candidate
+  }
+  return $candidate
+}
+
+function Get-SafeKey {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) { return 'unknown' }
+  return ($Value -replace '[^A-Za-z0-9._-]', '-')
+}
+
+function Get-MacSerialKey {
+  param(
+    [string]$MacAddress,
+    [string]$SerialNumber,
+    [string]$Hostname
+  )
+
+  if ($SerialNumber) { return "sn:$SerialNumber" }
+  if ($MacAddress) { return "mac:$MacAddress" }
+  if ($Hostname) { return "host:$Hostname" }
+  return 'unknown'
+}
+
+function New-ArtifactRunDir {
+  param(
+    [string]$ArtifactRoot,
+    [string]$MacSerialKey,
+    [string]$ClientRunId
+  )
+
+  if (-not $ArtifactRoot) { return $null }
+  $safeKey = Get-SafeKey -Value $MacSerialKey
+  $runDir = Join-Path $ArtifactRoot (Join-Path $safeKey $ClientRunId)
+  return (Ensure-Directory -Path $runDir)
+}
+
+function Copy-FileSafe {
+  param(
+    [string]$Source,
+    [string]$Destination
+  )
+
+  if (-not $Source -or -not (Test-Path $Source)) { return $false }
+  try {
+    $targetDir = Split-Path $Destination -Parent
+    if ($targetDir) { Ensure-Directory -Path $targetDir | Out-Null }
+    Copy-Item -Path $Source -Destination $Destination -Force -ErrorAction Stop
+    return $true
+  } catch {
+    Write-Log "Copy failed ($Source): $($_.Exception.Message)" 'WARN'
+    return $false
+  }
+}
+
+function Copy-DirContents {
+  param(
+    [string]$SourceDir,
+    [string]$DestinationDir
+  )
+
+  if (-not $SourceDir -or -not (Test-Path $SourceDir)) { return $false }
+  try {
+    Ensure-Directory -Path $DestinationDir | Out-Null
+    Copy-Item -Path (Join-Path $SourceDir '*') -Destination $DestinationDir -Recurse -Force -ErrorAction Stop
+    return $true
+  } catch {
+    Write-Log "Copy dir failed ($SourceDir): $($_.Exception.Message)" 'WARN'
+    return $false
+  }
+}
+
+function Write-JsonFile {
+  param(
+    [string]$Path,
+    [object]$Object,
+    [int]$Depth = 10
+  )
+
+  if (-not $Path) { return $false }
+  try {
+    $targetDir = Split-Path $Path -Parent
+    if ($targetDir) { Ensure-Directory -Path $targetDir | Out-Null }
+    $Object | ConvertTo-Json -Depth $Depth | Out-File -FilePath $Path -Encoding UTF8 -Force
+    return $true
+  } catch {
+    Write-Log "Write JSON failed ($Path): $($_.Exception.Message)" 'WARN'
+    return $false
+  }
+}
+
+function Resolve-McPath {
+  param([string]$Value)
+
+  if ($Value -and (Test-Path $Value)) { return $Value }
+  if (-not $env:TEMP) { return $null }
+  $binRoot = Join-Path $env:TEMP 'mdt-fusion\bin'
+  Ensure-Directory -Path $binRoot | Out-Null
+  $mcPath = Join-Path $binRoot 'mc.exe'
+  if (-not (Test-Path $mcPath)) {
+    try {
+      Invoke-WebRequest -Uri 'https://dl.min.io/client/mc/release/windows-amd64/mc.exe' -OutFile $mcPath -UseBasicParsing -ErrorAction Stop
+      Unblock-File -Path $mcPath -ErrorAction SilentlyContinue
+    } catch {
+      Write-Log "mc.exe download failed: $($_.Exception.Message)" 'WARN'
+    }
+  }
+  if (Test-Path $mcPath) { return $mcPath }
+  return $null
+}
+
+function Stage-RunArtifacts {
+  param(
+    [string]$RunDir,
+    [string]$LogPath,
+    [string]$PayloadJson,
+    [string]$CameraOutputDir,
+    [string]$KeyboardLogPath,
+    [hashtable]$WinsatStore,
+    [hashtable]$Manifest
+  )
+
+  if (-not $RunDir) { return $false }
+  Ensure-Directory -Path $RunDir | Out-Null
+
+  if ($Manifest) {
+    Write-JsonFile -Path (Join-Path $RunDir 'run_manifest.json') -Object $Manifest | Out-Null
+  }
+  if ($LogPath) {
+    Copy-FileSafe -Source $LogPath -Destination (Join-Path $RunDir 'mdt-report.log') | Out-Null
+  }
+  if ($PayloadJson) {
+    try {
+      $payloadPath = Join-Path $RunDir 'payload.json'
+      $PayloadJson | Out-File -FilePath $payloadPath -Encoding UTF8 -Force
+    } catch {
+      Write-Log "Payload write failed: $($_.Exception.Message)" 'WARN'
+    }
+  }
+  if ($CameraOutputDir) {
+    Copy-DirContents -SourceDir $CameraOutputDir -DestinationDir (Join-Path $RunDir 'camera') | Out-Null
+  }
+  if ($KeyboardLogPath) {
+    $dest = Join-Path $RunDir 'keyboard'
+    $destFile = Join-Path $dest (Split-Path $KeyboardLogPath -Leaf)
+    Copy-FileSafe -Source $KeyboardLogPath -Destination $destFile | Out-Null
+  }
+  if ($WinsatStore -and $WinsatStore.files) {
+    $winsatDir = Join-Path $RunDir 'winsat'
+    Ensure-Directory -Path $winsatDir | Out-Null
+    $sourceRoot = $WinsatStore.source
+    $names = @($WinsatStore.files.Values) | Sort-Object -Unique
+    foreach ($name in $names) {
+      if (-not $name) { continue }
+      $sourcePath = $null
+      if ($sourceRoot) {
+        $sourcePath = Join-Path $sourceRoot $name
+      } elseif (Test-Path $name) {
+        $sourcePath = $name
+      }
+      if ($sourcePath -and (Test-Path $sourcePath)) {
+        Copy-FileSafe -Source $sourcePath -Destination (Join-Path $winsatDir (Split-Path $sourcePath -Leaf)) | Out-Null
+      }
+    }
+  }
+  return $true
+}
+
+function Upload-RunArtifacts {
+  param(
+    [string]$RunDir,
+    [string]$Endpoint,
+    [string]$Bucket,
+    [string]$AccessKey,
+    [string]$SecretKey,
+    [string]$Prefix,
+    [string]$MacSerialKey,
+    [string]$ClientRunId,
+    [string]$McPath
+  )
+
+  $result = [ordered]@{
+    attempted = $false
+    success = $false
+  }
+
+  if (-not $RunDir -or -not (Test-Path $RunDir)) {
+    $result.error = 'run_dir_missing'
+    return $result
+  }
+  if (-not $Endpoint -or -not $Bucket -or -not $AccessKey -or -not $SecretKey) {
+    $result.error = 'missing_object_storage_config'
+    return $result
+  }
+
+  $rootPrefix = if ($Prefix) { $Prefix.Trim('/','\\') } else { 'run' }
+  $safeKey = Get-SafeKey -Value $MacSerialKey
+  $destPath = ("{0}/{1}/{2}/{3}/{4}" -f 'diagobj', $Bucket, $rootPrefix, $safeKey, $ClientRunId)
+  $result.attempted = $true
+  $result.bucket = $Bucket
+  $result.prefix = $rootPrefix
+  $result.destination = $destPath
+
+  $resolvedMcPath = Resolve-McPath -Value $McPath
+  if (-not $resolvedMcPath) {
+    $result.error = 'mc_missing'
+    return $result
+  }
+
+  try {
+    & $resolvedMcPath alias set diagobj $Endpoint $AccessKey $SecretKey *> $null
+    if ($LASTEXITCODE -ne 0) { throw ("mc alias set failed (" + $LASTEXITCODE + ")") }
+    & $resolvedMcPath mirror --overwrite "$RunDir" "$destPath" *> $null
+    if ($LASTEXITCODE -ne 0) { throw ("mc mirror failed (" + $LASTEXITCODE + ")") }
+    Write-Log "Raw artifacts mirrored to $destPath"
+    $result.success = $true
+    return $result
+  } catch {
+    $result.error = $_.Exception.Message
+    Write-Log "Raw artifact upload failed: $($result.error)" 'WARN'
+    return $result
+  }
+}
+
 function Get-CameraStatusFromOutput {
   param(
     [string]$OutputDir,
@@ -1229,6 +1504,12 @@ if (-not $script:IsAdmin -and -not $SkipElevation) {
   Write-Log 'Continuing without admin rights.' 'WARN'
 }
 
+$clientRunId = [guid]::NewGuid().ToString('N')
+$artifactRootResolved = Resolve-ArtifactRoot -Value $ArtifactRoot
+$artifactRunDir = $null
+$macSerialKey = $null
+$rawUploadResult = $null
+
 Set-ConsoleFullscreen
 Write-Log "Start script version $scriptVersion"
 Write-Log "ApiUrl=$ApiUrl Category=$Category TestMode=$TestMode"
@@ -1267,6 +1548,7 @@ if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
       MemTestTimeoutSec = $MemTestTimeoutSec
       CpuTestTimeoutSec = $CpuTestTimeoutSec
       GpuTestTimeoutSec = $GpuTestTimeoutSec
+      DxDiagTimeoutSec = $DxDiagTimeoutSec
       FsCheckTimeoutSec = $FsCheckTimeoutSec
       FsCheckMode = $FsCheckMode
       MemDiagMode = $MemDiagMode
@@ -1292,9 +1574,18 @@ if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
       MacPreference = $MacPreference
       LogPath = $LogPath
       Technician = $Technician
+      ArtifactRoot = $ArtifactRoot
+      ObjectStorageEndpoint = $ObjectStorageEndpoint
+      ObjectStorageBucket = $ObjectStorageBucket
+      ObjectStorageAccessKey = $ObjectStorageAccessKey
+      ObjectStorageSecretKey = $ObjectStorageSecretKey
+      ObjectStoragePrefix = $ObjectStoragePrefix
+      ObjectStorageMcPath = $ObjectStorageMcPath
     }
     if ($SkipTlsValidation) { $delegateParams.SkipTlsValidation = $true }
     if ($SkipWinSatDataStore) { $delegateParams.SkipWinSatDataStore = $true }
+    if ($SkipGpuAssessment) { $delegateParams.SkipGpuAssessment = $true }
+    if ($SkipRawUpload) { $delegateParams.SkipRawUpload = $true }
   & $stressScriptPath @delegateParams
   Complete-Progress
   Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
@@ -2393,6 +2684,227 @@ function Invoke-WinsatScore {
   return @{ status = $status; score = $score }
 }
 
+function Get-FeatureRank {
+  param([string]$Feature)
+
+  if (-not $Feature) { return 0 }
+  $m = [regex]::Match($Feature, '(\d+)[\._]?(\d+)?')
+  if (-not $m.Success) { return 0 }
+  $maj = [int]$m.Groups[1].Value
+  $min = 0
+  if ($m.Groups[2].Success) { $min = [int]$m.Groups[2].Value }
+  return $maj + ($min / 10)
+}
+
+function Read-DxDiagInfo {
+  param([string]$Path)
+
+  $info = [ordered]@{
+    hasDxDiag = $false
+    gpuName = $null
+    featureLevels = @()
+  }
+
+  if (-not $Path -or -not (Test-Path -Path $Path)) { return $info }
+  $content = Get-Content -Path $Path -Raw -ErrorAction SilentlyContinue
+  if (-not $content) { return $info }
+
+  $info.hasDxDiag = $true
+  $lines = $content -split "`n"
+  $gpuNameLine = $lines | Where-Object { $_ -match 'Card name:' -or $_ -match 'Device:' } | Select-Object -First 1
+  if ($gpuNameLine -match ':\s*(.+)') { $info.gpuName = $Matches[1].Trim() }
+  $featLine = $lines | Where-Object { $_ -match 'Feature Levels' } | Select-Object -First 1
+  if ($featLine -match 'Feature Levels:\s*(.+)') {
+    $rawLevels = $Matches[1] -split ','
+    $info.featureLevels = $rawLevels | ForEach-Object { $_.Trim().TrimStart('D','3','D','_') } | Where-Object { $_ }
+  }
+
+  return $info
+}
+
+function Invoke-DxDiagCapture {
+  param(
+    [string]$OutputDir,
+    [int]$TimeoutSec = 300
+  )
+
+  $result = [ordered]@{
+    status = 'not_tested'
+    txtPath = $null
+    logPath = $null
+  }
+
+  $dxdiag = $null
+  if ($env:SystemRoot) {
+    $dxdiag = Join-Path $env:SystemRoot 'System32\\dxdiag.exe'
+  }
+  if (-not $dxdiag -or -not (Test-Path -Path $dxdiag)) {
+    $result.status = 'absent'
+    return $result
+  }
+
+  if (-not $OutputDir) {
+    if ($env:TEMP) {
+      $OutputDir = Join-Path $env:TEMP 'mdt-fusion\\dxdiag'
+    } else {
+      $OutputDir = Join-Path $PSScriptRoot 'dxdiag'
+    }
+  }
+  $OutputDir = Ensure-Directory -Path $OutputDir
+  if (-not $OutputDir) {
+    $result.status = 'nok'
+    return $result
+  }
+  if (-not $TimeoutSec -or $TimeoutSec -le 0) { $TimeoutSec = 300 }
+
+  $txtPath = Join-Path $OutputDir 'dxdiag.txt'
+  $logPath = Join-Path $OutputDir 'dxdiag.log'
+  $result.txtPath = $txtPath
+  $result.logPath = $logPath
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $dxdiag
+  $psi.Arguments = "/t `"$txtPath`""
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $psi.WorkingDirectory = $OutputDir
+
+  $proc = New-Object System.Diagnostics.Process
+  $proc.StartInfo = $psi
+  try {
+    [void]$proc.Start()
+  } catch {
+    Write-Log "DxDiag start failed: $($_.Exception.Message)" 'WARN'
+    $result.status = 'nok'
+    return $result
+  }
+
+  $completed = $false
+  try {
+    $completed = $proc.WaitForExit($TimeoutSec * 1000)
+  } catch {
+    Write-Log "DxDiag wait failed: $($_.Exception.Message)" 'WARN'
+  }
+
+  if (-not $completed) {
+    try { $proc.Kill() } catch { }
+    $result.status = 'timeout'
+  } else {
+    $result.status = if ($proc.ExitCode -eq 0) { 'ok' } else { 'nok' }
+  }
+
+  $output = $proc.StandardOutput.ReadToEnd() + "`n" + $proc.StandardError.ReadToEnd()
+  if ($output) {
+    try { [IO.File]::WriteAllText($logPath, $output) } catch { }
+  }
+
+  if (-not (Test-Path -Path $txtPath)) {
+    Set-Content -Path $txtPath -Value 'DxDiag produced no output' -Force -Encoding UTF8
+  }
+  if (-not (Test-Path -Path $logPath)) {
+    Set-Content -Path $logPath -Value 'DxDiag produced no log output' -Force -Encoding UTF8
+  }
+
+  return $result
+}
+
+function Get-GpuAssessment {
+  param(
+    [string]$DxDiagPath,
+    [hashtable]$WinSatStore,
+    [double]$GpuScore,
+    [string]$GpuNameFallback
+  )
+
+  $dxInfo = Read-DxDiagInfo -Path $DxDiagPath
+  $featureLevels = @()
+  if ($dxInfo.featureLevels) { $featureLevels = @($dxInfo.featureLevels) }
+
+  $gpuName = $dxInfo.gpuName
+  if (-not $gpuName -and $GpuNameFallback) { $gpuName = $GpuNameFallback }
+
+  $graphicsScore = $null
+  $gamingScore = $null
+  $cpuScore = $null
+  $memScore = $null
+  $rawScores = $null
+  $hasWinSat = $false
+  $winSatParseOk = $false
+  $winSatLogTail = ''
+
+  if ($WinSatStore -and $WinSatStore.winSPR) {
+    $hasWinSat = $true
+    $winSatParseOk = $true
+    $rawScores = @{
+      Graphics = $WinSatStore.winSPR.GraphicsScore
+      Gaming = $WinSatStore.winSPR.GamingScore
+      CPU = $WinSatStore.winSPR.CpuScore
+      Memory = $WinSatStore.winSPR.MemoryScore
+    }
+    $graphicsScore = $WinSatStore.winSPR.GraphicsScore
+    $gamingScore = $WinSatStore.winSPR.GamingScore
+    $cpuScore = $WinSatStore.winSPR.CpuScore
+    $memScore = $WinSatStore.winSPR.MemoryScore
+  }
+
+  if ($graphicsScore -eq $null -and $GpuScore -ne $null) {
+    $graphicsScore = [double]$GpuScore
+  }
+  if (-not $rawScores -and $graphicsScore -ne $null) {
+    $rawScores = @{ Graphics = $graphicsScore }
+  }
+  if (-not $hasWinSat -and $graphicsScore -ne $null) { $hasWinSat = $true }
+
+  $maxFeature = $null
+  $maxRank = 0
+  foreach ($f in $featureLevels) {
+    $r = Get-FeatureRank -Feature $f
+    if ($r -gt $maxRank) { $maxRank = $r; $maxFeature = $f }
+  }
+
+  $category = 'unknown'
+  if ($graphicsScore -ne $null) {
+    $g = [double]$graphicsScore
+    if ($maxRank -ge 12.0 -and $g -ge 4.5) {
+      $category = 'igpu_ok'
+    } elseif ($maxRank -ge 11.0 -and $g -ge 3.5) {
+      $category = 'igpu_moyen'
+    } else {
+      $category = 'igpu_bas'
+    }
+  } elseif ($maxRank -ge 11.0) {
+    $category = 'igpu_moyen'
+  } elseif ($maxRank -gt 0) {
+    $category = 'igpu_bas'
+  }
+
+  if ($category -ne 'igpu_ok' -and $cpuScore -and $memScore) {
+    $cpuVal = [double]$cpuScore
+    $memVal = [double]$memScore
+    if ($cpuVal -ge 8.5 -and $memVal -ge 8.5) {
+      if ($category -eq 'igpu_bas') { $category = 'igpu_moyen' }
+      elseif ($category -eq 'igpu_moyen') { $category = 'igpu_ok' }
+    }
+  }
+
+  return [ordered]@{
+    gpu_name = $gpuName
+    feature_levels = $featureLevels
+    max_feature = $maxFeature
+    graphics_score = $graphicsScore
+    gaming_score = $gamingScore
+    cpu_score = $cpuScore
+    memory_score = $memScore
+    has_dxdiag = $dxInfo.hasDxDiag
+    has_winsat = $hasWinSat
+    winsat_parse_ok = $winSatParseOk
+    winsat_raw = $rawScores
+    winsat_log_tail = $winSatLogTail
+    category = $category
+  }
+}
+
 function Get-DefaultGateway {
   $configs = Get-CimInstanceSafe -ClassName 'Win32_NetworkAdapterConfiguration'
   foreach ($cfg in $configs) {
@@ -2834,6 +3346,9 @@ $macAddresses = Get-PreferredMacs -PrimaryMac $macAddress
 $macAddressesLog = if ($macAddresses) { $macAddresses -join ', ' } else { $null }
 if ($macAddressesLog) { Write-Log ("MAC list (primary+secondary): {0}" -f $macAddressesLog) }
 $serialNumber = Get-SerialNumber
+$macSerialKey = Get-MacSerialKey -MacAddress $macAddress -SerialNumber $serialNumber -Hostname $hostname
+$artifactRunDir = New-ArtifactRunDir -ArtifactRoot $artifactRootResolved -MacSerialKey $macSerialKey -ClientRunId $clientRunId
+if ($artifactRunDir) { Write-Log "Artifact run dir: $artifactRunDir" }
 $osVersion = Get-OsVersion
 $ramMb = Get-RamMb
 $slotsInfo = Get-RamSlots
@@ -3079,6 +3594,8 @@ $diag = [ordered]@{
   diagnosticsPerformed = 0
   appVersion = $scriptVersion
 }
+if ($clientRunId) { $diag.clientRunId = $clientRunId }
+if ($macSerialKey) { $diag.macSerialKey = $macSerialKey }
 
 $tests = [ordered]@{}
 if ($diskReadTest) {
@@ -3201,6 +3718,42 @@ if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
   }
 }
 
+$gpuAssessment = $null
+$dxDiagResult = $null
+if (-not $SkipGpuAssessment) {
+  $dxDiagOutputDir = $null
+  if ($artifactRunDir) {
+    $dxDiagOutputDir = Join-Path $artifactRunDir 'DxDiag'
+  } elseif ($env:TEMP) {
+    $dxDiagOutputDir = Join-Path $env:TEMP 'mdt-fusion\\dxdiag'
+  }
+  $dxDiagResult = Invoke-DxDiagCapture -OutputDir $dxDiagOutputDir -TimeoutSec $DxDiagTimeoutSec
+  if ($dxDiagResult -and $dxDiagResult.status -and $dxDiagResult.status -ne 'ok') {
+    Write-Log "DxDiag status=$($dxDiagResult.status)" 'WARN'
+  }
+  $dxDiagPath = if ($dxDiagResult) { $dxDiagResult.txtPath } else { $null }
+  $gpuAssessment = Get-GpuAssessment -DxDiagPath $dxDiagPath -WinSatStore $winsatStore -GpuScore $tests.gpuScore -GpuNameFallback $gpuInfo.name
+  if ($gpuAssessment -and $artifactRunDir) {
+    $gpuAssessmentDir = Join-Path $artifactRunDir 'GpuAssessment'
+    Ensure-Directory -Path $gpuAssessmentDir | Out-Null
+    Write-JsonFile -Path (Join-Path $gpuAssessmentDir 'gpu_assessment.json') -Object $gpuAssessment | Out-Null
+    $summary = @()
+    $summary += "GPU: $($gpuAssessment.gpu_name)"
+    $levels = @($gpuAssessment.feature_levels) | Where-Object { $_ }
+    $summary += "FeatureLevels: " + ($levels -join ", ")
+    $summary += "GraphicsScore: $($gpuAssessment.graphics_score) GamingScore: $($gpuAssessment.gaming_score) CPU: $($gpuAssessment.cpu_score) MEM: $($gpuAssessment.memory_score)"
+    $summary += "has_dxdiag=$($gpuAssessment.has_dxdiag) has_winsat=$($gpuAssessment.has_winsat) winsat_parse_ok=$($gpuAssessment.winsat_parse_ok)"
+    $tail = $gpuAssessment.winsat_log_tail
+    if ($tail) {
+      $summary += "WinSATLogTail: " + ($tail.Substring([Math]::Max(0, $tail.Length - 4000)))
+    } else {
+      $summary += "WinSATLogTail: "
+    }
+    $summary += "Category: $($gpuAssessment.category)"
+    Set-Content -Path (Join-Path $gpuAssessmentDir 'summary.txt') -Value ($summary -join "`n") -Encoding UTF8 -Force
+  }
+}
+
 $diag.diagnosticsPerformed = $tests.Keys.Count
 
 $stopwatch.Stop()
@@ -3268,6 +3821,7 @@ $payload.windows = [ordered]@{
 
 $payload.cpu = $cpuInfo
 $payload.gpu = $gpuInfo
+if ($gpuAssessment) { $payload.gpuAssessment = $gpuAssessment }
 
 $payload.memory = [ordered]@{
   totalGb = if ($ramMb) { [math]::Round($ramMb / 1024, 1) } else { $null }
@@ -3309,6 +3863,62 @@ if ($thermalInfo -and $thermalInfo.status) { $components.thermal = $thermalInfo.
 
 if ($components.Count -gt 0) {
   $payload.components = $components
+}
+
+$keyboardLogPathValue = $null
+if ($keyboardCaptureState -and $keyboardCaptureState.logPath) {
+  $keyboardLogPathValue = $keyboardCaptureState.logPath
+}
+
+if ($artifactRunDir) {
+  $manifest = @{
+    mac_serial_key = $macSerialKey
+    mac_address = $macAddress
+    serial_number = $serialNumber
+    client_run_id = $clientRunId
+    host_name = $hostname
+    script_version = $scriptVersion
+    generated_at = (Get-Date).ToUniversalTime().ToString('o')
+  }
+  $payload.rawArtifacts = [ordered]@{
+    clientRunId = $clientRunId
+    macSerialKey = $macSerialKey
+  }
+  if ($ObjectStorageEndpoint) { $payload.rawArtifacts.endpoint = $ObjectStorageEndpoint }
+  if ($ObjectStorageBucket) { $payload.rawArtifacts.bucket = $ObjectStorageBucket }
+  if ($ObjectStoragePrefix) { $payload.rawArtifacts.prefix = $ObjectStoragePrefix }
+
+  $payloadJson = $payload | ConvertTo-Json -Depth 10
+  Stage-RunArtifacts `
+    -RunDir $artifactRunDir `
+    -LogPath $LogPath `
+    -PayloadJson $payloadJson `
+    -CameraOutputDir $cameraTestOutputDir `
+    -KeyboardLogPath $keyboardLogPathValue `
+    -WinsatStore $winsatStore `
+    -Manifest $manifest | Out-Null
+
+  if (-not $SkipRawUpload) {
+    $rawUploadResult = Upload-RunArtifacts `
+      -RunDir $artifactRunDir `
+      -Endpoint $ObjectStorageEndpoint `
+      -Bucket $ObjectStorageBucket `
+      -AccessKey $ObjectStorageAccessKey `
+      -SecretKey $ObjectStorageSecretKey `
+      -Prefix $ObjectStoragePrefix `
+      -MacSerialKey $macSerialKey `
+      -ClientRunId $clientRunId `
+      -McPath $ObjectStorageMcPath
+    if ($rawUploadResult) {
+      $payload.rawArtifacts.uploaded = $rawUploadResult.success
+      if ($rawUploadResult.destination) { $payload.rawArtifacts.destination = $rawUploadResult.destination }
+      if ($rawUploadResult.error) { $payload.rawArtifacts.error = $rawUploadResult.error }
+    }
+  } else {
+    $payload.rawArtifacts.uploaded = $false
+    $payload.rawArtifacts.error = 'raw_upload_disabled'
+  }
+  Write-JsonFile -Path (Join-Path $artifactRunDir 'payload.json') -Object $payload | Out-Null
 }
 
 $json = $payload | ConvertTo-Json -Depth 10
@@ -3366,6 +3976,29 @@ if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
       Write-Log "Keyboard status updated: $($keyboardResult.status)"
     } catch {
       Write-Log "Keyboard status update failed: $($_.Exception.Message)" 'WARN'
+    }
+  }
+}
+
+if ($artifactRunDir) {
+  $kbLogPath = $keyboardLogPathValue
+  if (-not $kbLogPath -and $keyboardCaptureState -and $keyboardCaptureState.logPath) {
+    $kbLogPath = $keyboardCaptureState.logPath
+  }
+  Stage-RunArtifacts -RunDir $artifactRunDir -LogPath $LogPath -KeyboardLogPath $kbLogPath | Out-Null
+  if (-not $SkipRawUpload) {
+    $postUpload = Upload-RunArtifacts `
+      -RunDir $artifactRunDir `
+      -Endpoint $ObjectStorageEndpoint `
+      -Bucket $ObjectStorageBucket `
+      -AccessKey $ObjectStorageAccessKey `
+      -SecretKey $ObjectStorageSecretKey `
+      -Prefix $ObjectStoragePrefix `
+      -MacSerialKey $macSerialKey `
+      -ClientRunId $clientRunId `
+      -McPath $ObjectStorageMcPath
+    if ($postUpload -and -not $postUpload.success) {
+      Write-Log "Raw artifact mirror after keyboard failed: $($postUpload.error)" 'WARN'
     }
   }
 }
