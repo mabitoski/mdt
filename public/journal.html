@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Journal d'audit</title>
+    <meta
+      name="description"
+      content="Journal des modifications : voir les derniers changements et filtrer par machine, action ou acteur."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css?v=20250107a" />
+  </head>
+  <body>
+    <div class="aura" aria-hidden="true"></div>
+    <main class="app">
+      <header class="admin-hero">
+        <div class="admin-hero-copy">
+          <p class="hero-kicker">MDT Journal</p>
+          <h1>Journal d'audit</h1>
+          <p class="hero-sub">
+            Suivi des derniers changements en base : machines, sources d'action et champs modifies.
+          </p>
+        </div>
+        <div class="admin-hero-actions">
+          <a class="admin-secondary" href="/">Retour au tableau</a>
+          <a class="admin-secondary" href="/admin">Config LDAP</a>
+          <a class="logout-btn" href="/logout">Deconnexion</a>
+        </div>
+      </header>
+
+      <section class="controls log-controls">
+        <div class="search-wrap">
+          <input
+            id="log-search"
+            type="search"
+            placeholder="Rechercher une machine, un acteur, un chemin"
+            autocomplete="off"
+          />
+        </div>
+        <div class="log-filters">
+          <label class="sort-wrap" for="log-table">
+            <span>Table</span>
+            <select id="log-table">
+              <option value="">Toutes</option>
+              <option value="machines">machines</option>
+              <option value="ldap_settings">ldap_settings</option>
+            </select>
+          </label>
+          <label class="sort-wrap" for="log-action">
+            <span>Action</span>
+            <select id="log-action">
+              <option value="">Toutes</option>
+              <option value="INSERT">INSERT</option>
+              <option value="UPDATE">UPDATE</option>
+              <option value="DELETE">DELETE</option>
+            </select>
+          </label>
+          <label class="sort-wrap" for="log-limit">
+            <span>Limite</span>
+            <select id="log-limit">
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+            </select>
+          </label>
+        </div>
+        <div class="controls-meta">
+          <button id="refresh-btn" type="button">Rafraichir</button>
+          <span id="last-updated">Derniere mise a jour : --</span>
+        </div>
+      </section>
+
+      <section class="board">
+        <div class="list" id="log-list" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <script src="/journal.js" defer></script>
+  </body>
+</html>

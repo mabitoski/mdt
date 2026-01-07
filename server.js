@@ -44,6 +44,8 @@ const PGSSL =
   PGSSLMODE === 'verify-ca';
 const PGSSL_REJECT_UNAUTHORIZED = process.env.PGSSL_REJECT_UNAUTHORIZED !== '0';
 const AUDIT_LOG_ENABLED = process.env.AUDIT_LOG_ENABLED !== '0';
+const AUDIT_LOG_LIMIT_DEFAULT = Number.parseInt(process.env.AUDIT_LOG_LIMIT || '100', 10);
+const AUDIT_LOG_LIMIT_MAX = Number.parseInt(process.env.AUDIT_LOG_LIMIT_MAX || '500', 10);
 
 if (!Number.isFinite(PORT)) {
   throw new Error('PORT must be a number');
@@ -1150,6 +1152,20 @@ function safeJsonStringify(value, maxBytes) {
   return JSON.stringify({ truncated: true });
 }
 
+function sanitizeAuditData(data, includePayload) {
+  if (!data || typeof data !== 'object') {
+    return data;
+  }
+  if (includePayload) {
+    return data;
+  }
+  const sanitized = { ...data };
+  if (Object.prototype.hasOwnProperty.call(sanitized, 'payload')) {
+    sanitized.payload = '[skipped]';
+  }
+  return sanitized;
+}
+
 function limitString(value, maxLength) {
   if (typeof value !== 'string') {
     return null;
@@ -1684,6 +1700,18 @@ app.get('/admin.html', requireAuth, requireAdminPage, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'admin.html'));
 });
 
+app.get('/journal', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'journal.html'));
+});
+
+app.get('/journal.html', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'journal.html'));
+});
+
+app.get('/logs', requireAuth, (req, res) => {
+  res.redirect('/journal');
+});
+
 app.get('/login', (req, res) => {
   if (req.session && req.session.user) {
     return res.redirect('/');
@@ -1790,6 +1818,202 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/me', requireAuth, (req, res) => {
   res.json({ ok: true, user: req.session.user });
+});
+
+app.get('/api/logs', requireAuth, async (req, res) => {
+  if (!AUDIT_LOG_ENABLED) {
+    return res.json({ ok: true, logs: [], enabled: false });
+  }
+
+  const tableFilter = cleanString(req.query?.table, 64);
+  const actionRaw = cleanString(req.query?.action, 16);
+  const actionFilter = actionRaw ? actionRaw.toUpperCase() : null;
+  const machineKeyFilter = cleanString(req.query?.machineKey, 128);
+  const actorFilter = cleanString(req.query?.actor, 128);
+  const requestFilter = cleanString(req.query?.requestId, 128);
+  const hostnameFilter = cleanString(req.query?.hostname, 128);
+  const searchRaw = cleanString(req.query?.q, 256);
+  const sinceRaw = cleanString(req.query?.since, 64);
+  const limitRaw = Number.parseInt(req.query?.limit, 10);
+
+  const limitDefault = Number.isFinite(AUDIT_LOG_LIMIT_DEFAULT)
+    ? AUDIT_LOG_LIMIT_DEFAULT
+    : 100;
+  const limitMax = Number.isFinite(AUDIT_LOG_LIMIT_MAX) ? AUDIT_LOG_LIMIT_MAX : 500;
+  let limit = Number.isFinite(limitRaw) ? limitRaw : limitDefault;
+  if (limit < 1) {
+    limit = limitDefault;
+  }
+  if (limitMax > 0) {
+    limit = Math.min(limit, limitMax);
+  }
+
+  const allowedTables = new Set(['machines', 'ldap_settings']);
+  const allowedActions = new Set(['INSERT', 'UPDATE', 'DELETE']);
+
+  const filters = [];
+  const values = [];
+
+  if (tableFilter && allowedTables.has(tableFilter)) {
+    values.push(tableFilter);
+    filters.push(`audit_log.table_name = $${values.length}`);
+  }
+  if (actionFilter && allowedActions.has(actionFilter)) {
+    values.push(actionFilter);
+    filters.push(`audit_log.action = $${values.length}`);
+  }
+  if (machineKeyFilter) {
+    values.push(machineKeyFilter);
+    filters.push(`audit_log.machine_key = $${values.length}`);
+  }
+  if (hostnameFilter) {
+    values.push(`%${hostnameFilter}%`);
+    filters.push(`machines.hostname ILIKE $${values.length}`);
+  }
+  if (actorFilter) {
+    values.push(`%${actorFilter}%`);
+    filters.push(`audit_log.actor ILIKE $${values.length}`);
+  }
+  if (requestFilter) {
+    values.push(`%${requestFilter}%`);
+    filters.push(`audit_log.request_id ILIKE $${values.length}`);
+  }
+  if (sinceRaw) {
+    const sinceDate = new Date(sinceRaw);
+    if (!Number.isNaN(sinceDate.getTime())) {
+      values.push(sinceDate.toISOString());
+      filters.push(`audit_log.occurred_at >= $${values.length}`);
+    }
+  }
+  if (searchRaw) {
+    const idx = values.push(`%${searchRaw}%`);
+    filters.push(
+      `(audit_log.machine_key ILIKE $${idx} OR audit_log.actor ILIKE $${idx} ` +
+        `OR audit_log.request_id ILIKE $${idx} OR audit_log.source ILIKE $${idx} ` +
+        `OR machines.hostname ILIKE $${idx})`
+    );
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  values.push(limit);
+  const limitParam = `$${values.length}`;
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          audit_log.id,
+          audit_log.occurred_at,
+          audit_log.table_name,
+          audit_log.action,
+          audit_log.row_id,
+          audit_log.machine_key,
+          machines.hostname,
+          audit_log.actor,
+          audit_log.actor_type,
+          audit_log.actor_ip,
+          audit_log.request_id,
+          audit_log.source,
+          audit_log.changed_fields
+        FROM audit_log
+        LEFT JOIN machines ON machines.machine_key = audit_log.machine_key
+        ${whereClause}
+        ORDER BY audit_log.occurred_at DESC
+        LIMIT ${limitParam}
+      `,
+      values
+    );
+
+    const logs = result.rows.map((row) => ({
+      id: row.id,
+      occurredAt: row.occurred_at,
+      table: row.table_name,
+      action: row.action,
+      rowId: row.row_id,
+      machineKey: row.machine_key,
+      hostname: row.hostname,
+      actor: row.actor,
+      actorType: row.actor_type,
+      actorIp: row.actor_ip,
+      requestId: row.request_id,
+      source: row.source,
+      changedFields: row.changed_fields || []
+    }));
+
+    return res.json({ ok: true, logs });
+  } catch (error) {
+    console.error('Failed to fetch audit logs', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.get('/api/logs/:id', requireAuth, async (req, res) => {
+  if (!AUDIT_LOG_ENABLED) {
+    return res.status(404).json({ ok: false, error: 'not_found' });
+  }
+
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const includePayload = req.query?.includePayload === '1';
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          audit_log.id,
+          audit_log.occurred_at,
+          audit_log.table_name,
+          audit_log.action,
+          audit_log.row_id,
+          audit_log.machine_key,
+          machines.hostname,
+          audit_log.actor,
+          audit_log.actor_type,
+          audit_log.actor_ip,
+          audit_log.request_id,
+          audit_log.source,
+          audit_log.changed_fields,
+          audit_log.old_data,
+          audit_log.new_data
+        FROM audit_log
+        LEFT JOIN machines ON machines.machine_key = audit_log.machine_key
+        WHERE audit_log.id = $1
+        LIMIT 1
+      `,
+      [id]
+    );
+
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!row) {
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    const log = {
+      id: row.id,
+      occurredAt: row.occurred_at,
+      table: row.table_name,
+      action: row.action,
+      rowId: row.row_id,
+      machineKey: row.machine_key,
+      hostname: row.hostname,
+      actor: row.actor,
+      actorType: row.actor_type,
+      actorIp: row.actor_ip,
+      requestId: row.request_id,
+      source: row.source,
+      changedFields: row.changed_fields || [],
+      oldData: sanitizeAuditData(row.old_data, includePayload),
+      newData: sanitizeAuditData(row.new_data, includePayload)
+    };
+
+    return res.json({ ok: true, log });
+  } catch (error) {
+    console.error('Failed to fetch audit log detail', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
 });
 
 app.get('/api/admin/ldap', requireAuth, requireAdmin, async (req, res) => {
