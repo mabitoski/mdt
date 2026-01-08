@@ -1022,12 +1022,12 @@ function renderList() {
                 <span>Tech: ${technician}</span>
               </div>
               ${summaryHtml}
-              <button class="card-toggle" type="button">${toggleLabel}</button>
             </div>
             <div class="card-right">
               ${commentHtml}
             </div>
           </div>
+          <button class="card-toggle" type="button">${toggleLabel}</button>
           ${detailHtml}
         </article>
       `;

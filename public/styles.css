@@ -1027,7 +1027,7 @@ body {
 }
 
 .card-toggle {
-  align-self: flex-start;
+  align-self: stretch;
   background: rgba(255, 255, 255, 0.8);
   border: 1px solid rgba(60, 64, 60, 0.2);
   color: var(--ink);
@@ -1038,6 +1038,10 @@ body {
   padding: 6px 12px;
   border-radius: 999px;
   cursor: pointer;
+  width: 100%;
+  display: inline-flex;
+  justify-content: center;
+  margin-top: 6px;
 }
 
 .machine-card[aria-expanded="true"] .card-toggle {
