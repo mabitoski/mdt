@@ -4,6 +4,8 @@ const state = {
   techFilter: 'all',
   componentFilter: 'all',
   commentFilter: 'all',
+  quickFilter: null,
+  activeToken: null,
   search: '',
   sort: 'lastSeen',
   layout: '3',
@@ -566,6 +568,28 @@ function renderStatusValue(value) {
   return `<strong>${escapeHtml(value)}</strong>`;
 }
 
+function buildMetaChip(label, displayValue, filterValue, type, activeToken, machineId) {
+  const display = `${label}: ${displayValue || '--'}`;
+  if (!filterValue) {
+    return `<span>${escapeHtml(display)}</span>`;
+  }
+  const isActive =
+    activeToken &&
+    activeToken.id === machineId &&
+    activeToken.type === type &&
+    activeToken.value === filterValue;
+  return `
+    <button
+      class="meta-chip${isActive ? ' is-active' : ''}"
+      type="button"
+      data-filter="${escapeHtml(type)}"
+      data-value="${escapeHtml(filterValue)}"
+    >
+      ${escapeHtml(display)}
+    </button>
+  `;
+}
+
 function getPadStatus(detail) {
   if (!detail || typeof detail !== 'object') {
     return null;
@@ -788,6 +812,31 @@ function applyFilters() {
     if (state.filter !== 'all' && category !== state.filter) {
       return false;
     }
+    if (state.quickFilter && state.quickFilter.value) {
+      const filterValue = state.quickFilter.value.toLowerCase();
+      if (state.quickFilter.type === 'serial') {
+        const serial = (machine.serialNumber || '').toLowerCase();
+        if (!serial.includes(filterValue)) {
+          return false;
+        }
+      } else if (state.quickFilter.type === 'mac') {
+        const macs = [
+          machine.macAddress,
+          Array.isArray(machine.macAddresses) ? machine.macAddresses.join(' ') : null
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        if (!macs.includes(filterValue)) {
+          return false;
+        }
+      } else if (state.quickFilter.type === 'tech') {
+        const tech = (machine.technician || '').toLowerCase();
+        if (!tech.includes(filterValue)) {
+          return false;
+        }
+      }
+    }
     if (state.techFilter !== 'all') {
       if (techKey(machine.technician) !== state.techFilter) {
         return false;
@@ -961,9 +1010,10 @@ function renderList() {
       const label = categoryLabels[category];
       const title = escapeHtml(formatPrimary(machine));
       const subtitle = escapeHtml(formatSubtitle(machine));
-      const serial = escapeHtml(machine.serialNumber || '--');
-      const mac = escapeHtml(formatMacSummary(machine));
-      const technician = escapeHtml(machine.technician || '--');
+      const serialValue = machine.serialNumber || '';
+      const macLabel = formatMacSummary(machine);
+      const macValue = machine.macAddress || (Array.isArray(machine.macAddresses) ? machine.macAddresses[0] : '') || '';
+      const technicianValue = machine.technician || '';
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
       const hasComment = Boolean(commentValue);
@@ -1017,9 +1067,9 @@ function renderList() {
               <h3 class="machine-title">${title}</h3>
               <p class="machine-sub">${subtitle}</p>
               <div class="machine-meta">
-                <span>SN: ${serial}</span>
-                <span>MAC: ${mac}</span>
-                <span>Tech: ${technician}</span>
+                ${buildMetaChip('SN', serialValue, serialValue, 'serial', state.activeToken, machine.id)}
+                ${buildMetaChip('MAC', macLabel || '', macValue, 'mac', state.activeToken, machine.id)}
+                ${buildMetaChip('Tech', technicianValue, technicianValue, 'tech', state.activeToken, machine.id)}
               </div>
               ${summaryHtml}
             </div>
@@ -1866,6 +1916,32 @@ sortSelect.addEventListener('change', (event) => {
 });
 
 listEl.addEventListener('click', (event) => {
+  const metaBtn = event.target.closest('.meta-chip');
+  if (metaBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const type = metaBtn.dataset.filter;
+    const value = metaBtn.dataset.value;
+    const card = metaBtn.closest('.machine-card');
+    const id = card ? card.dataset.id : null;
+    if (!type || !value || !id) {
+      return;
+    }
+    const isSame =
+      state.activeToken &&
+      state.activeToken.id === id &&
+      state.activeToken.type === type &&
+      state.activeToken.value === value;
+    if (isSame) {
+      state.quickFilter = null;
+      state.activeToken = null;
+    } else {
+      state.quickFilter = { type, value };
+      state.activeToken = { id, type, value };
+    }
+    renderList();
+    return;
+  }
   const padBtn = event.target.closest('[data-action="set-pad"]');
   if (padBtn) {
     event.preventDefault();

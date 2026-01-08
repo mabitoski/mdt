@@ -1013,10 +1013,24 @@ body {
   overflow: hidden;
 }
 
-.machine-meta span {
+.machine-meta span,
+.machine-meta .meta-chip {
   padding: 4px 8px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.6);
+}
+
+.machine-meta .meta-chip {
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+}
+
+.machine-meta .meta-chip.is-active {
+  background: rgba(242, 139, 45, 0.2);
+  box-shadow: 0 0 0 2px rgba(242, 139, 45, 0.35);
+  color: var(--ink);
 }
 
 .machine-summary {
