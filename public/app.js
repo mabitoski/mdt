@@ -732,11 +732,30 @@ function togglePayloadView(id, button) {
   }
 }
 
+function getUniqueMachines(list) {
+  const seen = new Set();
+  const unique = [];
+  list.forEach((machine) => {
+    const key = machine.machineKey || machine.serialNumber || machine.macAddress || machine.hostname;
+    if (!key) {
+      return;
+    }
+    const normalized = String(key);
+    if (seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    unique.push(machine);
+  });
+  return unique;
+}
+
 function updateStats() {
-  const total = state.machines.length;
-  const laptop = state.machines.filter((m) => normalizeCategory(m.category) === 'laptop').length;
-  const desktop = state.machines.filter((m) => normalizeCategory(m.category) === 'desktop').length;
-  const unknown = state.machines.filter((m) => normalizeCategory(m.category) === 'unknown').length;
+  const uniqueMachines = getUniqueMachines(state.machines);
+  const total = uniqueMachines.length;
+  const laptop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'laptop').length;
+  const desktop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'desktop').length;
+  const unknown = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'unknown').length;
 
   statTotal.textContent = total;
   statLaptop.textContent = laptop;
@@ -781,6 +800,7 @@ function applyFilters() {
       machine.serialNumber,
       machine.macAddress,
       Array.isArray(machine.macAddresses) ? machine.macAddresses.join(' ') : null,
+      machine.machineKey,
       machine.technician,
       machine.vendor,
       machine.model,

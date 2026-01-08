@@ -571,6 +571,7 @@ const upsertReportQuery = `
 const listReportsQuery = `
   SELECT
     id,
+    machine_key,
     hostname,
     mac_address,
     mac_addresses,
@@ -2617,6 +2618,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
 
       return {
         id: row.id,
+        machineKey: row.machine_key,
         hostname: row.hostname,
         macAddress: row.mac_address,
         macAddresses: normalizeMacList(row.mac_addresses),
