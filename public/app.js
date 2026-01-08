@@ -461,6 +461,17 @@ function formatScore(value) {
   return `Score ${rounded}`;
 }
 
+function formatWinSatNote(score) {
+  if (typeof score !== 'number' || !Number.isFinite(score)) {
+    return null;
+  }
+  if (score < 3.0) return 'Horrible';
+  if (score < 4.5) return 'Mauvais';
+  if (score < 6.0) return 'Moyen';
+  if (score < 7.5) return 'Bon';
+  return 'Excellent';
+}
+
 function renderStatus(status) {
   const normalized = normalizeStatusKey(status) || 'unknown';
   const label = statusLabels[normalized] || '--';
@@ -638,6 +649,21 @@ function buildDiagnosticsHtml(detail) {
     payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
       ? payload.tests
       : null;
+  const winSat =
+    payload && payload.winsat && typeof payload.winsat === 'object' ? payload.winsat : null;
+  const winSpr =
+    winSat && winSat.winSPR && typeof winSat.winSPR === 'object' ? winSat.winSPR : null;
+  const winSatCpuScore =
+    winSpr && typeof winSpr.CpuScore === 'number' ? winSpr.CpuScore : null;
+  const winSatMemScore =
+    winSpr && typeof winSpr.MemoryScore === 'number' ? winSpr.MemoryScore : null;
+  const winSatGraphicsScore = winSpr
+    ? typeof winSpr.GamingScore === 'number'
+      ? winSpr.GamingScore
+      : typeof winSpr.GraphicsScore === 'number'
+        ? winSpr.GraphicsScore
+        : null
+    : null;
   const thermal =
     payload && payload.thermal && typeof payload.thermal === 'object' && !Array.isArray(payload.thermal)
       ? payload.thermal
@@ -659,6 +685,10 @@ function buildDiagnosticsHtml(detail) {
   }
 
   if (tests) {
+    const ramNote = tests.ramNote || formatWinSatNote(winSatMemScore);
+    const cpuNote = tests.cpuNote || formatWinSatNote(winSatCpuScore);
+    const gpuNote =
+      tests.gpuNote || formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : tests.gpuScore);
     if (tests.diskRead || tests.diskReadMBps != null) {
       addRow('Lecture disque', tests.diskRead, formatMbps(tests.diskReadMBps));
     }
@@ -666,13 +696,13 @@ function buildDiagnosticsHtml(detail) {
       addRow('Ecriture disque', tests.diskWrite, formatMbps(tests.diskWriteMBps));
     }
     if (tests.ramTest || tests.ramMBps != null) {
-      addRow('RAM (WinSAT)', tests.ramTest, formatMbps(tests.ramMBps));
+      addRow('RAM (WinSAT)', tests.ramTest, ramNote || formatMbps(tests.ramMBps));
     }
     if (tests.cpuTest || tests.cpuMBps != null) {
-      addRow('CPU (WinSAT)', tests.cpuTest, formatMbps(tests.cpuMBps));
+      addRow('CPU (WinSAT)', tests.cpuTest, cpuNote || formatMbps(tests.cpuMBps));
     }
     if (tests.gpuTest || tests.gpuScore != null) {
-      addRow('GPU (WinSAT)', tests.gpuTest, formatScore(tests.gpuScore));
+      addRow('GPU (WinSAT)', tests.gpuTest, gpuNote || formatScore(tests.gpuScore));
     }
     if (tests.cpuStress) {
       addRow('CPU (stress)', tests.cpuStress, null);

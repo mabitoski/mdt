@@ -1465,12 +1465,37 @@ function formatScore(value) {
   return `Score ${rounded}`;
 }
 
+function formatWinSatNote(score) {
+  if (typeof score !== 'number' || !Number.isFinite(score)) {
+    return null;
+  }
+  if (score < 3.0) return 'Horrible';
+  if (score < 4.5) return 'Mauvais';
+  if (score < 6.0) return 'Moyen';
+  if (score < 7.5) return 'Bon';
+  return 'Excellent';
+}
+
 function buildDiagnosticsRows(payload) {
   const rows = [];
   const tests =
     payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
       ? payload.tests
       : null;
+  const winSat =
+    payload && payload.winsat && typeof payload.winsat === 'object' ? payload.winsat : null;
+  const winSpr =
+    winSat && winSat.winSPR && typeof winSat.winSPR === 'object' ? winSat.winSPR : null;
+  const winSatCpuScore = winSpr && typeof winSpr.CpuScore === 'number' ? winSpr.CpuScore : null;
+  const winSatMemScore =
+    winSpr && typeof winSpr.MemoryScore === 'number' ? winSpr.MemoryScore : null;
+  const winSatGraphicsScore = winSpr
+    ? typeof winSpr.GamingScore === 'number'
+      ? winSpr.GamingScore
+      : typeof winSpr.GraphicsScore === 'number'
+        ? winSpr.GraphicsScore
+        : null
+    : null;
   if (!tests) {
     return rows;
   }
@@ -1484,9 +1509,14 @@ function buildDiagnosticsRows(payload) {
 
   addRow('Lecture disque', tests.diskRead, formatMbps(tests.diskReadMBps));
   addRow('Ecriture disque', tests.diskWrite, formatMbps(tests.diskWriteMBps));
-  addRow('RAM (WinSAT)', tests.ramTest, formatMbps(tests.ramMBps));
-  addRow('CPU (WinSAT)', tests.cpuTest, formatMbps(tests.cpuMBps));
-  addRow('GPU (WinSAT)', tests.gpuTest, formatScore(tests.gpuScore));
+  const ramNote = tests.ramNote || formatWinSatNote(winSatMemScore);
+  const cpuNote = tests.cpuNote || formatWinSatNote(winSatCpuScore);
+  const gpuNote =
+    tests.gpuNote ||
+    formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : tests.gpuScore);
+  addRow('RAM (WinSAT)', tests.ramTest, ramNote || formatMbps(tests.ramMBps));
+  addRow('CPU (WinSAT)', tests.cpuTest, cpuNote || formatMbps(tests.cpuMBps));
+  addRow('GPU (WinSAT)', tests.gpuTest, gpuNote || formatScore(tests.gpuScore));
   addRow('CPU (stress)', tests.cpuStress, null);
   addRow('GPU (stress)', tests.gpuStress, null);
   addRow('Ping', tests.networkPing, tests.networkPingTarget || null);

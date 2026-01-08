@@ -859,6 +859,18 @@ function Write-JsonFile {
   }
 }
 
+function Invoke-JsonPost {
+  param(
+    [string]$Url,
+    [string]$Json,
+    [int]$TimeoutSec
+  )
+
+  if (-not $Url -or -not $Json) { return $null }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($Json)
+  return Invoke-RestMethod -Uri $Url -Method Post -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec $TimeoutSec
+}
+
 function Resolve-McPath {
   param([string]$Value)
 
@@ -2684,6 +2696,19 @@ function Invoke-WinsatScore {
   return @{ status = $status; score = $score }
 }
 
+function Get-WinSatNote {
+  param([double]$Score)
+
+  if ($Score -eq $null) { return $null }
+  if ([double]::IsNaN($Score) -or [double]::IsInfinity($Score)) { return $null }
+
+  if ($Score -lt 3.0) { return 'Horrible' }
+  if ($Score -lt 4.5) { return 'Mauvais' }
+  if ($Score -lt 6.0) { return 'Moyen' }
+  if ($Score -lt 7.5) { return 'Bon' }
+  return 'Excellent'
+}
+
 function Get-FeatureRank {
   param([string]$Feature)
 
@@ -3637,6 +3662,10 @@ if (-not $winsatStore -and -not $SkipWinSatDataStore -and $winsatRoots.Count -gt
   if ($winsatStore) { Write-Log 'WinSAT datastore refreshed after tests.' 'INFO' }
 }
 
+$winsatCpuScore = $null
+$winsatMemScore = $null
+$winsatGraphicsScore = $null
+
 if ($winsatStore) {
   if ($winsatStore.files -and $winsatStore.files.Keys.Count -gt 0) {
     $fileList = ($winsatStore.files.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', '
@@ -3646,13 +3675,12 @@ if ($winsatStore) {
   }
   $cpuMax = $null
   if ($winsatStore.cpu -and $winsatStore.cpu.maxMBps -ne $null) { $cpuMax = $winsatStore.cpu.maxMBps }
-  $cpuScore = $null
-  if ($winsatStore.winSPR -and $winsatStore.winSPR.CpuScore -ne $null) { $cpuScore = $winsatStore.winSPR.CpuScore }
+  if ($winsatStore.winSPR -and $winsatStore.winSPR.CpuScore -ne $null) { $winsatCpuScore = $winsatStore.winSPR.CpuScore }
   $cpuStatus = $winsatStore.cpuStatus
-  Write-Log ("WinSAT CPU summary: maxMBps={0} cpuScore={1} cpuStatus={2}" -f $cpuMax, $cpuScore, $cpuStatus)
+  Write-Log ("WinSAT CPU summary: maxMBps={0} cpuScore={1} cpuStatus={2}" -f $cpuMax, $winsatCpuScore, $cpuStatus)
   $cpuOk = $false
   if ($cpuMax -ne $null) { $cpuOk = $true }
-  elseif ($cpuScore -ne $null) { $cpuOk = $true }
+  elseif ($winsatCpuScore -ne $null) { $cpuOk = $true }
   elseif ($cpuStatus -eq 'ok') { $cpuOk = $true }
   if ($cpuOk) {
     if (-not $tests.cpuTest -or $tests.cpuTest -ne 'ok') { $tests.cpuTest = 'ok' }
@@ -3661,6 +3689,7 @@ if ($winsatStore) {
 
   $memBandwidth = $null
   if ($winsatStore.memory -and $winsatStore.memory.bandwidthMBps -ne $null) { $memBandwidth = $winsatStore.memory.bandwidthMBps }
+  if ($winsatStore.winSPR -and $winsatStore.winSPR.MemoryScore -ne $null) { $winsatMemScore = $winsatStore.winSPR.MemoryScore }
   if ($memBandwidth -ne $null) {
     if (-not $tests.ramTest -or $tests.ramTest -ne 'ok') { $tests.ramTest = 'ok' }
     if ($tests.ramMBps -eq $null) { $tests.ramMBps = [math]::Round($memBandwidth, 1) }
@@ -3679,14 +3708,13 @@ if ($winsatStore) {
   }
 
   if (-not $winsatStore.hasNoD3DTest) {
-    $graphicsScore = $null
-    if ($winsatStore.winSPR -and $winsatStore.winSPR.GamingScore -ne $null) { $graphicsScore = $winsatStore.winSPR.GamingScore }
-    if ($graphicsScore -eq $null -and $winsatStore.winSPR -and $winsatStore.winSPR.GraphicsScore -ne $null) {
-      $graphicsScore = $winsatStore.winSPR.GraphicsScore
+    if ($winsatStore.winSPR -and $winsatStore.winSPR.GamingScore -ne $null) { $winsatGraphicsScore = $winsatStore.winSPR.GamingScore }
+    if ($winsatGraphicsScore -eq $null -and $winsatStore.winSPR -and $winsatStore.winSPR.GraphicsScore -ne $null) {
+      $winsatGraphicsScore = $winsatStore.winSPR.GraphicsScore
     }
-    if ($graphicsScore -ne $null) {
+    if ($winsatGraphicsScore -ne $null) {
       if (-not $tests.gpuTest -or $tests.gpuTest -ne 'ok') { $tests.gpuTest = 'ok' }
-      if ($tests.gpuScore -eq $null) { $tests.gpuScore = $graphicsScore }
+      if ($tests.gpuScore -eq $null) { $tests.gpuScore = $winsatGraphicsScore }
     }
   }
 } else {
@@ -3716,6 +3744,17 @@ if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
       if ($tests.cpuMBps -eq $null -and $cpuFallback.maxMBps -ne $null) { $tests.cpuMBps = $cpuFallback.maxMBps }
     }
   }
+}
+
+if (-not $tests.cpuNote -and $winsatCpuScore -ne $null) {
+  $tests.cpuNote = Get-WinSatNote -Score $winsatCpuScore
+}
+if (-not $tests.ramNote -and $winsatMemScore -ne $null) {
+  $tests.ramNote = Get-WinSatNote -Score $winsatMemScore
+}
+if (-not $tests.gpuNote) {
+  $gpuNoteScore = if ($winsatGraphicsScore -ne $null) { $winsatGraphicsScore } else { $tests.gpuScore }
+  if ($gpuNoteScore -ne $null) { $tests.gpuNote = Get-WinSatNote -Score $gpuNoteScore }
 }
 
 $gpuAssessment = $null
@@ -3929,7 +3968,7 @@ Write-Log "Payload size=$($json.Length)"
 $ingestOk = $false
 Step-Progress -Status 'Envoi API'
 try {
-  $response = Invoke-RestMethod -Uri $ApiUrl -Method Post -ContentType 'application/json' -Body $json -TimeoutSec $TimeoutSec
+  $response = Invoke-JsonPost -Url $ApiUrl -Json $json -TimeoutSec $TimeoutSec
   Write-Log 'Ingest OK'
   $ingestOk = $true
   Write-Output $response
@@ -3972,7 +4011,7 @@ if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
     }
     $kbJson = $kbPayload | ConvertTo-Json -Depth 4
     try {
-      Invoke-RestMethod -Uri $ApiUrl -Method Post -ContentType 'application/json' -Body $kbJson -TimeoutSec $TimeoutSec | Out-Null
+      Invoke-JsonPost -Url $ApiUrl -Json $kbJson -TimeoutSec $TimeoutSec | Out-Null
       Write-Log "Keyboard status updated: $($keyboardResult.status)"
     } catch {
       Write-Log "Keyboard status update failed: $($_.Exception.Message)" 'WARN'
