@@ -6,6 +6,7 @@ const state = {
   commentFilter: 'all',
   quickFilter: null,
   activeToken: null,
+  quickCommentId: null,
   search: '',
   sort: 'lastSeen',
   layout: '3',
@@ -774,6 +775,20 @@ function scheduleCommentSave(id, value, immediate = false) {
   commentTimers.set(id, timeoutId);
 }
 
+function focusInlineComment(id) {
+  if (!id) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    const input = listEl.querySelector(`.comment-inline[data-comment-id="${id}"]`);
+    if (input) {
+      input.focus();
+      input.selectionStart = input.value.length;
+      input.selectionEnd = input.value.length;
+    }
+  });
+}
+
 function getUniqueMachines(list) {
   const seen = new Set();
   const unique = [];
@@ -1012,20 +1027,35 @@ function renderList() {
       const subtitle = escapeHtml(formatSubtitle(machine));
       const serialValue = machine.serialNumber || '';
       const macLabel = formatMacSummary(machine);
-      const macValue = machine.macAddress || (Array.isArray(machine.macAddresses) ? machine.macAddresses[0] : '') || '';
+      const macValue =
+        machine.macAddress ||
+        (Array.isArray(machine.macAddresses) ? machine.macAddresses[0] : '') ||
+        '';
       const technicianValue = machine.technician || '';
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
-      const hasComment = Boolean(commentValue);
-      const commentHtml = hasComment
-        ? `
-          <div class="card-comment" title="${escapeHtml(commentValue)}">
+      const commentDisplay = commentValue || 'Ajouter un commentaire';
+      const isEditingComment = state.quickCommentId === machine.id;
+      const commentHtml = `
+        <div
+          class="card-comment${commentValue ? '' : ' is-empty'}${isEditingComment ? ' is-editing' : ''}"
+          data-comment-card="${machine.id}"
+          title="${escapeHtml(commentValue)}"
+        >
+          <div class="comment-view">
             <span class="comment-label">Commentaire</span>
-            <span class="comment-text">${escapeHtml(commentValue)}</span>
+            <span class="comment-text">${escapeHtml(commentDisplay)}</span>
           </div>
-        `
-        : '';
-      const cardMainClass = hasComment ? 'card-main' : 'card-main no-comment';
+          <div class="comment-edit">
+            <textarea
+              class="comment-inline"
+              data-comment-id="${machine.id}"
+              maxlength="800"
+              placeholder="Ajouter un commentaire"
+            >${escapeHtml(commentValue)}</textarea>
+          </div>
+        </div>
+      `;
       const expanded = state.expandedId === machine.id;
       const selected = expanded ? 'selected' : '';
       const delayClass = delayClasses[index % delayClasses.length];
@@ -1062,7 +1092,7 @@ function renderList() {
               <span class="machine-meta"><span>${lastSeen}</span></span>
             </div>
           </div>
-          <div class="${cardMainClass}">
+          <div class="card-main">
             <div class="card-left">
               <h3 class="machine-title">${title}</h3>
               <p class="machine-sub">${subtitle}</p>
@@ -1916,6 +1946,25 @@ sortSelect.addEventListener('change', (event) => {
 });
 
 listEl.addEventListener('click', (event) => {
+  const commentInput = event.target.closest('.comment-inline');
+  if (commentInput) {
+    return;
+  }
+  const commentCard = event.target.closest('[data-comment-card]');
+  if (commentCard) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = commentCard.dataset.commentCard;
+    if (!id) {
+      return;
+    }
+    if (state.quickCommentId !== id) {
+      state.quickCommentId = id;
+      renderList();
+      focusInlineComment(id);
+    }
+    return;
+  }
   const metaBtn = event.target.closest('.meta-chip');
   if (metaBtn) {
     event.preventDefault();
@@ -2005,7 +2054,7 @@ listEl.addEventListener('click', (event) => {
 });
 
 listEl.addEventListener('input', (event) => {
-  const input = event.target.closest('.comment-input');
+  const input = event.target.closest('.comment-input, .comment-inline');
   if (!input) {
     return;
   }
@@ -2019,7 +2068,7 @@ listEl.addEventListener('input', (event) => {
 listEl.addEventListener(
   'blur',
   (event) => {
-    const input = event.target.closest('.comment-input');
+    const input = event.target.closest('.comment-input, .comment-inline');
     if (!input) {
       return;
     }
@@ -2028,6 +2077,10 @@ listEl.addEventListener(
       return;
     }
     scheduleCommentSave(id, input.value, true);
+    if (input.classList.contains('comment-inline')) {
+      state.quickCommentId = null;
+      renderList();
+    }
   },
   true
 );
