@@ -16,12 +16,30 @@ param(
 )
 
 $scriptVersion = '1.0.0'
+$startTime = Get-Date
+$logPath = $null
 
 function Ensure-Directory {
   param([string]$Path)
   if (-not $Path) { return }
   if (-not (Test-Path -Path $Path)) {
     New-Item -Path $Path -ItemType Directory -Force | Out-Null
+  }
+}
+
+function Write-Log {
+  param(
+    [string]$Message,
+    [string]$Level = 'INFO'
+  )
+
+  $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+  $line = "[$timestamp][$Level] $Message"
+  Write-Host $line
+  if ($logPath) {
+    try {
+      Add-Content -Path $logPath -Value $line
+    } catch { }
   }
 }
 
@@ -112,10 +130,15 @@ if (-not $OutputDir) {
   $OutputDir = Join-Path $root "mdt-offline-$timestamp"
 }
 Ensure-Directory -Path $OutputDir
+$logPath = Join-Path $OutputDir 'offline.log'
+Write-Log "Offline capture started (version=$scriptVersion)."
+Write-Log "OutputDir=$OutputDir"
 
 $runId = [guid]::NewGuid().ToString()
 $hostname = $env:COMPUTERNAME
+Write-Log "RunId=$runId Host=$hostname"
 
+Write-Log 'Collecting hardware inventory...'
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
 $cs = Get-CimInstance -ClassName Win32_ComputerSystem
 $bios = Get-CimInstance -ClassName Win32_BIOS
@@ -129,6 +152,7 @@ $volumes = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3"
 $netAdapters = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter "MACAddress IS NOT NULL"
 $gpus = Get-CimInstance -ClassName Win32_VideoController
 $battery = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
+Write-Log 'Inventory OK.'
 
 $serialNumber = $bios.SerialNumber
 if (-not $serialNumber) { $serialNumber = $enclosure.SerialNumber }
@@ -221,6 +245,7 @@ Write-JsonFile -Path (Join-Path $OutputDir 'summary.json') -Object $summary
 
 $rawDir = Join-Path $OutputDir 'raw'
 Ensure-Directory -Path $rawDir
+Write-Log 'Writing raw inventory...'
 Write-JsonFile -Path (Join-Path $rawDir 'inventory.json') -Object @{
   os = $os
   computerSystem = $cs
@@ -236,15 +261,27 @@ Write-JsonFile -Path (Join-Path $rawDir 'inventory.json') -Object @{
   gpus = $gpus
   battery = $battery
 } -Depth 20
+Write-Log 'Raw inventory saved.'
 
 if (-not $SkipMsinfo) {
   $msinfoDir = Join-Path $OutputDir 'msinfo'
   Ensure-Directory -Path $msinfoDir
   $msinfoPath = Join-Path $msinfoDir 'msinfo.txt'
+  Write-Log 'Running msinfo32...'
   try {
-    Start-Process -FilePath 'msinfo32.exe' -ArgumentList "/report `"$msinfoPath`"" -Wait -NoNewWindow | Out-Null
+    $proc = Start-Process -FilePath 'msinfo32.exe' -ArgumentList "/report `"$msinfoPath`"" -PassThru
+    if ($MsinfoTimeoutSec -gt 0) {
+      if (-not $proc.WaitForExit($MsinfoTimeoutSec * 1000)) {
+        $proc.Kill() | Out-Null
+        Write-Log "msinfo32 timeout after ${MsinfoTimeoutSec}s" 'WARN'
+      }
+    } else {
+      $proc.WaitForExit() | Out-Null
+    }
+    Write-Log 'msinfo32 done.'
   } catch {
     Write-Warning "msinfo32 failed: $($_.Exception.Message)"
+    Write-Log "msinfo32 failed: $($_.Exception.Message)" 'WARN'
   }
 }
 
@@ -252,10 +289,21 @@ if (-not $SkipDxDiag) {
   $dxDiagDir = Join-Path $OutputDir 'dxdiag'
   Ensure-Directory -Path $dxDiagDir
   $dxDiagPath = Join-Path $dxDiagDir 'dxdiag.txt'
+  Write-Log 'Running dxdiag...'
   try {
-    Start-Process -FilePath 'dxdiag.exe' -ArgumentList "/t `"$dxDiagPath`"" -Wait -NoNewWindow | Out-Null
+    $proc = Start-Process -FilePath 'dxdiag.exe' -ArgumentList "/t `"$dxDiagPath`"" -PassThru
+    if ($DxDiagTimeoutSec -gt 0) {
+      if (-not $proc.WaitForExit($DxDiagTimeoutSec * 1000)) {
+        $proc.Kill() | Out-Null
+        Write-Log "dxdiag timeout after ${DxDiagTimeoutSec}s" 'WARN'
+      }
+    } else {
+      $proc.WaitForExit() | Out-Null
+    }
+    Write-Log 'dxdiag done.'
   } catch {
     Write-Warning "dxdiag failed: $($_.Exception.Message)"
+    Write-Log "dxdiag failed: $($_.Exception.Message)" 'WARN'
   }
 }
 
@@ -263,10 +311,13 @@ if (-not $SkipBatteryReport) {
   $batteryDir = Join-Path $OutputDir 'battery'
   Ensure-Directory -Path $batteryDir
   $batteryPath = Join-Path $batteryDir 'battery-report.html'
+  Write-Log 'Running battery report...'
   try {
     & powercfg /batteryreport /output $batteryPath | Out-Null
+    Write-Log 'Battery report done.'
   } catch {
     Write-Warning "battery report failed: $($_.Exception.Message)"
+    Write-Log "battery report failed: $($_.Exception.Message)" 'WARN'
   }
 }
 
@@ -275,6 +326,7 @@ if (-not $SkipWinSat) {
   Ensure-Directory -Path $winSatDir
   $winSatXml = Join-Path $winSatDir 'winsat.xml'
   $winSatLog = Join-Path $winSatDir 'winsat.log'
+  Write-Log 'Running winsat formal...'
   try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'winsat'
@@ -287,17 +339,21 @@ if (-not $SkipWinSat) {
       if (-not $proc.WaitForExit($WinSatTimeoutSec * 1000)) {
         $proc.Kill()
         Set-Content -Path $winSatLog -Value 'winsat timeout' -Encoding UTF8
+        Write-Log "winsat timeout after ${WinSatTimeoutSec}s" 'WARN'
       } else {
         $output = $proc.StandardOutput.ReadToEnd() + "`n" + $proc.StandardError.ReadToEnd()
         Set-Content -Path $winSatLog -Value $output -Encoding UTF8
+        Write-Log 'winsat done.'
       }
     }
   } catch {
     Write-Warning "winsat failed: $($_.Exception.Message)"
+    Write-Log "winsat failed: $($_.Exception.Message)" 'WARN'
   }
   $winsatSummary = Parse-WinSatXml -Path $winSatXml
   if ($winsatSummary) {
     Write-JsonFile -Path (Join-Path $winSatDir 'winsat.json') -Object $winsatSummary
+    Write-Log 'winsat summary saved.'
   }
 }
 
@@ -305,17 +361,23 @@ if ($CameraTestPath -and (Test-Path -Path $CameraTestPath)) {
   $cameraDir = Join-Path $OutputDir 'camera'
   Ensure-Directory -Path $cameraDir
   $cameraLog = Join-Path $cameraDir 'camera.log'
+  Write-Log 'Running camera test...'
   try {
     $proc = Start-Process -FilePath $CameraTestPath -ArgumentList $CameraTestArguments -PassThru
     if (-not $proc.WaitForExit($CameraTestTimeoutSec * 1000)) {
       $proc.Kill() | Out-Null
       Set-Content -Path $cameraLog -Value 'camera timeout'
+      Write-Log "camera timeout after ${CameraTestTimeoutSec}s" 'WARN'
     } else {
       Set-Content -Path $cameraLog -Value ("exit_code=" + $proc.ExitCode)
+      Write-Log "camera done (exit_code=$($proc.ExitCode))."
     }
   } catch {
     Write-Warning "camera test failed: $($_.Exception.Message)"
+    Write-Log "camera test failed: $($_.Exception.Message)" 'WARN'
   }
 }
 
+$duration = [int]((Get-Date) - $startTime).TotalSeconds
+Write-Log "Offline capture completed in ${duration}s."
 Write-Output "Offline bundle created: $OutputDir"
