@@ -2926,8 +2926,8 @@ app.put('/api/machines/:id/comment', requireAuth, async (req, res) => {
     const result = await client.query(
       `
         UPDATE reports
-        SET comment = $1,
-            commented_at = CASE WHEN $1 IS NULL THEN NULL ELSE NOW() END
+        SET comment = NULLIF($1::text, ''),
+            commented_at = CASE WHEN NULLIF($1::text, '') IS NULL THEN NULL ELSE NOW() END
         WHERE id = $2
         RETURNING comment, commented_at
       `,

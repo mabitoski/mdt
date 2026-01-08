@@ -27,6 +27,7 @@ const layoutButtons = document.querySelectorAll('.layout-btn');
 const testFilterButtons = document.querySelectorAll('.test-filter-btn');
 const commentFilterButtons = document.querySelectorAll('.comment-filter-btn');
 const adminLink = document.getElementById('admin-link');
+const commentTimers = new Map();
 
 const categoryLabels = {
   laptop: 'Portable',
@@ -666,7 +667,9 @@ function applyCommentUpdate(id, comment, commentedAt) {
 }
 
 function setCommentButtonsLoading(id, loading) {
-  const buttons = listEl.querySelectorAll(`[data-action="save-comment"][data-id="${id}"],[data-action="clear-comment"][data-id="${id}"]`);
+  const buttons = listEl.querySelectorAll(
+    `[data-action="clear-comment"][data-id="${id}"]`
+  );
   buttons.forEach((button) => {
     button.disabled = loading;
     button.classList.toggle('is-loading', loading);
@@ -701,35 +704,50 @@ async function updateComment(id, comment) {
   }
 }
 
-function togglePayloadView(id, button) {
-  if (!button) {
+function normalizeComment(value) {
+  if (value == null) {
+    return '';
+  }
+  return String(value).trim();
+}
+
+function getCommentFromState(id) {
+  if (state.details[id] && typeof state.details[id].comment === 'string') {
+    return state.details[id].comment;
+  }
+  const match = state.machines.find((machine) => machine.id === id);
+  return match && typeof match.comment === 'string' ? match.comment : '';
+}
+
+function scheduleCommentSave(id, value, immediate = false) {
+  const normalized = normalizeComment(value);
+  const current = normalizeComment(getCommentFromState(id));
+  if (normalized === current) {
+    const existing = commentTimers.get(id);
+    if (existing) {
+      clearTimeout(existing);
+      commentTimers.delete(id);
+    }
     return;
   }
-  const detail = state.details[id];
-  if (!detail || !detail.payload) {
+  if (immediate) {
+    const existing = commentTimers.get(id);
+    if (existing) {
+      clearTimeout(existing);
+      commentTimers.delete(id);
+    }
+    updateComment(id, normalized);
     return;
   }
-  const container = button.closest('.payload');
-  if (!container) {
-    return;
+  const existing = commentTimers.get(id);
+  if (existing) {
+    clearTimeout(existing);
   }
-  const content = container.querySelector('.payload-content');
-  if (!content) {
-    return;
-  }
-  const isHidden = content.hasAttribute('hidden');
-  if (isHidden && !content.dataset.loaded) {
-    const json = JSON.stringify(detail.payload, null, 2);
-    content.innerHTML = `<pre>${escapeHtml(json)}</pre>`;
-    content.dataset.loaded = 'true';
-  }
-  if (isHidden) {
-    content.removeAttribute('hidden');
-    button.textContent = 'Masquer payload';
-  } else {
-    content.setAttribute('hidden', 'true');
-    button.textContent = 'Afficher payload';
-  }
+  const timeoutId = setTimeout(() => {
+    commentTimers.delete(id);
+    updateComment(id, normalized);
+  }, 800);
+  commentTimers.set(id, timeoutId);
 }
 
 function getUniqueMachines(list) {
@@ -1055,9 +1073,6 @@ function buildDetailHtml(detail) {
           commentValue
         )}</textarea>
         <div class="comment-actions">
-          <button class="detail-action" type="button" data-action="save-comment" data-id="${detailId}">
-            Enregistrer
-          </button>
           <button class="detail-action" type="button" data-action="clear-comment" data-id="${detailId}">
             Effacer
           </button>
@@ -1170,15 +1185,6 @@ function buildDetailHtml(detail) {
     </div>
   `;
 
-  const payloadHtml = detail.payload
-    ? `
-      <button class="detail-action" type="button" data-action="toggle-payload" data-id="${detailId}">
-        Afficher payload
-      </button>
-      <div class="payload-content" hidden></div>
-    `
-    : '<div class="empty">Payload non disponible.</div>';
-
   const diagnosticsHtml = buildDiagnosticsHtml(detail);
 
   return `
@@ -1225,12 +1231,6 @@ function buildDetailHtml(detail) {
     <div class="components">
       <h3>Etat des composants</h3>
       <div class="component-list">${componentHtml}</div>
-    </div>
-    <div class="payload">
-      <details>
-        <summary>Payload complet</summary>
-        ${payloadHtml}
-      </details>
     </div>
   `;
 }
@@ -1863,19 +1863,6 @@ listEl.addEventListener('click', (event) => {
     updatePadStatus(id, status);
     return;
   }
-  const saveCommentBtn = event.target.closest('[data-action="save-comment"]');
-  if (saveCommentBtn) {
-    event.preventDefault();
-    event.stopPropagation();
-    const id = saveCommentBtn.dataset.id;
-    if (!id) {
-      return;
-    }
-    const input = listEl.querySelector(`.comment-input[data-comment-id="${id}"]`);
-    const value = input ? input.value : '';
-    updateComment(id, value);
-    return;
-  }
   const clearCommentBtn = event.target.closest('[data-action="clear-comment"]');
   if (clearCommentBtn) {
     event.preventDefault();
@@ -1889,17 +1876,6 @@ listEl.addEventListener('click', (event) => {
       input.value = '';
     }
     updateComment(id, '');
-    return;
-  }
-  const payloadBtn = event.target.closest('[data-action="toggle-payload"]');
-  if (payloadBtn) {
-    event.preventDefault();
-    event.stopPropagation();
-    const id = payloadBtn.dataset.id;
-    if (!id) {
-      return;
-    }
-    togglePayloadView(id, payloadBtn);
     return;
   }
   const exportBtn = event.target.closest('[data-action="export-pdf"]');
@@ -1936,6 +1912,34 @@ listEl.addEventListener('click', (event) => {
   state.expandedId = id;
   ensureMachineDetail(id);
 });
+
+listEl.addEventListener('input', (event) => {
+  const input = event.target.closest('.comment-input');
+  if (!input) {
+    return;
+  }
+  const id = input.dataset.commentId;
+  if (!id) {
+    return;
+  }
+  scheduleCommentSave(id, input.value);
+});
+
+listEl.addEventListener(
+  'blur',
+  (event) => {
+    const input = event.target.closest('.comment-input');
+    if (!input) {
+      return;
+    }
+    const id = input.dataset.commentId;
+    if (!id) {
+      return;
+    }
+    scheduleCommentSave(id, input.value, true);
+  },
+  true
+);
 
 initAdminLink();
 loadMachines();
