@@ -81,9 +81,10 @@ body {
 }
 
 .app {
-  max-width: 1200px;
+  width: 100%;
+  max-width: 100%;
   margin: 0 auto;
-  padding: 48px 24px 72px;
+  padding: 48px clamp(24px, 4vw, 72px) 72px;
 }
 
 .hero {
