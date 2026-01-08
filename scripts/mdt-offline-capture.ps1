@@ -28,10 +28,21 @@ function Ensure-Directory {
 function Write-JsonFile {
   param(
     [string]$Path,
-    [object]$Object
+    [object]$Object,
+    [int]$Depth = 10
   )
-  $json = $Object | ConvertTo-Json -Depth 10
+  $json = $Object | ConvertTo-Json -Depth $Depth
   Set-Content -Path $Path -Value $json -Encoding UTF8
+}
+
+function Convert-DmtfDateSafe {
+  param([string]$Value)
+  if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+  try {
+    return ([Management.ManagementDateTimeConverter]::ToDateTime($Value)).ToString('o')
+  } catch {
+    return $null
+  }
 }
 
 function Get-PrimaryMac {
@@ -130,10 +141,7 @@ $ramSlotsFree = if ($ramSlotsTotal -ne $null) { $ramSlotsTotal - @($memoryModule
 $hasBattery = $battery -ne $null
 $categoryValue = Get-CategoryFromChassis -ChassisTypes $enclosure.ChassisTypes -HasBattery:$hasBattery
 
-$installDate = $null
-if ($os.InstallDate) {
-  try { $installDate = ([Management.ManagementDateTimeConverter]::ToDateTime($os.InstallDate)).ToString('o') } catch { }
-}
+$installDate = Convert-DmtfDateSafe -Value $os.InstallDate
 
 $summary = [ordered]@{
   reportId = $runId
@@ -180,7 +188,7 @@ $summary = [ordered]@{
   bios = @{
     vendor = $bios.Manufacturer
     version = $bios.SMBIOSBIOSVersion
-    releaseDate = if ($bios.ReleaseDate) { ([Management.ManagementDateTimeConverter]::ToDateTime($bios.ReleaseDate)).ToString('o') } else { $null }
+    releaseDate = Convert-DmtfDateSafe -Value $bios.ReleaseDate
   }
   baseboard = @{
     product = $baseboard.Product
@@ -227,7 +235,7 @@ Write-JsonFile -Path (Join-Path $rawDir 'inventory.json') -Object @{
   network = $netAdapters
   gpus = $gpus
   battery = $battery
-}
+} -Depth 20
 
 if (-not $SkipMsinfo) {
   $msinfoDir = Join-Path $OutputDir 'msinfo'
