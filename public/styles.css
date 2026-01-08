@@ -183,7 +183,9 @@ body {
   border-radius: 999px;
 }
 
-.filter-btn {
+.filter-btn,
+.layout-btn,
+.test-filter-btn {
   border: none;
   background: transparent;
   padding: 9px 16px;
@@ -195,10 +197,51 @@ body {
   white-space: nowrap;
 }
 
-.filter-btn.active {
+.filter-btn.active,
+.layout-btn.active,
+.test-filter-btn.active {
   background: var(--ink);
   color: #fff;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.controls-secondary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 18px;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.layout-group,
+.test-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.test-filter-group {
+  flex: 1 1 320px;
+}
+
+.controls-label {
+  text-transform: uppercase;
+  letter-spacing: 0.24em;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.pill-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--stroke);
+  background: var(--card);
+  flex-wrap: wrap;
 }
 
 .search-wrap input {
@@ -766,6 +809,23 @@ body {
   gap: 16px;
   align-content: start;
   align-items: start;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.list.columns-1 {
+  grid-template-columns: 1fr;
+}
+
+.list.columns-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.list.columns-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.list.columns-6 {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .machine-card {
@@ -1243,9 +1303,21 @@ body {
   }
 }
 
+@media (max-width: 1400px) {
+  .list.columns-6 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 980px) {
   .controls {
     grid-template-columns: 1fr;
+  }
+
+  .list.columns-2,
+  .list.columns-3,
+  .list.columns-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .board {
@@ -1264,6 +1336,12 @@ body {
 @media (max-width: 640px) {
   .app {
     padding: 32px 18px 56px;
+  }
+
+  .list.columns-2,
+  .list.columns-3,
+  .list.columns-6 {
+    grid-template-columns: 1fr;
   }
 
   .hero-stats {

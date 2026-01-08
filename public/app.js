@@ -1,8 +1,10 @@
 const state = {
   machines: [],
   filter: 'all',
+  componentFilter: 'all',
   search: '',
   sort: 'lastSeen',
+  layout: '3',
   expandedId: null,
   details: {},
   lastUpdated: null
@@ -18,6 +20,8 @@ const statLaptop = document.getElementById('stat-laptop');
 const statDesktop = document.getElementById('stat-desktop');
 const statUnknown = document.getElementById('stat-unknown');
 const filterButtons = document.querySelectorAll('.filter-btn');
+const layoutButtons = document.querySelectorAll('.layout-btn');
+const testFilterButtons = document.querySelectorAll('.test-filter-btn');
 const adminLink = document.getElementById('admin-link');
 
 const categoryLabels = {
@@ -87,6 +91,43 @@ const delayClasses = [
   'delay-8',
   'delay-9'
 ];
+
+const layoutOptions = new Set(['1', '2', '3', '6']);
+const layoutStorageKey = 'mdt-layout';
+const storedLayout = window.localStorage ? localStorage.getItem(layoutStorageKey) : null;
+if (storedLayout && layoutOptions.has(storedLayout)) {
+  state.layout = storedLayout;
+}
+
+function applyLayout() {
+  if (!listEl) {
+    return;
+  }
+  listEl.classList.remove('columns-1', 'columns-2', 'columns-3', 'columns-6');
+  listEl.classList.add(`columns-${state.layout}`);
+}
+
+function updateLayoutButtons() {
+  if (!layoutButtons.length) {
+    return;
+  }
+  layoutButtons.forEach((btn) => {
+    const active = btn.dataset.layout === state.layout;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function updateTestFilterButtons() {
+  if (!testFilterButtons.length) {
+    return;
+  }
+  testFilterButtons.forEach((btn) => {
+    const active = btn.dataset.component === state.componentFilter;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
 
 function escapeHtml(value) {
   if (value == null) {
@@ -534,6 +575,16 @@ function applyFilters() {
     const category = normalizeCategory(machine.category);
     if (state.filter !== 'all' && category !== state.filter) {
       return false;
+    }
+    if (state.componentFilter !== 'all') {
+      const components =
+        machine.components && typeof machine.components === 'object' && !Array.isArray(machine.components)
+          ? machine.components
+          : null;
+      const componentStatus = components ? normalizeStatusKey(components[state.componentFilter]) : null;
+      if (componentStatus !== 'nok') {
+        return false;
+      }
     }
     if (!term) {
       return true;
@@ -1463,6 +1514,38 @@ filterButtons.forEach((button) => {
     renderList();
   });
 });
+
+layoutButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const layout = button.dataset.layout;
+    if (!layout || !layoutOptions.has(layout)) {
+      return;
+    }
+    state.layout = layout;
+    if (window.localStorage) {
+      localStorage.setItem(layoutStorageKey, layout);
+    }
+    updateLayoutButtons();
+    applyLayout();
+  });
+});
+
+testFilterButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    testFilterButtons.forEach((btn) => {
+      btn.classList.remove('active');
+      btn.setAttribute('aria-pressed', 'false');
+    });
+    button.classList.add('active');
+    button.setAttribute('aria-pressed', 'true');
+    state.componentFilter = button.dataset.component || 'all';
+    renderList();
+  });
+});
+
+updateLayoutButtons();
+updateTestFilterButtons();
+applyLayout();
 
 searchInput.addEventListener('input', (event) => {
   state.search = event.target.value;
