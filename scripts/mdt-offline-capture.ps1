@@ -326,6 +326,16 @@ if (-not $SkipWinSat) {
   Ensure-Directory -Path $winSatDir
   $winSatXml = Join-Path $winSatDir 'winsat.xml'
   $winSatLog = Join-Path $winSatDir 'winsat.log'
+  $winSatSystemLog = $null
+  if ($env:SystemRoot) {
+    $candidate = Join-Path $env:SystemRoot 'Performance\WinSAT\winsat.log'
+    if (Test-Path -Path $candidate) {
+      $winSatSystemLog = $candidate
+    } else {
+      $candidate = Join-Path $env:SystemRoot 'Performance\WinSAT\WinSAT.log'
+      if (Test-Path -Path $candidate) { $winSatSystemLog = $candidate }
+    }
+  }
   Write-Log 'Running winsat formal...'
   try {
     $winSatExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\winsat.exe' } else { $null }
@@ -345,6 +355,8 @@ if (-not $SkipWinSat) {
       Write-Log "winsat pid=$($proc.Id)"
       $startAt = Get-Date
       $nextUpdate = $startAt.AddSeconds(30)
+      $lastCpu = $proc.TotalProcessorTime.TotalSeconds
+      $lastLogWrite = if ($winSatSystemLog) { (Get-Item $winSatSystemLog).LastWriteTimeUtc } else { $null }
       $timeoutSec = if ($WinSatTimeoutSec -gt 0) { $WinSatTimeoutSec } else { 0 }
       while (-not $proc.HasExited) {
         Start-Sleep -Seconds 2
@@ -357,7 +369,18 @@ if (-not $SkipWinSat) {
         }
         if ((Get-Date) -ge $nextUpdate) {
           $xmlPresent = Test-Path -Path $winSatXml
-          Write-Log "winsat still running (${elapsed}s, xml_present=$xmlPresent)"
+          $proc.Refresh()
+          $cpuNow = $proc.TotalProcessorTime.TotalSeconds
+          $cpuDelta = [math]::Round(($cpuNow - $lastCpu), 2)
+          $lastCpu = $cpuNow
+          $wsMb = [math]::Round(($proc.WorkingSet64 / 1MB), 1)
+          $logTouched = $false
+          if ($winSatSystemLog) {
+            $currentLogWrite = (Get-Item $winSatSystemLog).LastWriteTimeUtc
+            if ($lastLogWrite -and $currentLogWrite -gt $lastLogWrite) { $logTouched = $true }
+            $lastLogWrite = $currentLogWrite
+          }
+          Write-Log ("winsat still running ({0}s, xml_present={1}, cpu_delta={2}s, ws={3}MB, log_touched={4})" -f $elapsed, $xmlPresent, $cpuDelta, $wsMb, $logTouched)
           $nextUpdate = (Get-Date).AddSeconds(30)
         }
       }
