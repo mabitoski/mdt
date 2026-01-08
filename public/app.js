@@ -966,7 +966,8 @@ function renderList() {
       const technician = escapeHtml(machine.technician || '--');
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
-      const commentHtml = commentValue
+      const hasComment = Boolean(commentValue);
+      const commentHtml = hasComment
         ? `
           <div class="card-comment" title="${escapeHtml(commentValue)}">
             <span class="comment-label">Commentaire</span>
@@ -974,6 +975,7 @@ function renderList() {
           </div>
         `
         : '';
+      const cardMainClass = hasComment ? 'card-main' : 'card-main no-comment';
       const expanded = state.expandedId === machine.id;
       const selected = expanded ? 'selected' : '';
       const delayClass = delayClasses[index % delayClasses.length];
@@ -1008,18 +1010,24 @@ function renderList() {
             <span class="badge" data-category="${category}">${label}</span>
             <div class="card-top-right">
               <span class="machine-meta"><span>${lastSeen}</span></span>
+            </div>
+          </div>
+          <div class="${cardMainClass}">
+            <div class="card-left">
+              <h3 class="machine-title">${title}</h3>
+              <p class="machine-sub">${subtitle}</p>
+              <div class="machine-meta">
+                <span>SN: ${serial}</span>
+                <span>MAC: ${mac}</span>
+                <span>Tech: ${technician}</span>
+              </div>
+              ${summaryHtml}
+              <button class="card-toggle" type="button">${toggleLabel}</button>
+            </div>
+            <div class="card-right">
               ${commentHtml}
             </div>
           </div>
-          <h3 class="machine-title">${title}</h3>
-          <p class="machine-sub">${subtitle}</p>
-          <div class="machine-meta">
-            <span>SN: ${serial}</span>
-            <span>MAC: ${mac}</span>
-            <span>Tech: ${technician}</span>
-          </div>
-          ${summaryHtml}
-          <button class="card-toggle" type="button">${toggleLabel}</button>
           ${detailHtml}
         </article>
       `;

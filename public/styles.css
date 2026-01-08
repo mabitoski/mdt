@@ -897,29 +897,47 @@ body {
 
 .card-top-right {
   display: flex;
-  flex-direction: row;
   align-items: center;
-  gap: 10px;
-  flex: 0 1 55%;
   justify-content: flex-end;
-  max-width: 55%;
+  gap: 10px;
 }
 
 .card-top-right .machine-meta {
   justify-content: flex-end;
 }
 
-.card-comment {
-  display: inline-flex;
+.card-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 38%);
+  gap: 16px;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: 999px;
+}
+
+.card-main.no-comment {
+  grid-template-columns: 1fr;
+}
+
+.card-left {
+  display: grid;
+  gap: 10px;
+}
+
+.card-right {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-height: 100%;
+}
+
+.card-comment {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 16px;
   background: rgba(60, 64, 60, 0.08);
   color: var(--muted);
-  font-size: 0.75rem;
-  max-width: clamp(160px, 32vw, 380px);
-  min-width: 0;
+  font-size: 0.8rem;
+  width: min(100%, 420px);
 }
 
 .card-comment .comment-label {
@@ -931,11 +949,12 @@ body {
 }
 
 .card-comment .comment-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.78rem;
-  line-height: 1rem;
+  font-size: 0.85rem;
+  line-height: 1.25rem;
   color: var(--ink);
 }
 
@@ -1452,17 +1471,12 @@ body {
     grid-template-columns: 1fr;
   }
 
-  .card-top {
-    flex-direction: column;
-    align-items: flex-start;
+  .card-main {
+    grid-template-columns: 1fr;
   }
 
-  .card-top-right {
-    align-items: flex-start;
+  .card-right {
     justify-content: flex-start;
-    max-width: 100%;
-    width: 100%;
-    flex: 0 0 auto;
   }
 }
 
