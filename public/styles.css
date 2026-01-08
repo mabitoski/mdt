@@ -890,7 +890,7 @@ body {
 
 .card-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
 }
@@ -899,8 +899,9 @@ body {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 6px;
-  max-width: 45%;
+  gap: 10px;
+  flex: 0 0 min(44%, 420px);
+  max-width: 44%;
 }
 
 .card-top-right .machine-meta {
@@ -908,15 +909,16 @@ body {
 }
 
 .card-comment {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: 999px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 16px;
   background: rgba(60, 64, 60, 0.08);
   color: var(--muted);
   font-size: 0.75rem;
-  max-width: 100%;
+  width: 100%;
 }
 
 .card-comment .comment-label {
@@ -928,10 +930,13 @@ body {
 }
 
 .card-comment .comment-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: clamp(140px, 22vw, 240px);
+  font-size: 0.82rem;
+  line-height: 1.2rem;
+  color: var(--ink);
 }
 
 .badge {
@@ -1445,6 +1450,18 @@ body {
 
   .admin-grid {
     grid-template-columns: 1fr;
+  }
+
+  .card-top {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .card-top-right {
+    align-items: flex-start;
+    max-width: 100%;
+    width: 100%;
+    flex: 0 0 auto;
   }
 }
 
