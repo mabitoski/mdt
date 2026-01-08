@@ -328,19 +328,40 @@ if (-not $SkipWinSat) {
   $winSatLog = Join-Path $winSatDir 'winsat.log'
   Write-Log 'Running winsat formal...'
   try {
+    $winSatExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\winsat.exe' } else { $null }
+    if ($winSatExe -and -not (Test-Path -Path $winSatExe)) {
+      $winSatExe = $null
+    }
+    $exeToRun = if ($winSatExe) { $winSatExe } else { 'winsat' }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'winsat'
+    $psi.FileName = $exeToRun
     $psi.Arguments = "formal -xml `"$winSatXml`""
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($proc) {
-      if (-not $proc.WaitForExit($WinSatTimeoutSec * 1000)) {
-        $proc.Kill()
-        Set-Content -Path $winSatLog -Value 'winsat timeout' -Encoding UTF8
-        Write-Log "winsat timeout after ${WinSatTimeoutSec}s" 'WARN'
-      } else {
+      Set-Content -Path $winSatLog -Value "winsat started (pid=$($proc.Id))" -Encoding UTF8
+      Write-Log "winsat pid=$($proc.Id)"
+      $startAt = Get-Date
+      $nextUpdate = $startAt.AddSeconds(30)
+      $timeoutSec = if ($WinSatTimeoutSec -gt 0) { $WinSatTimeoutSec } else { 0 }
+      while (-not $proc.HasExited) {
+        Start-Sleep -Seconds 2
+        $elapsed = [int]((Get-Date) - $startAt).TotalSeconds
+        if ($timeoutSec -gt 0 -and $elapsed -ge $timeoutSec) {
+          $proc.Kill()
+          Set-Content -Path $winSatLog -Value 'winsat timeout' -Encoding UTF8
+          Write-Log "winsat timeout after ${WinSatTimeoutSec}s" 'WARN'
+          break
+        }
+        if ((Get-Date) -ge $nextUpdate) {
+          $xmlPresent = Test-Path -Path $winSatXml
+          Write-Log "winsat still running (${elapsed}s, xml_present=$xmlPresent)"
+          $nextUpdate = (Get-Date).AddSeconds(30)
+        }
+      }
+      if ($proc.HasExited) {
         $output = $proc.StandardOutput.ReadToEnd() + "`n" + $proc.StandardError.ReadToEnd()
         Set-Content -Path $winSatLog -Value $output -Encoding UTF8
         Write-Log 'winsat done.'
