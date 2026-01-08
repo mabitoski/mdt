@@ -60,6 +60,26 @@ body {
     radial-gradient(circle at 10% 70%, rgba(35, 90, 209, 0.2), transparent 40%);
 }
 
+.env-dev .app::before {
+  content: "DEV";
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 10;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: linear-gradient(120deg, var(--accent), var(--accent-strong));
+  color: #fff;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  box-shadow: 0 12px 24px rgba(35, 90, 209, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+
 .app {
   max-width: 1200px;
   margin: 0 auto;
