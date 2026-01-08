@@ -890,18 +890,19 @@ body {
 
 .card-top {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
 .card-top-right {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  flex-direction: row;
+  align-items: center;
   gap: 10px;
-  flex: 0 0 min(44%, 420px);
-  max-width: 44%;
+  flex: 0 1 55%;
+  justify-content: flex-end;
+  max-width: 55%;
 }
 
 .card-top-right .machine-meta {
@@ -909,16 +910,16 @@ body {
 }
 
 .card-comment {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 10px 12px;
-  border-radius: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
   background: rgba(60, 64, 60, 0.08);
   color: var(--muted);
   font-size: 0.75rem;
-  width: 100%;
+  max-width: clamp(160px, 32vw, 380px);
+  min-width: 0;
 }
 
 .card-comment .comment-label {
@@ -930,12 +931,11 @@ body {
 }
 
 .card-comment .comment-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: 0.82rem;
-  line-height: 1.2rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  line-height: 1rem;
   color: var(--ink);
 }
 
@@ -1459,6 +1459,7 @@ body {
 
   .card-top-right {
     align-items: flex-start;
+    justify-content: flex-start;
     max-width: 100%;
     width: 100%;
     flex: 0 0 auto;
