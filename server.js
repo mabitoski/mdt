@@ -71,6 +71,14 @@ function generateRequestId() {
   return crypto.randomBytes(16).toString('hex');
 }
 
+function generateUuid() {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const hex = crypto.randomBytes(16).toString('hex');
+  return normalizeUuid(hex);
+}
+
 async function waitForDatabase() {
   const maxAttempts = Number.parseInt(process.env.DB_CONNECT_RETRIES || '20', 10);
   const delayMs = Number.parseInt(process.env.DB_CONNECT_DELAY_MS || '2000', 10);
@@ -123,6 +131,38 @@ async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS reports (
+      id UUID PRIMARY KEY,
+      machine_key TEXT NOT NULL,
+      hostname TEXT,
+      mac_address TEXT,
+      mac_addresses TEXT,
+      serial_number TEXT,
+      category TEXT NOT NULL DEFAULT 'unknown',
+      model TEXT,
+      vendor TEXT,
+      technician TEXT,
+      os_version TEXT,
+      ram_mb INTEGER,
+      ram_slots_total INTEGER,
+      ram_slots_free INTEGER,
+      battery_health INTEGER,
+      camera_status TEXT,
+      usb_status TEXT,
+      keyboard_status TEXT,
+      pad_status TEXT,
+      badge_reader_status TEXT,
+      last_seen TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      components TEXT,
+      payload TEXT,
+      comment TEXT,
+      commented_at TIMESTAMPTZ,
+      last_ip TEXT
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS ldap_settings (
       id SMALLINT PRIMARY KEY,
       enabled BOOLEAN NOT NULL DEFAULT false,
@@ -160,6 +200,39 @@ async function initDb() {
     await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS ${name} ${type}`);
   }
 
+  const reportColumns = [
+    ['machine_key', 'TEXT NOT NULL'],
+    ['hostname', 'TEXT'],
+    ['mac_address', 'TEXT'],
+    ['mac_addresses', 'TEXT'],
+    ['serial_number', 'TEXT'],
+    ['category', "TEXT NOT NULL DEFAULT 'unknown'"],
+    ['model', 'TEXT'],
+    ['vendor', 'TEXT'],
+    ['technician', 'TEXT'],
+    ['os_version', 'TEXT'],
+    ['ram_mb', 'INTEGER'],
+    ['ram_slots_total', 'INTEGER'],
+    ['ram_slots_free', 'INTEGER'],
+    ['battery_health', 'INTEGER'],
+    ['camera_status', 'TEXT'],
+    ['usb_status', 'TEXT'],
+    ['keyboard_status', 'TEXT'],
+    ['pad_status', 'TEXT'],
+    ['badge_reader_status', 'TEXT'],
+    ['last_seen', 'TIMESTAMPTZ NOT NULL'],
+    ['created_at', 'TIMESTAMPTZ NOT NULL'],
+    ['components', 'TEXT'],
+    ['payload', 'TEXT'],
+    ['comment', 'TEXT'],
+    ['commented_at', 'TIMESTAMPTZ'],
+    ['last_ip', 'TEXT']
+  ];
+
+  for (const [name, type] of reportColumns) {
+    await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS ${name} ${type}`);
+  }
+
   const ldapColumns = [
     ['enabled', 'BOOLEAN NOT NULL DEFAULT false'],
     ['url', 'TEXT'],
@@ -179,6 +252,10 @@ async function initDb() {
   await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_machine_key ON machines(machine_key)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_category ON machines(category)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_machine_key ON reports(machine_key)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_category ON reports(category)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_last_seen ON reports(last_seen)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_technician ON reports(technician)');
 
   if (AUDIT_LOG_ENABLED) {
     await pool.query(`
@@ -306,6 +383,12 @@ async function initDb() {
       AFTER INSERT OR UPDATE OR DELETE ON ldap_settings
       FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
     `);
+    await pool.query('DROP TRIGGER IF EXISTS audit_log_reports ON reports');
+    await pool.query(`
+      CREATE TRIGGER audit_log_reports
+      AFTER INSERT OR UPDATE OR DELETE ON reports
+      FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
+    `);
   }
 }
 
@@ -396,7 +479,96 @@ const upsertMachineQuery = `
   RETURNING id
 `;
 
-const listMachinesQuery = `
+const upsertReportQuery = `
+  INSERT INTO reports (
+    id,
+    machine_key,
+    hostname,
+    mac_address,
+    mac_addresses,
+    serial_number,
+    category,
+    model,
+    vendor,
+    technician,
+    os_version,
+    ram_mb,
+    ram_slots_total,
+    ram_slots_free,
+    battery_health,
+    camera_status,
+    usb_status,
+    keyboard_status,
+    pad_status,
+    badge_reader_status,
+    last_seen,
+    created_at,
+    components,
+    payload,
+    last_ip
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12,
+    $13,
+    $14,
+    $15,
+    $16,
+    $17,
+    $18,
+    $19,
+    $20,
+    $21,
+    $22,
+    $23,
+    $24,
+    $25
+  )
+  ON CONFLICT(id) DO UPDATE SET
+    hostname = COALESCE(excluded.hostname, reports.hostname),
+    mac_address = COALESCE(excluded.mac_address, reports.mac_address),
+    mac_addresses = COALESCE(excluded.mac_addresses, reports.mac_addresses),
+    serial_number = COALESCE(excluded.serial_number, reports.serial_number),
+    category = CASE
+      WHEN excluded.category != 'unknown' THEN excluded.category
+      ELSE reports.category
+    END,
+    model = COALESCE(excluded.model, reports.model),
+    vendor = COALESCE(excluded.vendor, reports.vendor),
+    technician = COALESCE(excluded.technician, reports.technician),
+    os_version = COALESCE(excluded.os_version, reports.os_version),
+    ram_mb = COALESCE(excluded.ram_mb, reports.ram_mb),
+    ram_slots_total = COALESCE(excluded.ram_slots_total, reports.ram_slots_total),
+    ram_slots_free = COALESCE(excluded.ram_slots_free, reports.ram_slots_free),
+    battery_health = COALESCE(excluded.battery_health, reports.battery_health),
+    camera_status = COALESCE(excluded.camera_status, reports.camera_status),
+    usb_status = COALESCE(excluded.usb_status, reports.usb_status),
+    keyboard_status = COALESCE(excluded.keyboard_status, reports.keyboard_status),
+    pad_status = COALESCE(excluded.pad_status, reports.pad_status),
+    badge_reader_status = COALESCE(excluded.badge_reader_status, reports.badge_reader_status),
+    last_seen = excluded.last_seen,
+    components = CASE
+      WHEN excluded.components IS NULL THEN reports.components
+      ELSE (
+        COALESCE(NULLIF(reports.components, ''), '{}')::jsonb ||
+        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
+      )::text
+    END,
+    payload = COALESCE(excluded.payload, reports.payload),
+    last_ip = excluded.last_ip
+  RETURNING id, machine_key
+`;
+
+const listReportsQuery = `
   SELECT
     id,
     hostname,
@@ -419,12 +591,13 @@ const listMachinesQuery = `
     badge_reader_status,
     last_seen,
     last_ip,
-    components
-  FROM machines
+    components,
+    comment
+  FROM reports
   ORDER BY last_seen DESC
 `;
 
-const getMachineByIdQuery = `
+const getReportByIdQuery = `
   SELECT
     id,
     hostname,
@@ -449,8 +622,10 @@ const getMachineByIdQuery = `
     created_at,
     components,
     payload,
-    last_ip
-  FROM machines
+    last_ip,
+    comment,
+    commented_at
+  FROM reports
   WHERE id = $1
 `;
 
@@ -613,6 +788,28 @@ function normalizeOptionalString(value, maxLength) {
     return '';
   }
   return value.trim().slice(0, maxLength);
+}
+
+function normalizeUuid(value) {
+  if (!value) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  if (/^[0-9a-fA-F]{32}$/.test(trimmed)) {
+    const normalized = trimmed.replace(
+      /^(.{8})(.{4})(.{4})(.{4})(.{12})$/,
+      '$1-$2-$3-$4-$5'
+    );
+    return normalized.toLowerCase();
+  }
+  if (
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
+      trimmed
+    )
+  ) {
+    return trimmed.toLowerCase();
+  }
+  return null;
 }
 
 function normalizeMac(value) {
@@ -2292,6 +2489,15 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       : `host:${hostname.toLowerCase()}`;
 
   const now = new Date().toISOString();
+  const reportIdRaw = pickFirstFromSources([body, body.diag], [
+    'reportId',
+    'report_id',
+    'clientRunId',
+    'client_run_id',
+    'runId',
+    'run_id'
+  ]);
+  const reportId = normalizeUuid(reportIdRaw) || generateUuid();
   const payloadMode = cleanString(
     pickFirst(body, ['payloadMode', 'payload_mode', 'updateMode', 'ingestMode']),
     16
@@ -2303,6 +2509,34 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     skipPayloadRaw === 'true';
   const payload = skipPayload ? null : safeJsonStringify(body, 64 * 1024);
   const ipAddress = getClientIp(req);
+
+  const reportValues = [
+    reportId,
+    machineKey,
+    hostname,
+    macAddress,
+    macAddresses ? JSON.stringify(macAddresses) : null,
+    serialNumber,
+    category,
+    model,
+    vendor,
+    technician,
+    osVersion,
+    ramMb,
+    ramSlotsTotal,
+    ramSlotsFree,
+    batteryHealth,
+    cameraStatus,
+    usbStatus,
+    keyboardStatus,
+    padStatus,
+    badgeReaderStatus,
+    now,
+    now,
+    mergedComponents ? JSON.stringify(mergedComponents) : null,
+    payload,
+    ipAddress
+  ];
 
   const values = [
     machineKey,
@@ -2342,12 +2576,15 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
         actorType: technician ? 'technician' : 'ingest'
       })
     );
+    const reportResult = await client.query(upsertReportQuery, reportValues);
     const result = await client.query(upsertMachineQuery, values);
     await client.query('COMMIT');
-    const id = result.rows && result.rows[0] ? result.rows[0].id : null;
+    const reportRow = reportResult.rows && reportResult.rows[0] ? reportResult.rows[0] : null;
+    const reportIdValue = reportRow && reportRow.id ? reportRow.id : reportId;
     return res.status(200).json({
       ok: true,
-      id,
+      id: reportIdValue,
+      reportId: reportIdValue,
       machineKey
     });
   } catch (error) {
@@ -2369,7 +2606,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
 
 app.get('/api/machines', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query(listMachinesQuery);
+    const result = await pool.query(listReportsQuery);
     const machines = result.rows.map((row) => {
       let components = null;
       try {
@@ -2379,28 +2616,29 @@ app.get('/api/machines', requireAuth, async (req, res) => {
       }
 
       return {
-      id: row.id,
-      hostname: row.hostname,
-      macAddress: row.mac_address,
-      macAddresses: normalizeMacList(row.mac_addresses),
-      serialNumber: row.serial_number,
-      category: row.category,
-      model: row.model,
-      vendor: row.vendor,
-      technician: row.technician,
-      osVersion: row.os_version,
-      ramMb: row.ram_mb,
-      ramSlotsTotal: row.ram_slots_total,
-      ramSlotsFree: row.ram_slots_free,
-      batteryHealth: row.battery_health,
-      cameraStatus: row.camera_status,
-      usbStatus: row.usb_status,
-      keyboardStatus: row.keyboard_status,
-      padStatus: row.pad_status,
-      badgeReaderStatus: row.badge_reader_status,
-      lastSeen: row.last_seen,
-      lastIp: row.last_ip,
-      components
+        id: row.id,
+        hostname: row.hostname,
+        macAddress: row.mac_address,
+        macAddresses: normalizeMacList(row.mac_addresses),
+        serialNumber: row.serial_number,
+        category: row.category,
+        model: row.model,
+        vendor: row.vendor,
+        technician: row.technician,
+        osVersion: row.os_version,
+        ramMb: row.ram_mb,
+        ramSlotsTotal: row.ram_slots_total,
+        ramSlotsFree: row.ram_slots_free,
+        batteryHealth: row.battery_health,
+        cameraStatus: row.camera_status,
+        usbStatus: row.usb_status,
+        keyboardStatus: row.keyboard_status,
+        padStatus: row.pad_status,
+        badgeReaderStatus: row.badge_reader_status,
+        lastSeen: row.last_seen,
+        lastIp: row.last_ip,
+        comment: row.comment,
+        components
       };
     });
 
@@ -2412,14 +2650,14 @@ app.get('/api/machines', requireAuth, async (req, res) => {
 });
 
 app.get('/api/machines/:id', requireAuth, async (req, res) => {
-  const id = Number.parseInt(req.params.id, 10);
-  if (!Number.isFinite(id)) {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
   }
 
   let row;
   try {
-    const result = await pool.query(getMachineByIdQuery, [id]);
+    const result = await pool.query(getReportByIdQuery, [id]);
     row = result.rows && result.rows[0] ? result.rows[0] : null;
   } catch (error) {
     console.error('Failed to fetch machine detail', error);
@@ -2469,6 +2707,8 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       lastSeen: row.last_seen,
       createdAt: row.created_at,
       lastIp: row.last_ip,
+      comment: row.comment,
+      commentedAt: row.commented_at,
       components,
       payload
     }
@@ -2476,8 +2716,8 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
 });
 
 app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
-  const id = Number.parseInt(req.params.id, 10);
-  if (!Number.isFinite(id)) {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
   }
 
@@ -2491,7 +2731,7 @@ app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     await setAuditContext(client, buildAuditContext(req));
-    const result = await client.query('SELECT components FROM machines WHERE id = $1', [id]);
+    const result = await client.query('SELECT components, machine_key FROM reports WHERE id = $1', [id]);
     const row = result.rows && result.rows[0] ? result.rows[0] : null;
     if (!row) {
       await client.query('ROLLBACK');
@@ -2506,11 +2746,18 @@ app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
     }
     components.pad = rawStatus;
 
-    await client.query('UPDATE machines SET pad_status = $1, components = $2 WHERE id = $3', [
+    await client.query('UPDATE reports SET pad_status = $1, components = $2 WHERE id = $3', [
       rawStatus,
       JSON.stringify(components),
       id
     ]);
+    if (row.machine_key) {
+      await client.query('UPDATE machines SET pad_status = $1, components = $2 WHERE machine_key = $3', [
+        rawStatus,
+        JSON.stringify(components),
+        row.machine_key
+      ]);
+    }
     await client.query('COMMIT');
     return res.json({ ok: true, status: rawStatus, components });
   } catch (error) {
@@ -2530,15 +2777,64 @@ app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
   }
 });
 
+app.put('/api/machines/:id/comment', requireAuth, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const rawComment = typeof req.body?.comment === 'string' ? req.body.comment : '';
+  const trimmed = rawComment.trim();
+  const comment = trimmed ? trimmed.slice(0, 800) : null;
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const result = await client.query(
+      `
+        UPDATE reports
+        SET comment = $1,
+            commented_at = CASE WHEN $1 IS NULL THEN NULL ELSE NOW() END
+        WHERE id = $2
+        RETURNING comment, commented_at
+      `,
+      [comment, id]
+    );
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true, comment: row.comment, commentedAt: row.commented_at });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback comment update', rollbackError);
+      }
+    }
+    console.error('Failed to update comment', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
 app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
-  const id = Number.parseInt(req.params.id, 10);
-  if (!Number.isFinite(id)) {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
   }
 
   let row;
   try {
-    const result = await pool.query(getMachineByIdQuery, [id]);
+    const result = await pool.query(getReportByIdQuery, [id]);
     row = result.rows && result.rows[0] ? result.rows[0] : null;
   } catch (error) {
     console.error('Failed to fetch machine detail for PDF', error);

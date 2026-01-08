@@ -50,19 +50,27 @@
       </header>
 
       <section class="controls">
-        <div class="filters" role="tablist" aria-label="Filtrer par categorie">
-          <button class="filter-btn active" data-filter="all" type="button" aria-pressed="true">
-            Tous
-          </button>
-          <button class="filter-btn" data-filter="laptop" type="button" aria-pressed="false">
-            Portables
-          </button>
-          <button class="filter-btn" data-filter="desktop" type="button" aria-pressed="false">
-            Tours
-          </button>
-          <button class="filter-btn" data-filter="unknown" type="button" aria-pressed="false">
-            Inconnus
-          </button>
+        <div class="filters" role="group" aria-label="Filtres rapides">
+          <div class="filter-group category-filters" role="tablist" aria-label="Filtrer par categorie">
+            <button class="filter-btn category-filter-btn active" data-filter="all" type="button" aria-pressed="true">
+              Tous
+            </button>
+            <button class="filter-btn category-filter-btn" data-filter="laptop" type="button" aria-pressed="false">
+              Portables
+            </button>
+            <button class="filter-btn category-filter-btn" data-filter="desktop" type="button" aria-pressed="false">
+              Tours
+            </button>
+            <button class="filter-btn category-filter-btn" data-filter="unknown" type="button" aria-pressed="false">
+              Inconnus
+            </button>
+          </div>
+          <span class="filter-divider" aria-hidden="true"></span>
+          <div class="filter-group tech-filters" id="tech-filters" role="group" aria-label="Filtrer par technicien">
+            <button class="filter-btn tech-filter-btn active" data-tech="all" type="button" aria-pressed="true">
+              Tous techs
+            </button>
+          </div>
         </div>
         <div class="search-wrap">
           <input
@@ -119,6 +127,20 @@
             </button>
             <button class="test-filter-btn" data-component="badgeReader" type="button" aria-pressed="false">
               Badge
+            </button>
+          </div>
+        </div>
+        <div class="comment-filter-group">
+          <span class="controls-label">Commentaires</span>
+          <div class="pill-group comment-filters" role="group" aria-label="Filtrer par commentaire">
+            <button class="comment-filter-btn active" data-comment="all" type="button" aria-pressed="true">
+              Tous
+            </button>
+            <button class="comment-filter-btn" data-comment="with" type="button" aria-pressed="false">
+              Avec commentaire
+            </button>
+            <button class="comment-filter-btn" data-comment="without" type="button" aria-pressed="false">
+              Sans commentaire
             </button>
           </div>
         </div>

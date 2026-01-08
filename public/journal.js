@@ -26,6 +26,7 @@ const actionLabels = {
 
 const tableLabels = {
   machines: 'Machines',
+  reports: 'Rapports',
   ldap_settings: 'Config LDAP'
 };
 
@@ -54,6 +55,8 @@ const fieldLabels = {
   components: 'Composants',
   payload: 'Payload',
   last_ip: 'IP',
+  comment: 'Commentaire',
+  commented_at: 'Commentaire date',
   enabled: 'Actif',
   url: 'URL',
   bind_dn: 'Bind DN',

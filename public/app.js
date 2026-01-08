@@ -1,7 +1,9 @@
 const state = {
   machines: [],
   filter: 'all',
+  techFilter: 'all',
   componentFilter: 'all',
+  commentFilter: 'all',
   search: '',
   sort: 'lastSeen',
   layout: '3',
@@ -19,9 +21,11 @@ const statTotal = document.getElementById('stat-total');
 const statLaptop = document.getElementById('stat-laptop');
 const statDesktop = document.getElementById('stat-desktop');
 const statUnknown = document.getElementById('stat-unknown');
-const filterButtons = document.querySelectorAll('.filter-btn');
+const categoryFilterButtons = document.querySelectorAll('.category-filter-btn');
+const techFiltersEl = document.getElementById('tech-filters');
 const layoutButtons = document.querySelectorAll('.layout-btn');
 const testFilterButtons = document.querySelectorAll('.test-filter-btn');
+const commentFilterButtons = document.querySelectorAll('.comment-filter-btn');
 const adminLink = document.getElementById('admin-link');
 
 const categoryLabels = {
@@ -124,6 +128,78 @@ function updateTestFilterButtons() {
   }
   testFilterButtons.forEach((btn) => {
     const active = btn.dataset.component === state.componentFilter;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function normalizeTech(value) {
+  if (!value) {
+    return '';
+  }
+  return String(value).trim();
+}
+
+function techKey(value) {
+  const normalized = normalizeTech(value);
+  return normalized ? normalized.toLowerCase() : '';
+}
+
+function updateTechFilterButtons() {
+  if (!techFiltersEl) {
+    return;
+  }
+  const buttons = techFiltersEl.querySelectorAll('.tech-filter-btn');
+  buttons.forEach((btn) => {
+    const active = (btn.dataset.tech || 'all') === state.techFilter;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function renderTechFilters() {
+  if (!techFiltersEl) {
+    return;
+  }
+  const techMap = new Map();
+  state.machines.forEach((machine) => {
+    const label = normalizeTech(machine.technician);
+    if (!label) {
+      return;
+    }
+    const key = label.toLowerCase();
+    if (!techMap.has(key)) {
+      techMap.set(key, label);
+    }
+  });
+
+  const techList = Array.from(techMap.entries())
+    .sort((a, b) => a[1].localeCompare(b[1], 'fr'));
+
+  if (state.techFilter !== 'all' && !techMap.has(state.techFilter)) {
+    state.techFilter = 'all';
+  }
+
+  const buttons = [
+    `<button class="filter-btn tech-filter-btn" data-tech="all" type="button" aria-pressed="false">Tous techs</button>`
+  ];
+  techList.forEach(([key, label]) => {
+    buttons.push(
+      `<button class="filter-btn tech-filter-btn" data-tech="${escapeHtml(key)}" type="button" aria-pressed="false">${escapeHtml(
+        label
+      )}</button>`
+    );
+  });
+  techFiltersEl.innerHTML = buttons.join('');
+  updateTechFilterButtons();
+}
+
+function updateCommentFilterButtons() {
+  if (!commentFilterButtons.length) {
+    return;
+  }
+  commentFilterButtons.forEach((btn) => {
+    const active = btn.dataset.comment === state.commentFilter;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
@@ -543,7 +619,7 @@ function setPadButtonsLoading(id, loading) {
 async function updatePadStatus(id, status) {
   setPadButtonsLoading(id, true);
   try {
-    const response = await fetch(`/api/machines/${id}/pad`, {
+    const response = await fetch(`/api/machines/${encodeURIComponent(id)}/pad`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status })
@@ -568,6 +644,94 @@ async function updatePadStatus(id, status) {
   }
 }
 
+function applyCommentUpdate(id, comment, commentedAt) {
+  state.machines = state.machines.map((machine) => {
+    if (machine.id !== id) {
+      return machine;
+    }
+    return {
+      ...machine,
+      comment,
+      commentedAt
+    };
+  });
+
+  if (state.details[id]) {
+    state.details[id] = {
+      ...state.details[id],
+      comment,
+      commentedAt
+    };
+  }
+}
+
+function setCommentButtonsLoading(id, loading) {
+  const buttons = listEl.querySelectorAll(`[data-action="save-comment"][data-id="${id}"],[data-action="clear-comment"][data-id="${id}"]`);
+  buttons.forEach((button) => {
+    button.disabled = loading;
+    button.classList.toggle('is-loading', loading);
+  });
+}
+
+async function updateComment(id, comment) {
+  setCommentButtonsLoading(id, true);
+  try {
+    const response = await fetch(`/api/machines/${encodeURIComponent(id)}/comment`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ comment })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('comment_update_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('comment_update_failed');
+    }
+    applyCommentUpdate(id, data.comment, data.commentedAt);
+    renderList();
+  } catch (error) {
+    window.alert("Impossible d'enregistrer le commentaire.");
+  } finally {
+    setCommentButtonsLoading(id, false);
+  }
+}
+
+function togglePayloadView(id, button) {
+  if (!button) {
+    return;
+  }
+  const detail = state.details[id];
+  if (!detail || !detail.payload) {
+    return;
+  }
+  const container = button.closest('.payload');
+  if (!container) {
+    return;
+  }
+  const content = container.querySelector('.payload-content');
+  if (!content) {
+    return;
+  }
+  const isHidden = content.hasAttribute('hidden');
+  if (isHidden && !content.dataset.loaded) {
+    const json = JSON.stringify(detail.payload, null, 2);
+    content.innerHTML = `<pre>${escapeHtml(json)}</pre>`;
+    content.dataset.loaded = 'true';
+  }
+  if (isHidden) {
+    content.removeAttribute('hidden');
+    button.textContent = 'Masquer payload';
+  } else {
+    content.setAttribute('hidden', 'true');
+    button.textContent = 'Afficher payload';
+  }
+}
+
 function updateStats() {
   const total = state.machines.length;
   const laptop = state.machines.filter((m) => normalizeCategory(m.category) === 'laptop').length;
@@ -585,6 +749,18 @@ function applyFilters() {
   const filtered = state.machines.filter((machine) => {
     const category = normalizeCategory(machine.category);
     if (state.filter !== 'all' && category !== state.filter) {
+      return false;
+    }
+    if (state.techFilter !== 'all') {
+      if (techKey(machine.technician) !== state.techFilter) {
+        return false;
+      }
+    }
+    const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
+    if (state.commentFilter === 'with' && !commentValue) {
+      return false;
+    }
+    if (state.commentFilter === 'without' && commentValue) {
       return false;
     }
     if (state.componentFilter !== 'all') {
@@ -607,7 +783,8 @@ function applyFilters() {
       Array.isArray(machine.macAddresses) ? machine.macAddresses.join(' ') : null,
       machine.technician,
       machine.vendor,
-      machine.model
+      machine.model,
+      machine.comment
     ]
       .filter(Boolean)
       .join(' ')
@@ -750,6 +927,10 @@ function renderList() {
       const mac = escapeHtml(formatMacSummary(machine));
       const technician = escapeHtml(machine.technician || '--');
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
+      const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
+      const commentHtml = commentValue
+        ? `<p class="machine-comment">${escapeHtml(commentValue)}</p>`
+        : '';
       const expanded = state.expandedId === machine.id;
       const selected = expanded ? 'selected' : '';
       const delayClass = delayClasses[index % delayClasses.length];
@@ -791,6 +972,7 @@ function renderList() {
             <span>MAC: ${mac}</span>
             <span>Tech: ${technician}</span>
           </div>
+          ${commentHtml}
           ${summaryHtml}
           <button class="card-toggle" type="button">${toggleLabel}</button>
           ${detailHtml}
@@ -838,6 +1020,29 @@ function buildDetailHtml(detail) {
             NOK
           </button>
         </div>
+      </div>
+    `
+    : '';
+  const commentValue = typeof detail.comment === 'string' ? detail.comment : '';
+  const commentMeta = detail.commentedAt
+    ? `<div class="comment-meta">Derniere modif : ${escapeHtml(formatDateTime(detail.commentedAt))}</div>`
+    : '';
+  const commentHtml = detailId
+    ? `
+      <div class="comment-block">
+        <span class="comment-label">Commentaire</span>
+        <textarea class="comment-input" data-comment-id="${detailId}" maxlength="800">${escapeHtml(
+          commentValue
+        )}</textarea>
+        <div class="comment-actions">
+          <button class="detail-action" type="button" data-action="save-comment" data-id="${detailId}">
+            Enregistrer
+          </button>
+          <button class="detail-action" type="button" data-action="clear-comment" data-id="${detailId}">
+            Effacer
+          </button>
+        </div>
+        ${commentMeta}
       </div>
     `
     : '';
@@ -946,7 +1151,12 @@ function buildDetailHtml(detail) {
   `;
 
   const payloadHtml = detail.payload
-    ? `<pre>${escapeHtml(JSON.stringify(detail.payload, null, 2))}</pre>`
+    ? `
+      <button class="detail-action" type="button" data-action="toggle-payload" data-id="${detailId}">
+        Afficher payload
+      </button>
+      <div class="payload-content" hidden></div>
+    `
     : '<div class="empty">Payload non disponible.</div>';
 
   const diagnosticsHtml = buildDiagnosticsHtml(detail);
@@ -989,6 +1199,7 @@ function buildDetailHtml(detail) {
         <strong>${escapeHtml(detail.lastIp || '--')}</strong>
       </div>
     </div>
+    ${commentHtml}
     ${hardwareHtml}
     ${diagnosticsHtml}
     <div class="components">
@@ -1438,7 +1649,7 @@ function openReportPdf(detail) {
   if (!detail || !detail.id) {
     return;
   }
-  const url = `/api/machines/${detail.id}/report.pdf`;
+  const url = `/api/machines/${encodeURIComponent(detail.id)}/report.pdf`;
   fetch(url)
     .then((response) => {
       if (response.status === 401) {
@@ -1482,6 +1693,8 @@ async function loadMachines() {
     const data = await response.json();
     state.machines = Array.isArray(data.machines) ? data.machines : [];
     state.lastUpdated = new Date();
+    renderTechFilters();
+    updateCommentFilterButtons();
     updateStats();
     renderList();
     updateLastUpdated();
@@ -1494,17 +1707,17 @@ async function loadMachines() {
 }
 
 async function ensureMachineDetail(id) {
-  const numericId = Number.parseInt(id, 10);
-  if (!Number.isFinite(numericId)) {
+  const detailId = id != null ? String(id) : '';
+  if (!detailId) {
     return;
   }
-  if (state.details[numericId]) {
+  if (state.details[detailId]) {
     renderList();
     return;
   }
   renderList();
   try {
-    const response = await fetch(`/api/machines/${numericId}`);
+    const response = await fetch(`/api/machines/${encodeURIComponent(detailId)}`);
     if (response.status === 401) {
       window.location.href = '/login';
       return;
@@ -1513,10 +1726,10 @@ async function ensureMachineDetail(id) {
       throw new Error('detail_failed');
     }
     const data = await response.json();
-    state.details[numericId] = data.machine;
+    state.details[detailId] = data.machine;
     renderList();
   } catch (error) {
-    state.details[numericId] = { error: true };
+    state.details[detailId] = { error: true };
     renderList();
   }
 }
@@ -1532,9 +1745,9 @@ function updateLastUpdated() {
   })}`;
 }
 
-filterButtons.forEach((button) => {
+categoryFilterButtons.forEach((button) => {
   button.addEventListener('click', () => {
-    filterButtons.forEach((btn) => {
+    categoryFilterButtons.forEach((btn) => {
       btn.classList.remove('active');
       btn.setAttribute('aria-pressed', 'false');
     });
@@ -1544,6 +1757,18 @@ filterButtons.forEach((button) => {
     renderList();
   });
 });
+
+if (techFiltersEl) {
+  techFiltersEl.addEventListener('click', (event) => {
+    const button = event.target.closest('.tech-filter-btn');
+    if (!button) {
+      return;
+    }
+    state.techFilter = button.dataset.tech || 'all';
+    updateTechFilterButtons();
+    renderList();
+  });
+}
 
 layoutButtons.forEach((button) => {
   button.addEventListener('click', () => {
@@ -1573,8 +1798,22 @@ testFilterButtons.forEach((button) => {
   });
 });
 
+commentFilterButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    commentFilterButtons.forEach((btn) => {
+      btn.classList.remove('active');
+      btn.setAttribute('aria-pressed', 'false');
+    });
+    button.classList.add('active');
+    button.setAttribute('aria-pressed', 'true');
+    state.commentFilter = button.dataset.comment || 'all';
+    renderList();
+  });
+});
+
 updateLayoutButtons();
 updateTestFilterButtons();
+updateCommentFilterButtons();
 applyLayout();
 
 searchInput.addEventListener('input', (event) => {
@@ -1596,20 +1835,59 @@ listEl.addEventListener('click', (event) => {
   if (padBtn) {
     event.preventDefault();
     event.stopPropagation();
-    const id = Number.parseInt(padBtn.dataset.id, 10);
+    const id = padBtn.dataset.id;
     const status = padBtn.dataset.status;
-    if (!Number.isFinite(id) || !status) {
+    if (!id || !status) {
       return;
     }
     updatePadStatus(id, status);
+    return;
+  }
+  const saveCommentBtn = event.target.closest('[data-action="save-comment"]');
+  if (saveCommentBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = saveCommentBtn.dataset.id;
+    if (!id) {
+      return;
+    }
+    const input = listEl.querySelector(`.comment-input[data-comment-id="${id}"]`);
+    const value = input ? input.value : '';
+    updateComment(id, value);
+    return;
+  }
+  const clearCommentBtn = event.target.closest('[data-action="clear-comment"]');
+  if (clearCommentBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = clearCommentBtn.dataset.id;
+    if (!id) {
+      return;
+    }
+    const input = listEl.querySelector(`.comment-input[data-comment-id="${id}"]`);
+    if (input) {
+      input.value = '';
+    }
+    updateComment(id, '');
+    return;
+  }
+  const payloadBtn = event.target.closest('[data-action="toggle-payload"]');
+  if (payloadBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = payloadBtn.dataset.id;
+    if (!id) {
+      return;
+    }
+    togglePayloadView(id, payloadBtn);
     return;
   }
   const exportBtn = event.target.closest('[data-action="export-pdf"]');
   if (exportBtn) {
     event.preventDefault();
     event.stopPropagation();
-    const id = Number.parseInt(exportBtn.dataset.id, 10);
-    if (!Number.isFinite(id)) {
+    const id = exportBtn.dataset.id;
+    if (!id) {
       return;
     }
     const detail = state.details[id];
@@ -1626,8 +1904,8 @@ listEl.addEventListener('click', (event) => {
   if (event.target.closest('.card-detail')) {
     return;
   }
-  const id = Number.parseInt(card.dataset.id, 10);
-  if (!Number.isFinite(id)) {
+  const id = card.dataset.id;
+  if (!id) {
     return;
   }
   if (state.expandedId === id) {

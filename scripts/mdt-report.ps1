@@ -1516,7 +1516,7 @@ if (-not $script:IsAdmin -and -not $SkipElevation) {
   Write-Log 'Continuing without admin rights.' 'WARN'
 }
 
-$clientRunId = [guid]::NewGuid().ToString('N')
+$clientRunId = [guid]::NewGuid().ToString('D')
 $artifactRootResolved = Resolve-ArtifactRoot -Value $ArtifactRoot
 $artifactRunDir = $null
 $macSerialKey = $null
@@ -1778,14 +1778,25 @@ function Get-MacsFromIpconfig {
 }
 
 function Get-MacsFromMsinfo {
-  param([int]$TimeoutSec = 30)
+  param(
+    [int]$TimeoutSec = 30,
+    [string]$OutputDir
+  )
 
   if ($TimeoutSec -le 0) { return @() }
 
   $cmd = Get-Command msinfo32 -ErrorAction SilentlyContinue
   if (-not $cmd) { return @() }
 
-  $reportPath = Join-Path ([System.IO.Path]::GetTempPath()) ("mdt-msinfo-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+  if ($OutputDir) {
+    $OutputDir = Ensure-Directory -Path $OutputDir
+  }
+  if ($OutputDir) {
+    $reportPath = Join-Path $OutputDir 'msinfo.txt'
+  } else {
+    $reportPath = Join-Path ([System.IO.Path]::GetTempPath()) ("mdt-msinfo-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+  }
+  $script:MsinfoReportPath = $reportPath
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $cmd.Source
   $psi.Arguments = "/report `"$reportPath`""
@@ -1819,7 +1830,6 @@ function Get-MacsFromMsinfo {
   }
 
   $content = Get-Content -Path $reportPath -ErrorAction SilentlyContinue
-  Remove-Item -Path $reportPath -ErrorAction SilentlyContinue
   if (-not $content) { return @() }
 
   $macRegex = '([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}'
@@ -2300,6 +2310,53 @@ function Get-BatteryInfo {
     chargePercent = $chargePercent
     powerSource = $powerSource
   }
+}
+
+function Invoke-BatteryReport {
+  param(
+    [string]$OutputDir
+  )
+
+  $result = [ordered]@{
+    status = 'not_tested'
+    reportPath = $null
+  }
+
+  $cmd = Get-Command powercfg -ErrorAction SilentlyContinue
+  if (-not $cmd) {
+    $result.status = 'absent'
+    return $result
+  }
+
+  if (-not $OutputDir) {
+    if ($env:TEMP) {
+      $OutputDir = Join-Path $env:TEMP 'mdt-fusion\\battery'
+    } else {
+      $OutputDir = Join-Path $PSScriptRoot 'battery'
+    }
+  }
+  $OutputDir = Ensure-Directory -Path $OutputDir
+  if (-not $OutputDir) {
+    $result.status = 'nok'
+    return $result
+  }
+
+  $reportPath = Join-Path $OutputDir 'battery-report.html'
+  $result.reportPath = $reportPath
+
+  try {
+    & $cmd.Source /batteryreport /output $reportPath | Out-Null
+    if (Test-Path $reportPath) {
+      $result.status = 'ok'
+    } else {
+      $result.status = 'nok'
+    }
+  } catch {
+    Write-Log "Battery report failed: $($_.Exception.Message)" 'WARN'
+    $result.status = 'nok'
+  }
+
+  return $result
 }
 
 function Get-DiskSmartStatus {
@@ -3374,11 +3431,20 @@ $serialNumber = Get-SerialNumber
 $macSerialKey = Get-MacSerialKey -MacAddress $macAddress -SerialNumber $serialNumber -Hostname $hostname
 $artifactRunDir = New-ArtifactRunDir -ArtifactRoot $artifactRootResolved -MacSerialKey $macSerialKey -ClientRunId $clientRunId
 if ($artifactRunDir) { Write-Log "Artifact run dir: $artifactRunDir" }
+$msinfoReportMacs = @()
+if ($artifactRunDir) {
+  $msinfoDir = Join-Path $artifactRunDir 'Msinfo'
+  $msinfoReportMacs = Get-MacsFromMsinfo -TimeoutSec $MsinfoTimeoutSec -OutputDir $msinfoDir
+}
 $osVersion = Get-OsVersion
 $ramMb = Get-RamMb
 $slotsInfo = Get-RamSlots
 $batteryHealth = Get-BatteryHealth
 $batteryInfo = Get-BatteryInfo
+$batteryReport = $null
+if ($artifactRunDir -and ($batteryInfo -or $batteryHealth -ne $null)) {
+  $batteryReport = Invoke-BatteryReport -OutputDir (Join-Path $artifactRunDir 'Battery')
+}
 Step-Progress -Status 'Inventaire materiel'
 
 $skipPeripheralTests = $categoryValue -eq 'desktop'
@@ -3800,6 +3866,7 @@ $diag.completedAt = (Get-Date).ToString('o')
 $diag.durationSec = [int]$stopwatch.Elapsed.TotalSeconds
 
 $payload = [ordered]@{}
+if ($clientRunId) { $payload.reportId = $clientRunId }
 $technicianValue = if ($Technician) { $Technician.Trim() } else { $null }
 if ($hostname) { $payload.hostname = $hostname }
 if ($macAddress) { $payload.macAddress = $macAddress }
@@ -3923,6 +3990,7 @@ if ($artifactRunDir) {
     clientRunId = $clientRunId
     macSerialKey = $macSerialKey
   }
+  if ($clientRunId) { $payload.rawArtifacts.reportId = $clientRunId }
   if ($ObjectStorageEndpoint) { $payload.rawArtifacts.endpoint = $ObjectStorageEndpoint }
   if ($ObjectStorageBucket) { $payload.rawArtifacts.bucket = $ObjectStorageBucket }
   if ($ObjectStoragePrefix) { $payload.rawArtifacts.prefix = $ObjectStoragePrefix }
@@ -3998,6 +4066,7 @@ if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
   }
   if ($keyboardResult -and $keyboardResult.status -and $keyboardResult.status -ne 'not_tested') {
     $kbPayload = [ordered]@{}
+    if ($clientRunId) { $kbPayload.reportId = $clientRunId }
     if ($hostname) { $kbPayload.hostname = $hostname }
     if ($macAddress) { $kbPayload.macAddress = $macAddress }
     if ($serialNumber) { $kbPayload.serialNumber = $serialNumber }
