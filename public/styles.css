@@ -895,6 +895,45 @@ body {
   gap: 10px;
 }
 
+.card-top-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 45%;
+}
+
+.card-top-right .machine-meta {
+  justify-content: flex-end;
+}
+
+.card-comment {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(60, 64, 60, 0.08);
+  color: var(--muted);
+  font-size: 0.75rem;
+  max-width: 100%;
+}
+
+.card-comment .comment-label {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  font-size: 0.62rem;
+  color: var(--ink);
+}
+
+.card-comment .comment-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: clamp(140px, 22vw, 240px);
+}
+
 .badge {
   font-size: 0.75rem;
   font-weight: 600;

@@ -967,7 +967,12 @@ function renderList() {
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
       const commentHtml = commentValue
-        ? `<p class="machine-comment">${escapeHtml(commentValue)}</p>`
+        ? `
+          <div class="card-comment" title="${escapeHtml(commentValue)}">
+            <span class="comment-label">Commentaire</span>
+            <span class="comment-text">${escapeHtml(commentValue)}</span>
+          </div>
+        `
         : '';
       const expanded = state.expandedId === machine.id;
       const selected = expanded ? 'selected' : '';
@@ -1001,7 +1006,10 @@ function renderList() {
         <article class="machine-card ${delayClass} ${selected}" data-id="${machine.id}" aria-expanded="${expanded}">
           <div class="card-top">
             <span class="badge" data-category="${category}">${label}</span>
-            <span class="machine-meta"><span>${lastSeen}</span></span>
+            <div class="card-top-right">
+              <span class="machine-meta"><span>${lastSeen}</span></span>
+              ${commentHtml}
+            </div>
           </div>
           <h3 class="machine-title">${title}</h3>
           <p class="machine-sub">${subtitle}</p>
@@ -1010,7 +1018,6 @@ function renderList() {
             <span>MAC: ${mac}</span>
             <span>Tech: ${technician}</span>
           </div>
-          ${commentHtml}
           ${summaryHtml}
           <button class="card-toggle" type="button">${toggleLabel}</button>
           ${detailHtml}
