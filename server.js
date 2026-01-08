@@ -79,6 +79,133 @@ function generateUuid() {
   return normalizeUuid(hex);
 }
 
+async function backfillReportsFromMachines() {
+  try {
+    const reportCount = await pool.query('SELECT COUNT(*) AS count FROM reports');
+    const reportTotal = Number.parseInt(reportCount.rows?.[0]?.count || '0', 10);
+    if (reportTotal > 0) {
+      return;
+    }
+
+    const machines = await pool.query(`
+      SELECT
+        machine_key,
+        hostname,
+        mac_address,
+        mac_addresses,
+        serial_number,
+        category,
+        model,
+        vendor,
+        technician,
+        os_version,
+        ram_mb,
+        ram_slots_total,
+        ram_slots_free,
+        battery_health,
+        camera_status,
+        usb_status,
+        keyboard_status,
+        pad_status,
+        badge_reader_status,
+        last_seen,
+        created_at,
+        components,
+        payload,
+        last_ip
+      FROM machines
+      ORDER BY last_seen DESC
+    `);
+
+    if (!machines.rows || machines.rows.length === 0) {
+      return;
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const row of machines.rows) {
+        const reportId = generateUuid();
+        await client.query(
+          `
+            INSERT INTO reports (
+              id,
+              machine_key,
+              hostname,
+              mac_address,
+              mac_addresses,
+              serial_number,
+              category,
+              model,
+              vendor,
+              technician,
+              os_version,
+              ram_mb,
+              ram_slots_total,
+              ram_slots_free,
+              battery_health,
+              camera_status,
+              usb_status,
+              keyboard_status,
+              pad_status,
+              badge_reader_status,
+              last_seen,
+              created_at,
+              components,
+              payload,
+              last_ip
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+              $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+              $21, $22, $23, $24, $25
+            )
+          `,
+          [
+            reportId,
+            row.machine_key,
+            row.hostname,
+            row.mac_address,
+            row.mac_addresses,
+            row.serial_number,
+            row.category,
+            row.model,
+            row.vendor,
+            row.technician,
+            row.os_version,
+            row.ram_mb,
+            row.ram_slots_total,
+            row.ram_slots_free,
+            row.battery_health,
+            row.camera_status,
+            row.usb_status,
+            row.keyboard_status,
+            row.pad_status,
+            row.badge_reader_status,
+            row.last_seen,
+            row.created_at,
+            row.components,
+            row.payload,
+            row.last_ip
+          ]
+        );
+      }
+      await client.query('COMMIT');
+      console.log(`Backfilled ${machines.rows.length} reports from machines.`);
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback report backfill', rollbackError);
+      }
+      console.error('Report backfill failed', error);
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Report backfill check failed', error);
+  }
+}
+
 async function waitForDatabase() {
   const maxAttempts = Number.parseInt(process.env.DB_CONNECT_RETRIES || '20', 10);
   const delayMs = Number.parseInt(process.env.DB_CONNECT_DELAY_MS || '2000', 10);
@@ -390,6 +517,8 @@ async function initDb() {
       FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
     `);
   }
+
+  await backfillReportsFromMachines();
 }
 
 const upsertMachineQuery = `
