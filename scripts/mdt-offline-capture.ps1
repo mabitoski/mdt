@@ -327,16 +327,7 @@ if (-not $SkipWinSat) {
   Ensure-Directory -Path $winSatDir
   $winSatXml = Join-Path $winSatDir 'winsat.xml'
   $winSatLog = Join-Path $winSatDir 'winsat.log'
-  $winSatSystemLog = $null
-  if ($env:SystemRoot) {
-    $candidate = Join-Path $env:SystemRoot 'Performance\WinSAT\winsat.log'
-    if (Test-Path -Path $candidate) {
-      $winSatSystemLog = $candidate
-    } else {
-      $candidate = Join-Path $env:SystemRoot 'Performance\WinSAT\WinSAT.log'
-      if (Test-Path -Path $candidate) { $winSatSystemLog = $candidate }
-    }
-  }
+  $winSatErr = Join-Path $winSatDir 'winsat.err'
   Write-Log 'Running winsat formal...'
   try {
     $winSatExe = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\winsat.exe' } else { $null }
@@ -344,46 +335,21 @@ if (-not $SkipWinSat) {
       $winSatExe = $null
     }
     $exeToRun = if ($winSatExe) { $winSatExe } else { 'winsat' }
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $exeToRun
-    $psi.Arguments = "formal -xml `"$winSatXml`""
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
+    $proc = Start-Process -FilePath $exeToRun `
+      -ArgumentList "formal -xml `"$winSatXml`"" `
+      -RedirectStandardOutput $winSatLog `
+      -RedirectStandardError $winSatErr `
+      -PassThru `
+      -NoNewWindow
 
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    $proc.EnableRaisingEvents = $true
-
-    $script:lastWinSatOutput = Get-Date
-    $proc.add_OutputDataReceived({
-      param($sender, $e)
-      if ($e.Data) {
-        $script:lastWinSatOutput = Get-Date
-        try { Add-Content -Path $winSatLog -Value $e.Data } catch { }
-        Write-Log ("winsat> {0}" -f $e.Data)
-      }
-    })
-    $proc.add_ErrorDataReceived({
-      param($sender, $e)
-      if ($e.Data) {
-        $script:lastWinSatOutput = Get-Date
-        try { Add-Content -Path $winSatLog -Value $e.Data } catch { }
-        Write-Log ("winsat! {0}" -f $e.Data) 'WARN'
-      }
-    })
-
-    if ($proc.Start()) {
-      Set-Content -Path $winSatLog -Value "winsat started (pid=$($proc.Id))" -Encoding UTF8
+    if ($proc) {
       Write-Log "winsat pid=$($proc.Id)"
-      $proc.BeginOutputReadLine()
-      $proc.BeginErrorReadLine()
       $startAt = Get-Date
       $nextUpdate = $startAt.AddSeconds(30)
       $lastCpu = $proc.TotalProcessorTime.TotalSeconds
-      $lastLogWrite = (Get-Item $winSatLog).LastWriteTimeUtc
       $lastActivity = $startAt
+      $lastLogLine = ''
+      $lastErrLine = ''
       $timeoutSec = if ($WinSatTimeoutSec -gt 0) { $WinSatTimeoutSec } else { 0 }
       $idleTimeoutSec = if ($WinSatIdleTimeoutSec -gt 0) { $WinSatIdleTimeoutSec } else { 0 }
 
@@ -403,15 +369,32 @@ if (-not $SkipWinSat) {
           $cpuDelta = [math]::Round(($cpuNow - $lastCpu), 2)
           $lastCpu = $cpuNow
           $wsMb = [math]::Round(($proc.WorkingSet64 / 1MB), 1)
-          $logTouched = $false
-          $currentLogWrite = (Get-Item $winSatLog).LastWriteTimeUtc
-          if ($currentLogWrite -gt $lastLogWrite) { $logTouched = $true }
-          $lastLogWrite = $currentLogWrite
-          if ($cpuDelta -gt 0 -or $logTouched -or $script:lastWinSatOutput -gt $lastActivity) {
+
+          $logLine = $null
+          if (Test-Path -Path $winSatLog) {
+            $logLine = Get-Content -Path $winSatLog -Tail 1 -ErrorAction SilentlyContinue
+          }
+          if ($logLine -and $logLine -ne $lastLogLine) {
+            Write-Log ("winsat> {0}" -f $logLine)
+            $lastLogLine = $logLine
+            $lastActivity = Get-Date
+          }
+
+          $errLine = $null
+          if (Test-Path -Path $winSatErr) {
+            $errLine = Get-Content -Path $winSatErr -Tail 1 -ErrorAction SilentlyContinue
+          }
+          if ($errLine -and $errLine -ne $lastErrLine) {
+            Write-Log ("winsat! {0}" -f $errLine) 'WARN'
+            $lastErrLine = $errLine
+            $lastActivity = Get-Date
+          }
+
+          if ($cpuDelta -gt 0) {
             $lastActivity = Get-Date
           }
           $idleSec = [int]((Get-Date) - $lastActivity).TotalSeconds
-          Write-Log ("winsat still running ({0}s, xml_present={1}, cpu_delta={2}s, ws={3}MB, log_touched={4}, idle={5}s)" -f $elapsed, $xmlPresent, $cpuDelta, $wsMb, $logTouched, $idleSec)
+          Write-Log ("winsat still running ({0}s, xml_present={1}, cpu_delta={2}s, ws={3}MB, idle={4}s)" -f $elapsed, $xmlPresent, $cpuDelta, $wsMb, $idleSec)
           if ($idleTimeoutSec -gt 0 -and $idleSec -ge $idleTimeoutSec) {
             $proc.Kill()
             Add-Content -Path $winSatLog -Value "winsat idle timeout (${idleSec}s)"
@@ -421,12 +404,11 @@ if (-not $SkipWinSat) {
           $nextUpdate = (Get-Date).AddSeconds(30)
         }
       }
-      $proc.WaitForExit()
-      try { $proc.CancelOutputReadLine() } catch { }
-      try { $proc.CancelErrorReadLine() } catch { }
-      if ($proc.HasExited) {
-        Write-Log ("winsat done (exit_code={0})." -f $proc.ExitCode)
+
+      if (-not $proc.HasExited) {
+        $proc.WaitForExit()
       }
+      Write-Log ("winsat done (exit_code={0})." -f $proc.ExitCode)
     }
   } catch {
     Write-Warning "winsat failed: $($_.Exception.Message)"
