@@ -4,6 +4,7 @@ param(
   [ValidateSet('auto', 'laptop', 'desktop', 'unknown')][string]$Category = 'auto',
   [string]$Technician,
   [switch]$SkipWinSat,
+  [int]$WinSatIdleTimeoutSec = 180,
   [switch]$SkipDxDiag,
   [switch]$SkipMsinfo,
   [switch]$SkipBatteryReport,
@@ -349,21 +350,49 @@ if (-not $SkipWinSat) {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    if ($proc) {
+    $psi.CreateNoWindow = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $proc.EnableRaisingEvents = $true
+
+    $script:lastWinSatOutput = Get-Date
+    $proc.add_OutputDataReceived({
+      param($sender, $e)
+      if ($e.Data) {
+        $script:lastWinSatOutput = Get-Date
+        try { Add-Content -Path $winSatLog -Value $e.Data } catch { }
+        Write-Log ("winsat> {0}" -f $e.Data)
+      }
+    })
+    $proc.add_ErrorDataReceived({
+      param($sender, $e)
+      if ($e.Data) {
+        $script:lastWinSatOutput = Get-Date
+        try { Add-Content -Path $winSatLog -Value $e.Data } catch { }
+        Write-Log ("winsat! {0}" -f $e.Data) 'WARN'
+      }
+    })
+
+    if ($proc.Start()) {
       Set-Content -Path $winSatLog -Value "winsat started (pid=$($proc.Id))" -Encoding UTF8
       Write-Log "winsat pid=$($proc.Id)"
+      $proc.BeginOutputReadLine()
+      $proc.BeginErrorReadLine()
       $startAt = Get-Date
       $nextUpdate = $startAt.AddSeconds(30)
       $lastCpu = $proc.TotalProcessorTime.TotalSeconds
-      $lastLogWrite = if ($winSatSystemLog) { (Get-Item $winSatSystemLog).LastWriteTimeUtc } else { $null }
+      $lastLogWrite = (Get-Item $winSatLog).LastWriteTimeUtc
+      $lastActivity = $startAt
       $timeoutSec = if ($WinSatTimeoutSec -gt 0) { $WinSatTimeoutSec } else { 0 }
+      $idleTimeoutSec = if ($WinSatIdleTimeoutSec -gt 0) { $WinSatIdleTimeoutSec } else { 0 }
+
       while (-not $proc.HasExited) {
         Start-Sleep -Seconds 2
         $elapsed = [int]((Get-Date) - $startAt).TotalSeconds
         if ($timeoutSec -gt 0 -and $elapsed -ge $timeoutSec) {
           $proc.Kill()
-          Set-Content -Path $winSatLog -Value 'winsat timeout' -Encoding UTF8
+          Add-Content -Path $winSatLog -Value 'winsat timeout'
           Write-Log "winsat timeout after ${WinSatTimeoutSec}s" 'WARN'
           break
         }
@@ -375,19 +404,28 @@ if (-not $SkipWinSat) {
           $lastCpu = $cpuNow
           $wsMb = [math]::Round(($proc.WorkingSet64 / 1MB), 1)
           $logTouched = $false
-          if ($winSatSystemLog) {
-            $currentLogWrite = (Get-Item $winSatSystemLog).LastWriteTimeUtc
-            if ($lastLogWrite -and $currentLogWrite -gt $lastLogWrite) { $logTouched = $true }
-            $lastLogWrite = $currentLogWrite
+          $currentLogWrite = (Get-Item $winSatLog).LastWriteTimeUtc
+          if ($currentLogWrite -gt $lastLogWrite) { $logTouched = $true }
+          $lastLogWrite = $currentLogWrite
+          if ($cpuDelta -gt 0 -or $logTouched -or $script:lastWinSatOutput -gt $lastActivity) {
+            $lastActivity = Get-Date
           }
-          Write-Log ("winsat still running ({0}s, xml_present={1}, cpu_delta={2}s, ws={3}MB, log_touched={4})" -f $elapsed, $xmlPresent, $cpuDelta, $wsMb, $logTouched)
+          $idleSec = [int]((Get-Date) - $lastActivity).TotalSeconds
+          Write-Log ("winsat still running ({0}s, xml_present={1}, cpu_delta={2}s, ws={3}MB, log_touched={4}, idle={5}s)" -f $elapsed, $xmlPresent, $cpuDelta, $wsMb, $logTouched, $idleSec)
+          if ($idleTimeoutSec -gt 0 -and $idleSec -ge $idleTimeoutSec) {
+            $proc.Kill()
+            Add-Content -Path $winSatLog -Value "winsat idle timeout (${idleSec}s)"
+            Write-Log "winsat idle timeout after ${idleSec}s" 'WARN'
+            break
+          }
           $nextUpdate = (Get-Date).AddSeconds(30)
         }
       }
+      $proc.WaitForExit()
+      try { $proc.CancelOutputReadLine() } catch { }
+      try { $proc.CancelErrorReadLine() } catch { }
       if ($proc.HasExited) {
-        $output = $proc.StandardOutput.ReadToEnd() + "`n" + $proc.StandardError.ReadToEnd()
-        Set-Content -Path $winSatLog -Value $output -Encoding UTF8
-        Write-Log 'winsat done.'
+        Write-Log ("winsat done (exit_code={0})." -f $proc.ExitCode)
       }
     }
   } catch {
