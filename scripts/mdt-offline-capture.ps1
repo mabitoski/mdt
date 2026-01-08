@@ -4,7 +4,7 @@ param(
   [ValidateSet('auto', 'laptop', 'desktop', 'unknown')][string]$Category = 'auto',
   [string]$Technician,
   [switch]$SkipWinSat,
-  [int]$WinSatIdleTimeoutSec = 180,
+  [int]$WinSatIdleTimeoutSec = 0,
   [switch]$SkipDxDiag,
   [switch]$SkipMsinfo,
   [switch]$SkipBatteryReport,
