@@ -1,4 +1,4 @@
-<#
+﻿<#
 Keyboard capture script for Windows (PowerShell 5+, Win10/11).
 Captures global key events via a low-level keyboard hook (user32.dll) and logs
 them to a JSONL file plus console.

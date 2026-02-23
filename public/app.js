@@ -1,9 +1,28 @@
+const isLegacyView = Boolean(
+  (typeof window !== 'undefined' && window.__LEGACY_VIEW__) ||
+  (typeof document !== 'undefined' &&
+    document.body &&
+    document.body.dataset &&
+    document.body.dataset.view === 'legacy') ||
+  (typeof window !== 'undefined' && window.location && window.location.pathname.includes('legacy'))
+);
+const storageSuffix = isLegacyView ? '-legacy' : '';
+
+const legacyMode = isLegacyView ? 'legacy' : 'current';
+
 const state = {
   machines: [],
+  tags: [],
+  activeTagId: null,
+  stats: null,
+  techOptions: [],
   filter: 'all',
   techFilter: 'all',
+  tagFilter: [],
+  tagFilterNames: [],
   componentFilter: 'all',
   commentFilter: 'all',
+  dateFilter: 'all',
   quickFilter: null,
   activeToken: null,
   quickCommentId: null,
@@ -11,36 +30,116 @@ const state = {
   sort: 'lastSeen',
   layout: '3',
   expandedId: null,
+  detailOverrideId: null,
   details: {},
-  lastUpdated: null
+  lastUpdated: null,
+  canDeleteReport: false,
+  canEditTags: false,
+  pageSize: 24,
+  pageStart: 0,
+  pages: [],
+  hasMore: true,
+  isLoadingPage: false,
+  maxPages: 4,
+  loadedOffsets: new Set(),
+  totalCount: null,
+  lastScrollY: 0,
+  scrollDirection: 'down',
+  lastLoadScrollY: 0,
+  virtualRowHeight: 260,
+  virtualOverscanRows: 2,
+  virtualRange: { start: 0, end: 0 },
+  virtualCalibrated: false,
+  rowHeights: new Map(),
+  rowHeightAdjustTotal: 0,
+  rowHeightsSorted: [],
+  rowHeightsPrefix: [],
+  rowHeightsDirty: false,
+  rowMeasureRaf: null,
+  scrollIdleTimer: null,
+  lastScrollEventAt: 0,
+  pendingOffsets: [],
+  pendingOffsetSet: new Set(),
+  skipAnchorRestore: false,
+  listCacheKey: '',
+  listCache: [],
+  legacyOnly: isLegacyView,
+  legacyMode,
+  scrollHold: null,
+  scrollHoldRaf: null,
+  scrollAnchorHold: null,
+  scrollAnchorHoldRaf: null
 };
 
 const listEl = document.getElementById('machine-list');
+const listScroll = document.getElementById('list-scroll');
 const searchInput = document.getElementById('search-input');
+const searchWrap = document.getElementById('search-wrap');
+const searchToggle = document.querySelector('.search-toggle');
 const refreshBtn = document.getElementById('refresh-btn');
+const reportZeroBtn = document.getElementById('report-zero-btn');
+const reportZeroModal = document.getElementById('report-zero-modal');
+const reportZeroForm = document.getElementById('report-zero-form');
+const reportZeroError = document.getElementById('report-zero-error');
+const reportZeroSubmit = document.getElementById('report-zero-submit');
+const suggestionBtn = document.getElementById('suggestion-btn');
+const suggestionModal = document.getElementById('suggestion-modal');
+const suggestionListEl = document.getElementById('suggestion-list');
+const suggestionEmptyEl = document.getElementById('suggestion-empty');
+const suggestionAddBtn = document.getElementById('suggestion-add-btn');
+const suggestionForm = document.getElementById('suggestion-form');
+const suggestionTitleInput = document.getElementById('suggestion-title-input');
+const suggestionBodyInput = document.getElementById('suggestion-body-input');
+const suggestionSubmitBtn = document.getElementById('suggestion-submit');
+const suggestionCancelBtn = document.getElementById('suggestion-cancel');
+const suggestionError = document.getElementById('suggestion-error');
+const suggestionCloseButtons = suggestionModal
+  ? suggestionModal.querySelectorAll('[data-action="close-suggestions"]')
+  : [];
+const technicianOptionsEl = document.getElementById('technician-options');
+const patchnoteModal = document.getElementById('patchnote-modal');
+const patchnoteBodyEl = document.getElementById('patchnote-body');
+const patchnoteOkBtn = document.getElementById('patchnote-ok');
+const reportZeroCloseButtons = reportZeroModal
+  ? reportZeroModal.querySelectorAll('[data-action="close-report-zero"]')
+  : [];
 const lastUpdatedEl = document.getElementById('last-updated');
-const sortSelect = document.getElementById('sort-select');
 const statTotal = document.getElementById('stat-total');
 const statLaptop = document.getElementById('stat-laptop');
 const statDesktop = document.getElementById('stat-desktop');
 const statUnknown = document.getElementById('stat-unknown');
-const categoryFilterButtons = document.querySelectorAll('.category-filter-btn');
+const statFilterCards = document.querySelectorAll('.stat-card[data-filter]');
+const statTotalCard = document.getElementById('stat-total-card');
+const statTimeLabel = document.getElementById('stat-time-label');
 const techFiltersEl = document.getElementById('tech-filters');
+const tagFiltersEl = document.getElementById('tag-filters');
 const layoutButtons = document.querySelectorAll('.layout-btn');
 const testFilterButtons = document.querySelectorAll('.test-filter-btn');
 const commentFilterButtons = document.querySelectorAll('.comment-filter-btn');
+const testFiltersEl = document.querySelector('.test-filters');
+const commentFiltersEl = document.querySelector('.comment-filters');
 const adminLink = document.getElementById('admin-link');
 const commentTimers = new Map();
+let activePatchnoteId = null;
+let infiniteObserver = null;
+let topObserver = null;
+let searchTimer = null;
+let virtualRenderRaf = null;
+let suggestionCache = [];
 
 const categoryLabels = {
   laptop: 'Portable',
   desktop: 'Tour',
   unknown: 'Inconnu'
 };
+const categoryCycle = ['desktop', 'unknown', 'laptop'];
+const DEFAULT_TAG_LABEL = 'En cours';
 
 const statusLabels = {
   ok: 'OK',
   nok: 'NOK',
+  fr: 'FR',
+  en: 'EN',
   absent: 'Non present',
   not_tested: 'Non teste',
   denied: 'Refuse',
@@ -48,6 +147,7 @@ const statusLabels = {
   scheduled: 'Planifie',
   unknown: '--'
 };
+const statusCycle = ['not_tested', 'ok', 'nok'];
 
 const componentLabels = {
   diskReadTest: 'Lecture disque',
@@ -64,7 +164,10 @@ const componentLabels = {
   keyboard: 'Clavier',
   camera: 'Camera',
   pad: 'Pave tactile',
-  badgeReader: 'Lecteur badge'
+  badgeReader: 'Lecteur badge',
+  biosBattery: 'Pile BIOS',
+  biosLanguage: 'Langue BIOS',
+  biosPassword: 'Mot de passe BIOS'
 };
 
 const componentOrder = [
@@ -82,8 +185,15 @@ const componentOrder = [
   'keyboard',
   'camera',
   'pad',
-  'badgeReader'
+  'badgeReader',
+  'biosBattery',
+  'biosLanguage',
+  'biosPassword'
 ];
+const componentStatusCycles = {
+  biosLanguage: ['not_tested', 'fr', 'en'],
+  biosPassword: ['not_tested', 'ok', 'nok']
+};
 
 const hiddenComponents = new Set(['diskSmart', 'networkTest', 'memDiag', 'thermal']);
 
@@ -101,10 +211,790 @@ const delayClasses = [
 ];
 
 const layoutOptions = new Set(['1', '2', '3', '6']);
-const layoutStorageKey = 'mdt-layout';
+const layoutStorageKey = `mdt-layout${storageSuffix}`;
 const storedLayout = window.localStorage ? localStorage.getItem(layoutStorageKey) : null;
 if (storedLayout && layoutOptions.has(storedLayout)) {
   state.layout = storedLayout;
+}
+const dateFilterOrder = ['all', 'today', 'week'];
+const dateFilterLabels = {
+  all: 'Tous',
+  today: "Aujourd'hui",
+  week: 'Cette semaine'
+};
+
+const prefsStorageKey = `mdt-ui-preferences${storageSuffix}`;
+const tagFilterStorageKey = `mdt-tag-filter${storageSuffix}`;
+const tagFilterNameStorageKey = `mdt-tag-filter-names${storageSuffix}`;
+const categoryFilterOptions = new Set(['all', 'laptop', 'desktop', 'unknown']);
+const commentFilterOptions = new Set(['all', 'with', 'without']);
+const quickFilterTypes = new Set(['serial', 'mac', 'tech', 'summary']);
+const summaryFilterValues = new Set(['ok', 'nok', 'nt']);
+const componentFilterOptions = new Set(
+  ['all', ...Array.from(testFilterButtons).map((btn) => btn.dataset.component).filter(Boolean)]
+);
+const listSentinel = document.getElementById('scroll-sentinel');
+const listTopSentinel = document.getElementById('scroll-top-sentinel');
+
+applyPreferences();
+if (searchInput) {
+  searchInput.value = state.search;
+}
+updateSearchCollapse();
+
+function loadPreferences() {
+  if (!window.localStorage) {
+    return null;
+  }
+  try {
+    const raw = localStorage.getItem(prefsStorageKey);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function savePreferences() {
+  if (!window.localStorage) {
+    return;
+  }
+  const tagNames = Array.isArray(state.tagFilter)
+    ? state.tagFilter
+        .map((id) => {
+          const match = Array.isArray(state.tags)
+            ? state.tags.find((tag) => normalizeTagId(tag.id || '') === normalizeTagId(id))
+            : null;
+          return match && match.name ? String(match.name) : null;
+        })
+        .filter(Boolean)
+    : [];
+  const payload = {
+    filter: state.filter,
+    techFilter: state.techFilter,
+    tagFilter: Array.isArray(state.tagFilter) ? state.tagFilter : [],
+    tagFilterNames: tagNames,
+    componentFilter: state.componentFilter,
+    commentFilter: state.commentFilter,
+    dateFilter: state.dateFilter,
+    search: state.search,
+    quickFilter: state.quickFilter
+  };
+  try {
+    localStorage.setItem(prefsStorageKey, JSON.stringify(payload));
+    localStorage.setItem(tagFilterStorageKey, JSON.stringify(payload.tagFilter));
+    localStorage.setItem(tagFilterNameStorageKey, JSON.stringify(payload.tagFilterNames));
+  } catch (error) {
+    // Ignore storage errors.
+  }
+}
+
+function applyPreferences() {
+  const prefs = loadPreferences();
+  if (!prefs || typeof prefs !== 'object') {
+    return;
+  }
+  if (categoryFilterOptions.has(prefs.filter)) {
+    state.filter = prefs.filter;
+  }
+  if (typeof prefs.techFilter === 'string' && prefs.techFilter) {
+    state.techFilter = prefs.techFilter;
+  }
+  if (Array.isArray(prefs.tagFilter)) {
+    state.tagFilter = prefs.tagFilter
+      .map((value) => normalizeTagId(value))
+      .filter(Boolean);
+  }
+  if (Array.isArray(prefs.tagFilterNames)) {
+    state.tagFilterNames = prefs.tagFilterNames;
+  } else if (typeof prefs.tagFilter === 'string' && prefs.tagFilter && prefs.tagFilter !== 'all') {
+    const normalized = normalizeTagId(prefs.tagFilter);
+    state.tagFilter = normalized ? [normalized] : [];
+  } else if (window.localStorage) {
+    try {
+      const raw = localStorage.getItem(tagFilterStorageKey);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed)) {
+        state.tagFilter = parsed.map((value) => normalizeTagId(value)).filter(Boolean);
+      }
+      const rawNames = localStorage.getItem(tagFilterNameStorageKey);
+      const parsedNames = rawNames ? JSON.parse(rawNames) : null;
+      if (Array.isArray(parsedNames)) {
+        state.tagFilterNames = parsedNames;
+      }
+    } catch (error) {
+      // Ignore storage errors.
+    }
+  }
+  if (componentFilterOptions.has(prefs.componentFilter)) {
+    state.componentFilter = prefs.componentFilter;
+  }
+  if (commentFilterOptions.has(prefs.commentFilter)) {
+    state.commentFilter = prefs.commentFilter;
+  }
+  if (dateFilterOrder.includes(prefs.dateFilter)) {
+    state.dateFilter = prefs.dateFilter;
+  }
+  if (typeof prefs.search === 'string') {
+    state.search = prefs.search;
+  }
+  if (
+    prefs.quickFilter &&
+    quickFilterTypes.has(prefs.quickFilter.type) &&
+    typeof prefs.quickFilter.value === 'string'
+  ) {
+    if (
+      prefs.quickFilter.type !== 'summary' ||
+      summaryFilterValues.has(prefs.quickFilter.value)
+    ) {
+      state.quickFilter = {
+        type: prefs.quickFilter.type,
+        value: prefs.quickFilter.value
+      };
+    }
+  }
+}
+
+function buildQueryParams({ includeCategory = true, includeTech = true } = {}) {
+  const params = new URLSearchParams();
+  if (includeTech && state.techFilter !== 'all') {
+    params.set('tech', state.techFilter);
+  }
+  if (Array.isArray(state.tagFilter) && state.tagFilter.length > 0) {
+    params.set('tags', state.tagFilter.join(','));
+  }
+  if (state.legacyMode === 'legacy') {
+    params.set('legacy', '1');
+  } else if (state.legacyMode === 'current') {
+    params.set('legacy', '0');
+    params.set('latest', '1');
+  }
+  if (state.dateFilter && state.dateFilter !== 'all') {
+    params.set('date', state.dateFilter);
+  }
+  if (state.commentFilter && state.commentFilter !== 'all') {
+    params.set('comment', state.commentFilter);
+  }
+  if (state.componentFilter && state.componentFilter !== 'all') {
+    params.set('component', state.componentFilter);
+  }
+  if (includeCategory && state.filter && state.filter !== 'all') {
+    params.set('category', state.filter);
+  }
+  if (state.search && state.search.trim()) {
+    params.set('search', state.search.trim());
+  }
+  return params;
+}
+
+function resetPagination() {
+  state.pageStart = 0;
+  state.pages = [];
+  state.hasMore = true;
+  state.isLoadingPage = false;
+  state.machines = [];
+  state.details = {};
+  state.expandedId = null;
+  state.detailOverrideId = null;
+  state.quickCommentId = null;
+  state.loadedOffsets = new Set();
+  state.totalCount = null;
+  state.lastLoadScrollY = 0;
+  state.listCacheKey = '';
+  state.listCache = [];
+  state.virtualRange = { start: 0, end: 0 };
+  state.virtualCalibrated = false;
+  state.rowHeights = new Map();
+  state.rowHeightAdjustTotal = 0;
+  state.rowHeightsSorted = [];
+  state.rowHeightsPrefix = [];
+  state.rowHeightsDirty = false;
+  if (state.rowMeasureRaf) {
+    window.cancelAnimationFrame(state.rowMeasureRaf);
+    state.rowMeasureRaf = null;
+  }
+  if (state.scrollIdleTimer) {
+    window.clearTimeout(state.scrollIdleTimer);
+    state.scrollIdleTimer = null;
+  }
+  state.lastScrollEventAt = 0;
+  state.pendingOffsets = [];
+  state.pendingOffsetSet = new Set();
+}
+
+function syncMachinesFromPages() {
+  const ordered = [...state.pages].sort((a, b) => a.offset - b.offset);
+  const machines = [];
+  ordered.forEach((page) => {
+    page.items.forEach((item) => {
+      machines.push(item);
+    });
+  });
+  state.machines = machines;
+  state.listCacheKey = '';
+  state.listCache = [];
+}
+
+function rebuildRowHeightIndex() {
+  if (!state.rowHeightsDirty) {
+    return;
+  }
+  const entries = Array.from(state.rowHeights.entries()).sort((a, b) => a[0] - b[0]);
+  const base = Math.max(140, state.virtualRowHeight || 260);
+  let running = 0;
+  state.rowHeightsSorted = entries;
+  state.rowHeightsPrefix = entries.map((entry) => {
+    running += entry[1] - base;
+    return running;
+  });
+  state.rowHeightsDirty = false;
+}
+
+function updateRowHeight(rowIndex, height) {
+  const base = Math.max(140, state.virtualRowHeight || 260);
+  if (!Number.isFinite(rowIndex) || rowIndex < 0 || !Number.isFinite(height) || height <= 0) {
+    return false;
+  }
+  const rounded = Math.max(140, Math.round(height));
+  const prev = state.rowHeights.get(rowIndex);
+  if (prev && Math.abs(prev - rounded) <= 2) {
+    return false;
+  }
+  state.rowHeights.set(rowIndex, rounded);
+  const prevDelta = prev ? prev - base : 0;
+  state.rowHeightAdjustTotal += rounded - base - prevDelta;
+  state.rowHeightsDirty = true;
+  return true;
+}
+
+function getRowDeltaPrefix(index) {
+  rebuildRowHeightIndex();
+  if (!state.rowHeightsSorted.length) {
+    return 0;
+  }
+  let low = 0;
+  let high = state.rowHeightsSorted.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (state.rowHeightsSorted[mid][0] < index) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low > 0 ? state.rowHeightsPrefix[low - 1] : 0;
+}
+
+function getRowOffset(rowIndex) {
+  const base = Math.max(140, state.virtualRowHeight || 260);
+  if (!Number.isFinite(rowIndex) || rowIndex <= 0) {
+    return 0;
+  }
+  return rowIndex * base + getRowDeltaPrefix(rowIndex);
+}
+
+function getTotalHeight(totalRows) {
+  const base = Math.max(140, state.virtualRowHeight || 260);
+  return totalRows * base + state.rowHeightAdjustTotal;
+}
+
+function findRowForOffset(offset, totalRows) {
+  let low = 0;
+  let high = totalRows;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (getRowOffset(mid + 1) <= offset) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return Math.min(totalRows, Math.max(0, low));
+}
+
+function getColumnCount() {
+  if (!listEl) {
+    return Number.parseInt(state.layout, 10) || 1;
+  }
+  const style = window.getComputedStyle(listEl);
+  const template = style.getPropertyValue('grid-template-columns');
+  if (template && template !== 'none') {
+    const count = template.split(' ').filter(Boolean).length;
+    if (count) {
+      return count;
+    }
+  }
+  return Number.parseInt(state.layout, 10) || 1;
+}
+
+function scheduleVirtualRender() {
+  if (virtualRenderRaf) {
+    return;
+  }
+  virtualRenderRaf = window.requestAnimationFrame(() => {
+    virtualRenderRaf = null;
+    renderList(true);
+  });
+}
+
+function getScrollTop() {
+  return listScroll ? listScroll.scrollTop : window.scrollY || 0;
+}
+
+function holdScrollTop(renders = 2, skipAnchor = true) {
+  const top = getScrollTop();
+  state.scrollHold = {
+    top,
+    remaining: Math.max(1, Number.parseInt(renders, 10) || 1)
+  };
+  state.skipAnchorRestore = Boolean(skipAnchor);
+}
+
+function scheduleScrollHoldAdjustment() {
+  if (!state.scrollHold || state.scrollHoldRaf) {
+    return;
+  }
+  const tick = () => {
+    if (!state.scrollHold) {
+      state.scrollHoldRaf = null;
+      return;
+    }
+    const remaining = state.scrollHold.remaining || 0;
+    if (remaining > 0) {
+      setScrollTop(state.scrollHold.top);
+      state.scrollHold.remaining = remaining - 1;
+    }
+    if (state.scrollHold.remaining <= 0) {
+      state.scrollHold = null;
+      state.scrollHoldRaf = null;
+      return;
+    }
+    state.scrollHoldRaf = window.setTimeout(tick, 120);
+  };
+  state.scrollHoldRaf = window.setTimeout(tick, 80);
+}
+
+function scheduleAnchorHoldAdjustment() {
+  if (!state.scrollAnchorHold || state.scrollAnchorHoldRaf) {
+    return;
+  }
+  state.scrollAnchorHoldRaf = window.requestAnimationFrame(() => {
+    state.scrollAnchorHoldRaf = null;
+    window.requestAnimationFrame(() => {
+      if (!state.scrollAnchorHold) {
+        return;
+      }
+      if (Date.now() > (state.scrollAnchorHold.until || 0)) {
+        state.scrollAnchorHold = null;
+        return;
+      }
+      restoreScrollAnchor({
+        id: state.scrollAnchorHold.id,
+        top: state.scrollAnchorHold.top
+      });
+    });
+  });
+}
+
+function holdCardAnchor(targetId, durationMs = 1800) {
+  if (!listEl || !targetId) {
+    return;
+  }
+  const safeId = window.CSS && CSS.escape ? CSS.escape(targetId) : String(targetId).replace(/"/g, '\\"');
+  const card = listEl.querySelector(`.machine-card[data-id="${safeId}"]`);
+  if (!card) {
+    return;
+  }
+  const containerTop = getScrollContainerTop();
+  const rect = card.getBoundingClientRect();
+  const ttl = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 1800;
+  state.scrollAnchorHold = {
+    id: targetId,
+    top: rect.top - containerTop,
+    until: Date.now() + ttl
+  };
+}
+
+function getViewportHeight() {
+  return listScroll ? listScroll.clientHeight : window.innerHeight;
+}
+
+function getScrollContainerTop() {
+  if (listScroll) {
+    return listScroll.getBoundingClientRect().top;
+  }
+  return 0;
+}
+
+function getListOffsetTop() {
+  if (!listEl) {
+    return 0;
+  }
+  if (listScroll) {
+    return listEl.offsetTop;
+  }
+  return listEl.getBoundingClientRect().top + (window.scrollY || 0);
+}
+
+function adjustScrollBy(delta) {
+  if (!delta || !Number.isFinite(delta)) {
+    return;
+  }
+  if (listScroll) {
+    listScroll.scrollTop += delta;
+  } else {
+    window.scrollBy(0, delta);
+  }
+}
+
+function setScrollTop(value) {
+  if (!Number.isFinite(value)) {
+    return;
+  }
+  if (listScroll) {
+    listScroll.scrollTop = value;
+  } else {
+    window.scrollTo({ top: value });
+  }
+}
+
+function captureScrollAnchor() {
+  if (!listEl) {
+    return null;
+  }
+  const containerTop = getScrollContainerTop();
+  const cards = listEl.querySelectorAll('.machine-card:not(.is-placeholder)');
+  if (!cards.length) {
+    return null;
+  }
+  let anchor = null;
+  cards.forEach((card) => {
+    if (anchor) {
+      return;
+    }
+    const rect = card.getBoundingClientRect();
+    const relativeTop = rect.top - containerTop;
+    if (relativeTop >= -20) {
+      anchor = {
+        id: card.dataset.id || '',
+        index: card.dataset.index || '',
+        top: relativeTop
+      };
+    }
+  });
+  if (!anchor) {
+    const first = cards[0];
+    const rect = first.getBoundingClientRect();
+    anchor = {
+      id: first.dataset.id || '',
+      index: first.dataset.index || '',
+      top: rect.top - containerTop
+    };
+  }
+  return anchor;
+}
+
+function restoreScrollAnchor(anchor) {
+  if (!anchor || !listEl) {
+    return;
+  }
+  let selector = '';
+  if (anchor.id) {
+    const safeId = window.CSS && CSS.escape ? CSS.escape(anchor.id) : anchor.id.replace(/"/g, '\\"');
+    selector = `.machine-card[data-id="${safeId}"]`;
+  }
+  let target = selector ? listEl.querySelector(selector) : null;
+  if (!target && anchor.index) {
+    const safeIndex = anchor.index.replace(/"/g, '\\"');
+    target = listEl.querySelector(`.machine-card[data-index="${safeIndex}"]`);
+  }
+  if (!target) {
+    return;
+  }
+  const containerTop = getScrollContainerTop();
+  const rect = target.getBoundingClientRect();
+  const newTop = rect.top - containerTop;
+  const delta = newTop - anchor.top;
+  if (Math.abs(delta) > 1) {
+    adjustScrollBy(delta);
+  }
+}
+
+function invalidateListCache() {
+  state.listCacheKey = '';
+  state.listCache = [];
+}
+
+function dropCachedDetails(items = []) {
+  if (!items.length) {
+    return;
+  }
+  items.forEach((item) => {
+    if (!item || !item.id) {
+      return;
+    }
+    const id = String(item.id);
+    if (state.details[id]) {
+      delete state.details[id];
+    }
+    if (state.expandedId === id) {
+      state.expandedId = null;
+    }
+    if (state.quickCommentId === id) {
+      state.quickCommentId = null;
+    }
+  });
+}
+
+function trimPagesAround(centerOffset) {
+  if (state.pages.length <= state.maxPages) {
+    return;
+  }
+  const center = Number.isFinite(centerOffset) ? centerOffset : 0;
+  state.pages.sort((a, b) => a.offset - b.offset);
+  while (state.pages.length > state.maxPages) {
+    const first = state.pages[0];
+    const last = state.pages[state.pages.length - 1];
+    const distanceFirst = Math.abs(center - first.offset);
+    const distanceLast = Math.abs(center - last.offset);
+    const removed = distanceFirst >= distanceLast ? state.pages.shift() : state.pages.pop();
+    if (removed) {
+      dropCachedDetails(removed.items);
+      if (state.loadedOffsets) {
+        state.loadedOffsets.delete(removed.offset);
+      }
+    }
+  }
+}
+
+async function loadStats() {
+  try {
+    const params = buildQueryParams({ includeCategory: false, includeTech: true });
+    const response = await fetch(`/api/stats?${params.toString()}`);
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('stats_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('stats_failed');
+    }
+    state.stats = {
+      total: data.total || 0,
+      laptop: data.laptop || 0,
+      desktop: data.desktop || 0,
+      unknown: data.unknown || 0
+    };
+    state.techOptions = Array.isArray(data.techs) ? data.techs : [];
+    renderTechFilters();
+  } catch (error) {
+    state.stats = null;
+    state.techOptions = [];
+  }
+  updateStats();
+}
+
+async function loadMeta() {
+  try {
+    const params = new URLSearchParams();
+    params.set('meta', '1');
+    if (state.legacyMode === 'legacy') {
+      params.set('legacy', '1');
+    } else if (state.legacyMode === 'current') {
+      params.set('legacy', '0');
+    }
+    const response = await fetch(`/api/machines?${params.toString()}`);
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('meta_failed');
+    }
+    const data = await response.json();
+    state.tags = Array.isArray(data.tags) ? data.tags : [];
+    state.activeTagId = data.activeTagId ? normalizeTagId(data.activeTagId) : null;
+    if (data.permissions && typeof data.permissions.canDeleteReport === 'boolean') {
+      state.canDeleteReport = data.permissions.canDeleteReport;
+    }
+    if (data.permissions && typeof data.permissions.canEditTags === 'boolean') {
+      state.canEditTags = data.permissions.canEditTags;
+    }
+    hydrateTagFilterFromNames();
+    renderTagFilters();
+    renderTechFilters();
+  } catch (error) {
+    // ignore
+  }
+}
+
+function getPageForOffset(offset) {
+  if (!state.pages.length) {
+    return null;
+  }
+  return state.pages.find((page) => page.offset === offset) || null;
+}
+
+function getItemAtIndex(index) {
+  const pageSize = state.pageSize;
+  if (!Number.isFinite(index) || index < 0) {
+    return null;
+  }
+  const pageOffset = Math.floor(index / pageSize) * pageSize;
+  const page = getPageForOffset(pageOffset);
+  if (!page) {
+    return null;
+  }
+  return page.items[index - pageOffset] || null;
+}
+
+function queueOffset(offset) {
+  if (!Number.isFinite(offset) || offset < 0) {
+    return;
+  }
+  if (state.loadedOffsets.has(offset) || state.pendingOffsetSet.has(offset)) {
+    return;
+  }
+  state.pendingOffsets.push(offset);
+  state.pendingOffsetSet.add(offset);
+}
+
+function pumpOffsetQueue() {
+  if (state.isLoadingPage) {
+    return;
+  }
+  if (!state.pendingOffsets.length) {
+    return;
+  }
+  const next = state.pendingOffsets.shift();
+  state.pendingOffsetSet.delete(next);
+  loadReportsPage(next);
+}
+
+function ensurePagesForRange(startIndex, endIndex) {
+  const pageSize = state.pageSize;
+  const totalCount = Number.isFinite(state.totalCount) ? state.totalCount : null;
+  const maxPage = totalCount != null ? Math.max(0, Math.ceil(totalCount / pageSize) - 1) : null;
+  const startPage = Math.max(0, Math.floor(startIndex / pageSize) - 1);
+  const endPage = Math.floor(Math.max(startIndex, endIndex - 1) / pageSize) + 1;
+  const upperBound = maxPage != null ? Math.min(endPage, maxPage) : endPage;
+  for (let pageIndex = startPage; pageIndex <= upperBound; pageIndex += 1) {
+    const offset = pageIndex * pageSize;
+    queueOffset(offset);
+  }
+  pumpOffsetQueue();
+}
+
+async function loadReportsPage(offset) {
+  if (state.isLoadingPage) {
+    return;
+  }
+  if (!Number.isFinite(offset) || offset < 0) {
+    return;
+  }
+  if (state.loadedOffsets && state.loadedOffsets.has(offset)) {
+    return;
+  }
+  state.isLoadingPage = true;
+  try {
+    const params = buildQueryParams({ includeCategory: true });
+    params.set('limit', String(state.pageSize));
+    params.set('offset', String(offset));
+    if (!Number.isFinite(state.totalCount)) {
+      params.set('includeTotal', '1');
+    }
+    const response = await fetch(`/api/reports?${params.toString()}`);
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('fetch_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('fetch_failed');
+    }
+    if (data.total != null) {
+      const totalValue = Number.parseInt(data.total, 10);
+      if (Number.isFinite(totalValue)) {
+        state.totalCount = totalValue;
+      }
+    }
+    const items = Array.isArray(data.machines) ? data.machines : [];
+    items.forEach((item) => {
+      item._page = offset;
+    });
+    state.pages.push({ offset, items });
+    state.pages.sort((a, b) => a.offset - b.offset);
+    state.pageStart = state.pages.length ? state.pages[0].offset : 0;
+    if (Number.isFinite(state.totalCount)) {
+      state.hasMore = offset + items.length < state.totalCount;
+    } else {
+      state.hasMore = Boolean(data.hasMore);
+    }
+    if (state.loadedOffsets) {
+      state.loadedOffsets.add(offset);
+    }
+    trimPagesAround(offset);
+    state.pageStart = state.pages.length ? state.pages[0].offset : 0;
+    syncMachinesFromPages();
+    renderList();
+    updateLastUpdated();
+    state.lastLoadScrollY = getScrollTop();
+  } catch (error) {
+    listEl.innerHTML = '<div class="empty">Erreur lors du chargement.</div>';
+  } finally {
+    state.isLoadingPage = false;
+    pumpOffsetQueue();
+  }
+}
+
+async function reloadReports() {
+  listEl.innerHTML = '<div class="loading">Chargement des postes...</div>';
+  resetPagination();
+  state.skipAnchorRestore = true;
+  if (listScroll) {
+    listScroll.scrollTop = 0;
+  } else {
+    window.scrollTo({ top: 0 });
+  }
+  await Promise.all([loadStats(), loadReportsPage(0)]);
+  renderTagFilters();
+  renderTechnicianOptions();
+  updateCommentFilterButtons();
+}
+
+function initInfiniteScroll() {
+  state.lastScrollY = getScrollTop();
+  state.scrollDirection = 'down';
+  const scrollTarget = listScroll || window;
+  scrollTarget.addEventListener(
+    'scroll',
+    () => {
+      const current = getScrollTop();
+      state.scrollDirection = current >= state.lastScrollY ? 'down' : 'up';
+      state.lastScrollY = current;
+      state.lastScrollEventAt = Date.now();
+      if (state.scrollIdleTimer) {
+        window.clearTimeout(state.scrollIdleTimer);
+      }
+      state.scrollIdleTimer = window.setTimeout(() => {
+        scheduleVirtualRender();
+      }, 160);
+      scheduleVirtualRender();
+    },
+    { passive: true }
+  );
+  window.addEventListener(
+    'resize',
+    () => {
+      scheduleVirtualRender();
+    },
+    { passive: true }
+  );
 }
 
 function applyLayout() {
@@ -113,6 +1003,11 @@ function applyLayout() {
   }
   listEl.classList.remove('columns-1', 'columns-2', 'columns-3', 'columns-6');
   listEl.classList.add(`columns-${state.layout}`);
+  state.rowHeights = new Map();
+  state.rowHeightAdjustTotal = 0;
+  state.rowHeightsSorted = [];
+  state.rowHeightsPrefix = [];
+  state.rowHeightsDirty = false;
 }
 
 function updateLayoutButtons() {
@@ -130,6 +1025,9 @@ function updateTestFilterButtons() {
   if (!testFilterButtons.length) {
     return;
   }
+  if (testFiltersEl) {
+    testFiltersEl.classList.toggle('is-all', state.componentFilter === 'all');
+  }
   testFilterButtons.forEach((btn) => {
     const active = btn.dataset.component === state.componentFilter;
     btn.classList.toggle('active', active);
@@ -141,18 +1039,104 @@ function normalizeTech(value) {
   if (!value) {
     return '';
   }
-  return String(value).trim();
+  return String(value).trim().replace(/\s+/g, ' ');
 }
 
 function techKey(value) {
   const normalized = normalizeTech(value);
-  return normalized ? normalized.toLowerCase() : '';
+  if (!normalized) {
+    return '';
+  }
+  return normalized
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function pickTechLabel(labels) {
+  if (!labels || !labels.length) {
+    return '';
+  }
+  const scored = labels
+    .map((label) => {
+      const cleaned = normalizeTech(label);
+      const hasLower = /[a-zà-öø-ÿ]/.test(cleaned);
+      const hasUpper = /[A-ZÀ-ÖØ-ß]/.test(cleaned);
+      const hasDiacritics = cleaned.normalize('NFD') !== cleaned;
+      let score = 0;
+      if (hasUpper && hasLower) {
+        score = 2;
+      } else if (hasLower) {
+        score = 1;
+      }
+      if (hasDiacritics) {
+        score += 2;
+      }
+      return { label: cleaned, score };
+    })
+    .filter((item) => item.label);
+
+  if (!scored.length) {
+    return '';
+  }
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+    return a.label.localeCompare(b.label, 'fr');
+  });
+
+  return scored[0].label;
+}
+
+function normalizeTagId(value) {
+  if (!value) {
+    return '';
+  }
+  return String(value).trim().toLowerCase();
+}
+
+function getTagId(machine) {
+  if (!machine) {
+    return '';
+  }
+  const tagId = normalizeTagId(machine.tagId || '');
+  if (tagId) {
+    return tagId;
+  }
+  return normalizeTagId(state.activeTagId || '');
+}
+
+function getTagLabelById(tagId) {
+  if (!tagId) {
+    return DEFAULT_TAG_LABEL;
+  }
+  const normalized = normalizeTagId(tagId);
+  const match = state.tags.find((tag) => normalizeTagId(tag.id) === normalized);
+  return match && match.name ? match.name : DEFAULT_TAG_LABEL;
+}
+
+function getTagLabel(machine) {
+  if (!machine) {
+    return DEFAULT_TAG_LABEL;
+  }
+  if (machine.tagName) {
+    return String(machine.tagName).trim() || DEFAULT_TAG_LABEL;
+  }
+  const label = machine.tag ? String(machine.tag).trim() : '';
+  if (label) {
+    return label;
+  }
+  const tagId = getTagId(machine);
+  return tagId ? getTagLabelById(tagId) : DEFAULT_TAG_LABEL;
 }
 
 function updateTechFilterButtons() {
   if (!techFiltersEl) {
     return;
   }
+  techFiltersEl.classList.toggle('is-all', state.techFilter === 'all');
   const buttons = techFiltersEl.querySelectorAll('.tech-filter-btn');
   buttons.forEach((btn) => {
     const active = (btn.dataset.tech || 'all') === state.techFilter;
@@ -166,27 +1150,34 @@ function renderTechFilters() {
     return;
   }
   const techMap = new Map();
-  state.machines.forEach((machine) => {
-    const label = normalizeTech(machine.technician);
+  const techSource = Array.isArray(state.techOptions) && state.techOptions.length
+    ? state.techOptions
+    : state.machines.map((machine) => machine.technician);
+  techSource.forEach((tech) => {
+    const label = normalizeTech(tech);
     if (!label) {
       return;
     }
-    const key = label.toLowerCase();
-    if (!techMap.has(key)) {
-      techMap.set(key, label);
+    const key = techKey(label);
+    const entry = techMap.get(key);
+    if (entry) {
+      entry.labels.push(label);
+    } else {
+      techMap.set(key, { key, labels: [label] });
     }
   });
 
-  const techList = Array.from(techMap.entries())
+  const techList = Array.from(techMap.values())
+    .map((entry) => [entry.key, pickTechLabel(entry.labels)])
+    .filter((entry) => entry[1])
     .sort((a, b) => a[1].localeCompare(b[1], 'fr'));
 
   if (state.techFilter !== 'all' && !techMap.has(state.techFilter)) {
     state.techFilter = 'all';
+    savePreferences();
   }
 
-  const buttons = [
-    `<button class="filter-btn tech-filter-btn" data-tech="all" type="button" aria-pressed="false">Tous techs</button>`
-  ];
+  const buttons = [];
   techList.forEach(([key, label]) => {
     buttons.push(
       `<button class="filter-btn tech-filter-btn" data-tech="${escapeHtml(key)}" type="button" aria-pressed="false">${escapeHtml(
@@ -198,9 +1189,279 @@ function renderTechFilters() {
   updateTechFilterButtons();
 }
 
+function updateTagFilterButtons() {
+  if (!tagFiltersEl) {
+    return;
+  }
+  const selected = new Set(Array.isArray(state.tagFilter) ? state.tagFilter : []);
+  tagFiltersEl.classList.toggle('has-selection', selected.size > 0);
+  const toggle = tagFiltersEl.querySelector('.tag-select-toggle');
+  const summary = tagFiltersEl.querySelector('.tag-select-summary');
+  const count = tagFiltersEl.querySelector('.tag-select-count');
+  if (count) {
+    count.textContent = selected.size > 0 ? String(selected.size) : '';
+  }
+  if (toggle) {
+    toggle.setAttribute(
+      'aria-expanded',
+      tagFiltersEl.classList.contains('is-open') ? 'true' : 'false'
+    );
+  }
+  if (summary) {
+    const labels = Array.from(tagFiltersEl.querySelectorAll('.tag-select-input:checked'))
+      .map((input) => {
+        const item = input.closest('.tag-select-item');
+        const label = item ? item.querySelector('.tag-select-label') : null;
+        return label ? label.textContent : '';
+      })
+      .filter(Boolean);
+    summary.textContent = buildTagSummaryFromLabels(labels);
+  }
+}
+
+function renderTagFilters() {
+  if (!tagFiltersEl) {
+    return;
+  }
+  const wasOpen = tagFiltersEl.classList.contains('is-open');
+  let selected = new Set(Array.isArray(state.tagFilter) ? state.tagFilter : []);
+  const tags = Array.isArray(state.tags) ? state.tags : [];
+  const tagList = tags
+    .filter((tag) => {
+      const tagId = normalizeTagId(tag.id || '');
+      if (!tagId) {
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'fr'));
+
+  const validIds = new Set(tagList.map((tag) => normalizeTagId(tag.id || '')));
+  if (selected.size > 0) {
+    const nextSelected = Array.from(selected).filter((id) => validIds.has(id));
+    if (nextSelected.length !== selected.size) {
+      state.tagFilter = nextSelected;
+      selected = new Set(nextSelected);
+      savePreferences();
+    }
+  }
+
+  const items = [];
+  tagList.forEach((tag) => {
+    const tagId = normalizeTagId(tag.id || '');
+    if (!tagId) {
+      return;
+    }
+    const label = tag.name || DEFAULT_TAG_LABEL;
+    const checked = selected.has(tagId);
+    items.push(
+      `
+        <label class="tag-select-item">
+          <input class="tag-select-input" type="checkbox" value="${escapeHtml(tagId)}" ${
+            checked ? 'checked' : ''
+          } />
+          <span class="tag-select-label">${escapeHtml(label)}</span>
+        </label>
+      `
+    );
+  });
+  tagFiltersEl.innerHTML = `
+    <div class="tag-select-header">
+      <button class="tag-select-toggle" type="button" aria-expanded="${wasOpen ? 'true' : 'false'}">
+        Tags
+        <span class="tag-select-count">${selected.size ? selected.size : ''}</span>
+      </button>
+      <span class="tag-select-summary">${buildTagSummary(tagList, selected)}</span>
+    </div>
+    <div class="tag-select-panel">
+      <div class="tag-select-panel-header">
+        <span class="tag-select-title">Selection</span>
+        <button class="tag-select-clear" type="button" data-action="clear-tags">Tout</button>
+      </div>
+      <div class="tag-select-list">
+        ${items.join('')}
+      </div>
+    </div>
+  `;
+  if (wasOpen) {
+    tagFiltersEl.classList.add('is-open');
+  } else {
+    tagFiltersEl.classList.remove('is-open');
+  }
+  updateTagFilterButtons();
+}
+
+function normalizeTagName(value) {
+  if (!value) {
+    return '';
+  }
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\\u0300-\\u036f]/g, '');
+}
+
+function hydrateTagFilterFromNames() {
+  if (!Array.isArray(state.tags) || !state.tags.length) {
+    return;
+  }
+  let names = Array.isArray(state.tagFilterNames) ? state.tagFilterNames : [];
+  if ((!names || !names.length) && window.localStorage) {
+    try {
+      const raw = localStorage.getItem(tagFilterNameStorageKey);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed)) {
+        names = parsed;
+      }
+    } catch (error) {
+      names = [];
+    }
+  }
+  if (!names || !names.length) {
+    return;
+  }
+  const nameMap = new Map();
+  const validIds = new Set();
+  state.tags.forEach((tag) => {
+    const id = normalizeTagId(tag.id || '');
+    if (!id || !tag.name) {
+      return;
+    }
+    validIds.add(id);
+    nameMap.set(normalizeTagName(tag.name), id);
+  });
+  const ids = names
+    .map((name) => nameMap.get(normalizeTagName(name)))
+    .filter(Boolean);
+  if (!ids.length) {
+    return;
+  }
+  const current = Array.isArray(state.tagFilter) ? state.tagFilter : [];
+  const valid = current.filter((id) => validIds.has(normalizeTagId(id)));
+  if (!valid.length || valid.length < ids.length) {
+    state.tagFilter = Array.from(new Set([...valid, ...ids]));
+    savePreferences();
+  }
+}
+
+function buildTagSummary(tagList = [], selected = new Set()) {
+  const selectedLabels = tagList
+    .filter((tag) => selected.has(normalizeTagId(tag.id || '')))
+    .map((tag) => tag.name || DEFAULT_TAG_LABEL);
+  return buildTagSummaryFromLabels(selectedLabels);
+}
+
+function buildTagSummaryFromLabels(labels = []) {
+  if (!labels.length) {
+    return 'Tous';
+  }
+  const shown = labels.slice(0, 2);
+  const extra = labels.length - shown.length;
+  const suffix = extra > 0 ? ` +${extra}` : '';
+  return `${shown.join(', ')}${suffix}`;
+}
+
+function updateTimeFilterLabel() {
+  if (!statTimeLabel) {
+    return;
+  }
+  statTimeLabel.textContent = dateFilterLabels[state.dateFilter] || 'Tous';
+}
+
+function updateSearchCollapse() {
+  if (!searchWrap || !searchInput) {
+    return;
+  }
+  const hasValue = Boolean(state.search && state.search.trim());
+  searchWrap.classList.toggle('is-collapsed', !hasValue);
+}
+
+function getStartOfToday() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+function getEndOfToday() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+}
+
+function getStartOfWeek() {
+  const now = new Date();
+  const day = now.getDay();
+  const diff = (day + 6) % 7;
+  const start = new Date(now);
+  start.setDate(now.getDate() - diff);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+function getEndOfWeek() {
+  const start = getStartOfWeek();
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  end.setHours(23, 59, 59, 999);
+  return end;
+}
+
+function passesDateFilter(dateValue) {
+  if (state.dateFilter === 'all') {
+    return true;
+  }
+  if (!dateValue) {
+    return false;
+  }
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) {
+    return false;
+  }
+  const start = state.dateFilter === 'today' ? getStartOfToday() : getStartOfWeek();
+  const end = state.dateFilter === 'today' ? getEndOfToday() : getEndOfWeek();
+  return date >= start && date <= end;
+}
+
+function cycleDateFilter(render = true) {
+  const currentIndex = dateFilterOrder.indexOf(state.dateFilter);
+  const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % dateFilterOrder.length;
+  state.dateFilter = dateFilterOrder[nextIndex];
+  updateTimeFilterLabel();
+  savePreferences();
+  if (render) {
+    reloadReports();
+  }
+}
+
+function renderTechnicianOptions() {
+  if (!technicianOptionsEl) {
+    return;
+  }
+  const techMap = new Map();
+  const source = Array.isArray(state.techOptions) && state.techOptions.length
+    ? state.techOptions
+    : state.machines.map((machine) => machine.technician);
+  source.forEach((tech) => {
+    const label = normalizeTech(tech);
+    if (!label) {
+      return;
+    }
+    const key = label.toLowerCase();
+    if (!techMap.has(key)) {
+      techMap.set(key, label);
+    }
+  });
+  const techList = Array.from(techMap.values()).sort((a, b) => a.localeCompare(b, 'fr'));
+  technicianOptionsEl.innerHTML = techList
+    .map((label) => `<option value="${escapeHtml(label)}"></option>`)
+    .join('');
+}
+
 function updateCommentFilterButtons() {
   if (!commentFilterButtons.length) {
     return;
+  }
+  if (commentFiltersEl) {
+    commentFiltersEl.classList.toggle('is-all', state.commentFilter === 'all');
   }
   commentFilterButtons.forEach((btn) => {
     const active = btn.dataset.comment === state.commentFilter;
@@ -228,6 +1489,19 @@ function setAdminLinkVisible(visible) {
   adminLink.hidden = !visible;
 }
 
+function canDeleteReportFromUser(user) {
+  if (!user) {
+    return false;
+  }
+  if (user.permissions && user.permissions.canDeleteReport) {
+    return true;
+  }
+  if (user.type === 'local') {
+    return true;
+  }
+  return Boolean(user.isHydraAdmin);
+}
+
 async function initAdminLink() {
   if (!adminLink) {
     return;
@@ -243,8 +1517,16 @@ async function initAdminLink() {
       return;
     }
     const data = await response.json();
-    if (data.user && data.user.type === 'local') {
-      setAdminLinkVisible(true);
+    if (data.user) {
+      if (data.user.type === 'local') {
+        setAdminLinkVisible(true);
+      }
+      const canDelete = canDeleteReportFromUser(data.user);
+      if (canDelete) {
+        state.canDeleteReport = true;
+        state.canEditTags = true;
+        renderList();
+      }
     }
   } catch (error) {
     setAdminLinkVisible(false);
@@ -271,25 +1553,137 @@ function normalizeStatusKey(value) {
   return statusLabels[key] ? key : null;
 }
 
-function summarizeComponents(components) {
-  const summary = { ok: 0, nok: 0, other: 0, total: 0 };
-  if (!components || typeof components !== 'object' || Array.isArray(components)) {
-    return summary;
+function normalizeBiosLanguageKey(value) {
+  if (value == null) {
+    return null;
   }
-  Object.values(components).forEach((value) => {
-    const key = normalizeStatusKey(value);
-    if (!key) {
-      return;
+  const key = String(value).trim().toLowerCase();
+  if (key === 'fr' || key.startsWith('fr-')) {
+    return 'fr';
+  }
+  if (key === 'en' || key.startsWith('en-')) {
+    return 'en';
+  }
+  return key === 'not_tested' ? 'not_tested' : null;
+}
+
+function normalizeBiosPasswordKey(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'nok' : 'ok';
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return 'nok';
     }
-    if (key === 'ok') {
-      summary.ok += 1;
-    } else if (key === 'nok') {
-      summary.nok += 1;
-    } else {
-      summary.other += 1;
+    if (value === 0) {
+      return 'ok';
     }
+    return null;
+  }
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+  const cleaned = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (
+    cleaned.includes('not tested') ||
+    cleaned.includes('not_tested') ||
+    cleaned.includes('non teste') ||
+    cleaned.includes('non testee') ||
+    cleaned.includes('pas teste') ||
+    cleaned.includes('not run')
+  ) {
+    return 'not_tested';
+  }
+  if (
+    cleaned === 'oui' ||
+    cleaned === 'yes' ||
+    cleaned === 'true' ||
+    cleaned === '1' ||
+    cleaned.includes('enabled') ||
+    cleaned.includes('active') ||
+    cleaned.includes('set')
+  ) {
+    return 'nok';
+  }
+  if (
+    cleaned === 'non' ||
+    cleaned === 'no' ||
+    cleaned === 'false' ||
+    cleaned === '0' ||
+    cleaned.includes('disabled') ||
+    cleaned.includes('none') ||
+    cleaned.includes('unset')
+  ) {
+    return 'ok';
+  }
+  const normalized = normalizeStatusKey(cleaned);
+  return normalized === 'ok' || normalized === 'nok' || normalized === 'not_tested' ? normalized : null;
+}
+
+function resolveComponentStatusDisplay(key, value) {
+  if (key === 'biosLanguage') {
+    const language = normalizeBiosLanguageKey(value);
+    if (language === 'fr') {
+      return { status: 'fr', label: 'FR' };
+    }
+    if (language === 'en') {
+      return { status: 'en', label: 'EN' };
+    }
+    return { status: 'not_tested', label: statusLabels.not_tested };
+  }
+
+  if (key === 'biosPassword') {
+    const normalized = normalizeBiosPasswordKey(value);
+    if (normalized === 'ok') {
+      return { status: 'ok', label: 'Non' };
+    }
+    if (normalized === 'nok') {
+      return { status: 'nok', label: 'Oui' };
+    }
+    return { status: 'not_tested', label: statusLabels.not_tested };
+  }
+
+  const normalized = normalizeStatusKey(value);
+  if (normalized) {
+    return { status: normalized, label: statusLabels[normalized] || '--' };
+  }
+  return null;
+}
+
+function summarizeComponents(components, commentValue = '') {
+  const summary = { ok: 0, nok: 0, other: 0, total: 0 };
+  const hasComponents = components && typeof components === 'object' && !Array.isArray(components);
+  if (hasComponents) {
+    Object.entries(components).forEach(([componentKey, value]) => {
+      if (componentKey === 'biosLanguage') {
+        return;
+      }
+      const statusKey =
+        componentKey === 'biosPassword' ? normalizeBiosPasswordKey(value) : normalizeStatusKey(value);
+      if (!statusKey) {
+        return;
+      }
+      if (statusKey === 'ok') {
+        summary.ok += 1;
+      } else if (statusKey === 'nok') {
+        summary.nok += 1;
+      } else {
+        summary.other += 1;
+      }
+      summary.total += 1;
+    });
+  }
+
+  const hasComment = typeof commentValue === 'string' && commentValue.trim();
+  if (hasComment) {
+    summary.nok += 1;
     summary.total += 1;
-  });
+  }
+
   return summary;
 }
 
@@ -298,6 +1692,18 @@ function normalizeCategory(value) {
     return value;
   }
   return 'unknown';
+}
+
+function buildCategoryBadge(category, id, extraClass = '') {
+  const normalized = normalizeCategory(category);
+  const label = categoryLabels[normalized] || categoryLabels.unknown;
+  const className = extraClass ? `badge ${extraClass}` : 'badge';
+  const idAttr = id ? ` data-id="${escapeHtml(String(id))}"` : '';
+  const actionAttr = id ? ' data-action="cycle-category"' : '';
+  const typeAttr = id ? ' type="button"' : '';
+  return `<button class="${className}" data-category="${normalized}"${actionAttr}${idAttr}${typeAttr}>${escapeHtml(
+    label
+  )}</button>`;
 }
 
 function formatPrimary(machine) {
@@ -552,16 +1958,40 @@ function formatWinSatNote(score) {
   return 'Excellent';
 }
 
-function renderStatus(status) {
-  const normalized = normalizeStatusKey(status) || 'unknown';
-  const label = statusLabels[normalized] || '--';
+function renderStatus(status, options = null, labelOverride = null) {
+  const normalized = normalizeStatusKey(status) || String(status || '').trim().toLowerCase() || 'unknown';
+  const label = labelOverride || statusLabels[normalized] || '--';
+  if (options && options.id && options.key) {
+    return `
+      <button
+        class="status-pill status-button"
+        data-status="${normalized}"
+        data-action="cycle-status"
+        data-id="${escapeHtml(options.id)}"
+        data-key="${escapeHtml(options.key)}"
+        type="button"
+      >
+        ${label}
+      </button>
+    `;
+  }
   return `<strong class="status-pill" data-status="${normalized}">${label}</strong>`;
 }
 
-function renderStatusValue(value) {
+function renderStatusValue(value, options = null) {
+  if (options && options.key) {
+    const componentDisplay = resolveComponentStatusDisplay(options.key, value);
+    if (componentDisplay) {
+      return renderStatus(componentDisplay.status, options, componentDisplay.label);
+    }
+    return renderStatus('not_tested', options, statusLabels.not_tested);
+  }
   const statusKey = normalizeStatusKey(value);
   if (statusKey) {
-    return renderStatus(statusKey);
+    return renderStatus(statusKey, options);
+  }
+  if (options && options.id && options.key) {
+    return renderStatus('not_tested', options);
   }
   if (value == null || value === '') {
     return '<strong>--</strong>';
@@ -604,6 +2034,19 @@ function getPadStatus(detail) {
   return null;
 }
 
+function getUsbStatus(detail) {
+  if (!detail || typeof detail !== 'object') {
+    return null;
+  }
+  if (detail.usbStatus) {
+    return detail.usbStatus;
+  }
+  if (detail.components && typeof detail.components === 'object') {
+    return detail.components.usb || null;
+  }
+  return null;
+}
+
 function applyPadStatusUpdate(id, status) {
   state.machines = state.machines.map((machine) => {
     if (machine.id !== id) {
@@ -632,10 +2075,50 @@ function applyPadStatusUpdate(id, status) {
       components
     };
   }
+  invalidateListCache();
+}
+
+function applyUsbStatusUpdate(id, status) {
+  state.machines = state.machines.map((machine) => {
+    if (machine.id !== id) {
+      return machine;
+    }
+    const components = machine.components && typeof machine.components === 'object'
+      ? { ...machine.components }
+      : {};
+    components.usb = status;
+    return {
+      ...machine,
+      usbStatus: status,
+      components
+    };
+  });
+
+  if (state.details[id]) {
+    const detail = state.details[id];
+    const components = detail.components && typeof detail.components === 'object'
+      ? { ...detail.components }
+      : {};
+    components.usb = status;
+    state.details[id] = {
+      ...detail,
+      usbStatus: status,
+      components
+    };
+  }
+  invalidateListCache();
 }
 
 function setPadButtonsLoading(id, loading) {
   const buttons = listEl.querySelectorAll(`[data-action="set-pad"][data-id="${id}"]`);
+  buttons.forEach((button) => {
+    button.disabled = loading;
+    button.classList.toggle('is-loading', loading);
+  });
+}
+
+function setUsbButtonsLoading(id, loading) {
+  const buttons = listEl.querySelectorAll(`[data-action="set-usb"][data-id="${id}"]`);
   buttons.forEach((button) => {
     button.disabled = loading;
     button.classList.toggle('is-loading', loading);
@@ -670,6 +2153,540 @@ async function updatePadStatus(id, status) {
   }
 }
 
+async function updateUsbStatus(id, status) {
+  setUsbButtonsLoading(id, true);
+  try {
+    const response = await fetch(`/api/machines/${encodeURIComponent(id)}/usb`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('usb_update_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('usb_update_failed');
+    }
+    applyUsbStatusUpdate(id, data.status);
+    renderList();
+  } catch (error) {
+    window.alert("Impossible d'enregistrer l'etat USB.");
+  } finally {
+    setUsbButtonsLoading(id, false);
+  }
+}
+
+function nextCycleStatus(key, currentStatus) {
+  const cycle = componentStatusCycles[key] || statusCycle;
+  const normalized = (currentStatus || '').trim().toLowerCase() || 'not_tested';
+  const index = cycle.indexOf(normalized);
+  if (index === -1) {
+    return cycle[0];
+  }
+  return cycle[(index + 1) % cycle.length];
+}
+
+function nextCategory(currentCategory) {
+  const normalized = normalizeCategory(currentCategory);
+  const index = categoryCycle.indexOf(normalized);
+  if (index === -1) {
+    return categoryCycle[0];
+  }
+  return categoryCycle[(index + 1) % categoryCycle.length];
+}
+
+function applyCategoryUpdate(id, category) {
+  state.machines = state.machines.map((machine) => {
+    if (machine.id !== id) {
+      return machine;
+    }
+    return {
+      ...machine,
+      category
+    };
+  });
+
+  if (state.details[id]) {
+    state.details[id] = {
+      ...state.details[id],
+      category
+    };
+  }
+  invalidateListCache();
+}
+
+async function updateCategory(id, category, button) {
+  if (button) {
+    button.disabled = true;
+    button.classList.add('is-loading');
+  }
+  try {
+    const response = await fetch(`/api/reports/${encodeURIComponent(id)}/category`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('category_update_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('category_update_failed');
+    }
+    applyCategoryUpdate(id, data.category || category);
+    updateStats();
+    renderList();
+  } catch (error) {
+    window.alert("Impossible d'enregistrer la categorie.");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.classList.remove('is-loading');
+    }
+  }
+}
+
+function applyComponentStatusUpdate(id, key, status) {
+  const statusFields = {
+    camera: 'cameraStatus',
+    usb: 'usbStatus',
+    keyboard: 'keyboardStatus',
+    pad: 'padStatus',
+    badgeReader: 'badgeReaderStatus'
+  };
+  const statusField = statusFields[key] || null;
+
+  state.machines = state.machines.map((machine) => {
+    if (machine.id !== id) {
+      return machine;
+    }
+    const components = machine.components && typeof machine.components === 'object'
+      ? { ...machine.components }
+      : {};
+    components[key] = status;
+    return {
+      ...machine,
+      ...(statusField ? { [statusField]: status } : {}),
+      components
+    };
+  });
+
+  if (state.details[id]) {
+    const detail = state.details[id];
+    const components = detail.components && typeof detail.components === 'object'
+      ? { ...detail.components }
+      : {};
+    components[key] = status;
+    state.details[id] = {
+      ...detail,
+      ...(statusField ? { [statusField]: status } : {}),
+      components
+    };
+  }
+  invalidateListCache();
+}
+
+async function updateComponentStatus(id, key, status, button) {
+  if (button) {
+    button.disabled = true;
+    button.classList.add('is-loading');
+  }
+  try {
+    const response = await fetch(`/api/reports/${encodeURIComponent(id)}/component`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, status })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('component_update_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('component_update_failed');
+    }
+    applyComponentStatusUpdate(id, key, data.status);
+    renderList();
+  } catch (error) {
+    window.alert("Impossible d'enregistrer le statut.");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.classList.remove('is-loading');
+    }
+  }
+}
+
+function setReportZeroLoading(loading) {
+  if (reportZeroBtn) {
+    reportZeroBtn.disabled = loading;
+    reportZeroBtn.classList.toggle('is-loading', loading);
+  }
+  if (reportZeroSubmit) {
+    reportZeroSubmit.disabled = loading;
+  }
+}
+
+function showReportZeroError(message) {
+  if (!reportZeroError) {
+    return;
+  }
+  if (message) {
+    reportZeroError.textContent = message;
+    reportZeroError.hidden = false;
+  } else {
+    reportZeroError.textContent = '';
+    reportZeroError.hidden = true;
+  }
+}
+
+function setPatchnoteBody(body) {
+  if (!patchnoteBodyEl) {
+    return;
+  }
+  const safeBody = body ? escapeHtml(body).replace(/\n/g, '<br>') : '';
+  patchnoteBodyEl.innerHTML = safeBody;
+}
+
+function openPatchnoteModal(patchnote) {
+  if (!patchnoteModal) {
+    return;
+  }
+  activePatchnoteId = patchnote && patchnote.id ? patchnote.id : null;
+  setPatchnoteBody(patchnote && patchnote.body ? patchnote.body : '');
+  patchnoteModal.hidden = false;
+  if (patchnoteOkBtn) {
+    patchnoteOkBtn.focus();
+  }
+}
+
+function closePatchnoteModal() {
+  if (!patchnoteModal) {
+    return;
+  }
+  patchnoteModal.hidden = true;
+  activePatchnoteId = null;
+}
+
+async function acknowledgePatchnote() {
+  if (!activePatchnoteId) {
+    closePatchnoteModal();
+    return;
+  }
+  if (patchnoteOkBtn) {
+    patchnoteOkBtn.disabled = true;
+  }
+  try {
+    const response = await fetch('/api/patchnotes/ack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patchnoteId: activePatchnoteId })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+  } catch (error) {
+    // Fail silently so the UI isn't blocked.
+  } finally {
+    if (patchnoteOkBtn) {
+      patchnoteOkBtn.disabled = false;
+    }
+  }
+  closePatchnoteModal();
+}
+
+async function initPatchnote() {
+  if (!patchnoteModal || !patchnoteBodyEl) {
+    return;
+  }
+  try {
+    const response = await fetch('/api/patchnotes/latest');
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      return;
+    }
+    const data = await response.json();
+    if (data.patchnote) {
+      openPatchnoteModal(data.patchnote);
+    }
+  } catch (error) {
+    // No-op.
+  }
+}
+
+function openReportZeroModal() {
+  if (!reportZeroModal || !reportZeroForm) {
+    return;
+  }
+  reportZeroModal.hidden = false;
+  reportZeroForm.reset();
+  showReportZeroError('');
+  const firstInput = reportZeroForm.querySelector('input[name="hostname"]');
+  if (firstInput) {
+    firstInput.focus();
+  }
+}
+
+function closeReportZeroModal() {
+  if (!reportZeroModal) {
+    return;
+  }
+  reportZeroModal.hidden = true;
+  showReportZeroError('');
+}
+
+function showSuggestionError(message) {
+  if (!suggestionError) {
+    return;
+  }
+  if (message) {
+    suggestionError.textContent = message;
+    suggestionError.hidden = false;
+  } else {
+    suggestionError.textContent = '';
+    suggestionError.hidden = true;
+  }
+}
+
+function setSuggestionLoading(loading) {
+  if (suggestionSubmitBtn) {
+    suggestionSubmitBtn.disabled = loading;
+  }
+  if (suggestionAddBtn) {
+    suggestionAddBtn.disabled = loading;
+  }
+}
+
+function renderSuggestions(items) {
+  if (!suggestionListEl || !suggestionEmptyEl) {
+    return;
+  }
+  const list = Array.isArray(items) ? items : [];
+  suggestionCache = list;
+  if (!list.length) {
+    suggestionListEl.innerHTML = '';
+    suggestionEmptyEl.hidden = false;
+    return;
+  }
+  suggestionEmptyEl.hidden = true;
+  suggestionListEl.innerHTML = list
+    .map((item) => {
+      const title = escapeHtml(item.title || '');
+      const body = escapeHtml(item.body || '');
+      const createdAt = item.createdAt ? formatDateTime(item.createdAt) : '--';
+      const createdBy = escapeHtml(item.createdBy || 'inconnu');
+      return `
+        <details class="suggestion-item">
+          <summary class="suggestion-summary">
+            <span>${title}</span>
+            <span class="suggestion-meta">${escapeHtml(createdAt)}</span>
+          </summary>
+          <div class="suggestion-body">${body}</div>
+          <div class="suggestion-meta">Par ${createdBy}</div>
+        </details>
+      `;
+    })
+    .join('');
+}
+
+async function loadSuggestions() {
+  if (!suggestionListEl) {
+    return;
+  }
+  try {
+    const response = await fetch('/api/suggestions');
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('suggestions_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('suggestions_failed');
+    }
+    renderSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
+  } catch (error) {
+    renderSuggestions([]);
+  }
+}
+
+function openSuggestionModal() {
+  if (!suggestionModal) {
+    return;
+  }
+  suggestionModal.hidden = false;
+  if (suggestionForm) {
+    suggestionForm.hidden = true;
+    suggestionForm.reset();
+  }
+  showSuggestionError('');
+  loadSuggestions();
+}
+
+function closeSuggestionModal() {
+  if (!suggestionModal) {
+    return;
+  }
+  suggestionModal.hidden = true;
+  showSuggestionError('');
+}
+
+function getSuggestionPayload() {
+  if (!suggestionForm || !suggestionTitleInput || !suggestionBodyInput) {
+    return null;
+  }
+  const title = String(suggestionTitleInput.value || '').trim();
+  const body = String(suggestionBodyInput.value || '').trim();
+  return {
+    title,
+    body,
+    page: window && window.location ? window.location.pathname : ''
+  };
+}
+
+async function submitSuggestion(payload) {
+  setSuggestionLoading(true);
+  try {
+    const response = await fetch('/api/suggestions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data && data.error ? data.error : 'submit_failed');
+    }
+    if (suggestionForm) {
+      suggestionForm.reset();
+      suggestionForm.hidden = true;
+    }
+    showSuggestionError('');
+    loadSuggestions();
+  } catch (error) {
+    showSuggestionError("Impossible d'envoyer la suggestion.");
+  } finally {
+    setSuggestionLoading(false);
+  }
+}
+
+function getReportZeroPayload() {
+  if (!reportZeroForm) {
+    return null;
+  }
+  const formData = new FormData(reportZeroForm);
+  const hostname = String(formData.get('hostname') || '').trim();
+  const serialNumber = String(formData.get('serialNumber') || '').trim();
+  const macAddress = String(formData.get('macAddress') || '').trim();
+  const technician = String(formData.get('technician') || '').trim();
+  const category = String(formData.get('category') || 'unknown').trim();
+
+  return {
+    hostname: hostname || null,
+    serialNumber: serialNumber || null,
+    macAddress: macAddress || null,
+    technician: technician || null,
+    category: category || 'unknown'
+  };
+}
+
+async function createReportZero(payload) {
+  setReportZeroLoading(true);
+  try {
+    const response = await fetch('/api/reports/report-zero', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('report_zero_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('report_zero_failed');
+    }
+    if (data.reportId) {
+      state.expandedId = String(data.reportId);
+    }
+    closeReportZeroModal();
+    await loadMachines();
+  } catch (error) {
+    showReportZeroError("Impossible d'ajouter un report 0.");
+  } finally {
+    setReportZeroLoading(false);
+  }
+}
+
+function setDeleteButtonsLoading(id, loading) {
+  const buttons = listEl.querySelectorAll(`[data-action="delete-report"][data-id="${id}"]`);
+  buttons.forEach((button) => {
+    button.disabled = loading;
+    button.classList.toggle('is-loading', loading);
+  });
+}
+
+async function deleteReport(id) {
+  const confirmed = window.confirm('Supprimer ce report ?');
+  if (!confirmed) {
+    return;
+  }
+  setDeleteButtonsLoading(id, true);
+  try {
+    const response = await fetch(`/api/reports/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.alert("Pas les droits pour supprimer ce report.");
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('report_delete_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('report_delete_failed');
+    }
+    if (state.expandedId === id) {
+      state.expandedId = null;
+    }
+    delete state.details[id];
+    await loadMachines();
+  } catch (error) {
+    window.alert("Impossible de supprimer le report.");
+  } finally {
+    setDeleteButtonsLoading(id, false);
+  }
+}
+
 function applyCommentUpdate(id, comment, commentedAt) {
   state.machines = state.machines.map((machine) => {
     if (machine.id !== id) {
@@ -689,6 +2706,7 @@ function applyCommentUpdate(id, comment, commentedAt) {
       commentedAt
     };
   }
+  invalidateListCache();
 }
 
 function setCommentButtonsLoading(id, loading) {
@@ -726,6 +2744,67 @@ async function updateComment(id, comment) {
     window.alert("Impossible d'enregistrer le commentaire.");
   } finally {
     setCommentButtonsLoading(id, false);
+  }
+}
+
+function applyTagRename(tagId, newLabel, activeTag) {
+  if (!tagId || !newLabel) {
+    return;
+  }
+  const normalizedId = normalizeTagId(tagId);
+  const activeId = activeTag ? normalizeTagId(activeTag.id) : '';
+
+  state.tags = (state.tags || []).map((tag) => {
+    const currentId = normalizeTagId(tag.id || '');
+    if (currentId === normalizedId) {
+      return { ...tag, name: newLabel, is_active: false, isActive: false };
+    }
+    if (activeId && currentId === activeId) {
+      return { ...tag, name: activeTag.name || tag.name, is_active: true, isActive: true };
+    }
+    if (activeId && (tag.is_active || tag.isActive)) {
+      return { ...tag, is_active: false, isActive: false };
+    }
+    return tag;
+  });
+
+  if (activeId && !state.tags.some((tag) => normalizeTagId(tag.id || '') === activeId)) {
+    state.tags.push({ id: activeTag.id, name: activeTag.name, is_active: true });
+  }
+
+  if (activeId) {
+    state.activeTagId = activeId;
+  }
+
+  state.machines = state.machines.map((machine) => {
+    if (normalizeTagId(machine.tagId) !== normalizedId) {
+      return machine;
+    }
+    return { ...machine, tagName: newLabel, tag: newLabel };
+  });
+
+  savePreferences();
+  renderTagFilters();
+  renderList();
+}
+
+async function renameTag(tagId, newTag) {
+  try {
+    const response = await fetch('/api/tags/rename', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tagId, newTag })
+    });
+    if (!response.ok) {
+      throw new Error('tag_rename_failed');
+    }
+    const data = await response.json();
+    if (!data.ok || !data.tag) {
+      throw new Error('tag_rename_failed');
+    }
+    applyTagRename(data.tag.id, data.tag.name || newTag, data.activeTag || null);
+  } catch (error) {
+    window.alert("Impossible de renommer le tag.");
   }
 }
 
@@ -771,7 +2850,7 @@ function scheduleCommentSave(id, value, immediate = false) {
   const timeoutId = setTimeout(() => {
     commentTimers.delete(id);
     updateComment(id, normalized);
-  }, 800);
+  }, 15000);
   commentTimers.set(id, timeoutId);
 }
 
@@ -808,7 +2887,14 @@ function getUniqueMachines(list) {
 }
 
 function updateStats() {
-  const uniqueMachines = getUniqueMachines(state.machines);
+  if (state.stats) {
+    statTotal.textContent = state.stats.total || 0;
+    statLaptop.textContent = state.stats.laptop || 0;
+    statDesktop.textContent = state.stats.desktop || 0;
+    statUnknown.textContent = state.stats.unknown || 0;
+    return;
+  }
+  const uniqueMachines = getUniqueMachines(getBaseFilteredMachines());
   const total = uniqueMachines.length;
   const laptop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'laptop').length;
   const desktop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'desktop').length;
@@ -820,13 +2906,27 @@ function updateStats() {
   statUnknown.textContent = unknown;
 }
 
-function applyFilters() {
-  const term = state.search.trim().toLowerCase();
-  const filtered = state.machines.filter((machine) => {
-    const category = normalizeCategory(machine.category);
-    if (state.filter !== 'all' && category !== state.filter) {
-      return false;
-    }
+function updateStatFilterCards() {
+  if (!statFilterCards.length) {
+    return;
+  }
+  statFilterCards.forEach((card) => {
+    const filter = card.dataset.filter || 'all';
+    const active = filter === state.filter;
+    card.classList.toggle('is-active', active);
+    card.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function setCategoryFilter(filter) {
+  state.filter = filter || 'all';
+  updateStatFilterCards();
+  savePreferences();
+  reloadReports();
+}
+
+function getBaseFilteredMachines() {
+  return state.machines.filter((machine) => {
     if (state.quickFilter && state.quickFilter.value) {
       const filterValue = state.quickFilter.value.toLowerCase();
       if (state.quickFilter.type === 'serial') {
@@ -850,51 +2950,25 @@ function applyFilters() {
         if (!tech.includes(filterValue)) {
           return false;
         }
+      } else if (state.quickFilter.type === 'summary') {
+        const summary = summarizeComponents(machine.components, machine.comment);
+        if (state.quickFilter.value === 'ok' && summary.ok <= 0) {
+          return false;
+        }
+        if (state.quickFilter.value === 'nok' && summary.nok <= 0) {
+          return false;
+        }
+        if (state.quickFilter.value === 'nt' && summary.other <= 0) {
+          return false;
+        }
       }
     }
-    if (state.techFilter !== 'all') {
-      if (techKey(machine.technician) !== state.techFilter) {
-        return false;
-      }
-    }
-    const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
-    if (state.commentFilter === 'with' && !commentValue) {
-      return false;
-    }
-    if (state.commentFilter === 'without' && commentValue) {
-      return false;
-    }
-    if (state.componentFilter !== 'all') {
-      const components =
-        machine.components && typeof machine.components === 'object' && !Array.isArray(machine.components)
-          ? machine.components
-          : null;
-      const componentStatus = components ? normalizeStatusKey(components[state.componentFilter]) : null;
-      if (componentStatus !== 'nok') {
-        return false;
-      }
-    }
-    if (!term) {
-      return true;
-    }
-    const haystack = [
-      machine.hostname,
-      machine.serialNumber,
-      machine.macAddress,
-      Array.isArray(machine.macAddresses) ? machine.macAddresses.join(' ') : null,
-      machine.machineKey,
-      machine.technician,
-      machine.vendor,
-      machine.model,
-      machine.comment
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-    return haystack.includes(term);
+    return true;
   });
+}
 
-  return sortMachines(filtered);
+function applyFilters() {
+  return sortMachines(getBaseFilteredMachines());
 }
 
 function sortMachines(list) {
@@ -947,12 +3021,26 @@ function buildDiagnosticsHtml(detail) {
     payload && payload.thermal && typeof payload.thermal === 'object' && !Array.isArray(payload.thermal)
       ? payload.thermal
       : null;
+  const detailId = detail && detail.id != null ? String(detail.id) : '';
+  const components =
+    detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
+      ? detail.components
+      : {};
 
   const rows = [];
 
-  function addRow(label, status, extra) {
+  function addRow(label, status, extra, componentKey) {
+    const overrideStatus =
+      componentKey && Object.prototype.hasOwnProperty.call(components, componentKey)
+        ? components[componentKey]
+        : status;
     const hasStatus = status !== undefined && status !== null && status !== '';
-    const statusHtml = hasStatus ? renderStatusValue(status) : '';
+    const statusHtml =
+      componentKey && detailId
+        ? renderStatusValue(overrideStatus, { id: detailId, key: componentKey })
+        : hasStatus
+          ? renderStatusValue(overrideStatus)
+          : '';
     const extraHtml = extra ? `<span class="metric">${escapeHtml(extra)}</span>` : '';
     const content = statusHtml || extraHtml ? `<div class="status-stack">${statusHtml}${extraHtml}</div>` : '<strong>--</strong>';
     rows.push(`
@@ -969,31 +3057,34 @@ function buildDiagnosticsHtml(detail) {
     const gpuNote =
       tests.gpuNote || formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : tests.gpuScore);
     if (tests.diskRead || tests.diskReadMBps != null) {
-      addRow('Lecture disque', tests.diskRead, formatMbps(tests.diskReadMBps));
+      addRow('Lecture disque', tests.diskRead, formatMbps(tests.diskReadMBps), 'diskReadTest');
     }
     if (tests.diskWrite || tests.diskWriteMBps != null) {
-      addRow('Ecriture disque', tests.diskWrite, formatMbps(tests.diskWriteMBps));
+      addRow('Ecriture disque', tests.diskWrite, formatMbps(tests.diskWriteMBps), 'diskWriteTest');
     }
     if (tests.ramTest || tests.ramMBps != null) {
-      addRow('RAM (WinSAT)', tests.ramTest, ramNote || formatMbps(tests.ramMBps));
+      addRow('RAM (WinSAT)', tests.ramTest, ramNote || formatMbps(tests.ramMBps), 'ramTest');
     }
     if (tests.cpuTest || tests.cpuMBps != null) {
-      addRow('CPU (WinSAT)', tests.cpuTest, cpuNote || formatMbps(tests.cpuMBps));
+      addRow('CPU (WinSAT)', tests.cpuTest, cpuNote || formatMbps(tests.cpuMBps), 'cpuTest');
     }
-    if (tests.gpuTest || tests.gpuScore != null) {
-      addRow('GPU (WinSAT)', tests.gpuTest, gpuNote || formatScore(tests.gpuScore));
+    const hasGpuWinSat = tests.gpuTest || tests.gpuScore != null || winSatGraphicsScore != null;
+    if (hasGpuWinSat) {
+      const gpuStatus = tests.gpuTest || (winSatGraphicsScore != null ? 'ok' : null);
+      const gpuExtra = gpuNote || (tests.gpuScore != null ? formatScore(tests.gpuScore) : null);
+      addRow('GPU (WinSAT)', gpuStatus, gpuExtra, 'gpuTest');
     }
     if (tests.cpuStress) {
-      addRow('CPU (stress)', tests.cpuStress, null);
+      addRow('CPU (stress)', tests.cpuStress, null, 'cpuStress');
     }
     if (tests.gpuStress) {
-      addRow('GPU (stress)', tests.gpuStress, null);
+      addRow('GPU (stress)', tests.gpuStress, null, 'gpuStress');
     }
     if (tests.networkPing || tests.networkPingTarget) {
-      addRow('Ping', tests.networkPing, tests.networkPingTarget || null);
+      addRow('Ping', tests.networkPing, tests.networkPingTarget || null, 'networkPing');
     }
     if (tests.fsCheck) {
-      addRow('Check disque', tests.fsCheck, null);
+      addRow('Check disque', tests.fsCheck, null, 'fsCheck');
     }
   }
 
@@ -1011,18 +3102,146 @@ function buildDiagnosticsHtml(detail) {
   `;
 }
 
-function renderList() {
-  const filtered = applyFilters();
+function buildReportHistory(detail) {
+  const reports = Array.isArray(detail.relatedReports) ? detail.relatedReports : [];
+  if (reports.length <= 1) {
+    return '';
+  }
+  const items = reports
+    .map((report) => {
+      const id = report && report.id ? String(report.id) : '';
+      if (!id) {
+        return '';
+      }
+      const when = report.lastSeen || report.createdAt;
+      const label = when ? formatDateTime(when) : '--';
+      const active = detail.id && String(detail.id) === id ? ' is-active' : '';
+      return `
+        <button class="report-history-item${active}" type="button" data-action="open-report" data-id="${escapeHtml(
+          id
+        )}">
+          <span>${escapeHtml(label)}</span>
+          <span class="report-history-id">${escapeHtml(id.slice(0, 8))}</span>
+        </button>
+      `;
+    })
+    .filter(Boolean)
+    .join('');
 
-  if (!filtered.length) {
+  if (!items) {
+    return '';
+  }
+
+  return `
+    <div class="report-history">
+      <h3>Historique des rapports</h3>
+      <div class="report-history-list">
+        ${items}
+      </div>
+    </div>
+  `;
+}
+
+function renderList(isScrollUpdate = false) {
+  updateTimeFilterLabel();
+  updateStats();
+  updateStatFilterCards();
+  const useQuickFilter = Boolean(state.quickFilter && state.quickFilter.value);
+  const cacheKey = JSON.stringify({
+    length: state.machines.length,
+    filter: state.filter,
+    techFilter: state.techFilter,
+    tagFilter: state.tagFilter,
+    componentFilter: state.componentFilter,
+    commentFilter: state.commentFilter,
+    dateFilter: state.dateFilter,
+    search: state.search,
+    quickFilter: state.quickFilter,
+    sort: state.sort
+  });
+  if (useQuickFilter && cacheKey !== state.listCacheKey) {
+    state.listCache = applyFilters();
+    state.listCacheKey = cacheKey;
+  }
+  const filtered = useQuickFilter ? state.listCache : [];
+  const totalCount = useQuickFilter
+    ? filtered.length
+    : Number.isFinite(state.totalCount)
+      ? state.totalCount
+      : state.machines.length;
+
+  if (!totalCount) {
+    if (listEl) {
+      listEl.style.paddingTop = '0px';
+      listEl.style.paddingBottom = '0px';
+      listEl.classList.remove('is-virtual');
+    }
     listEl.innerHTML = '<div class="empty">Aucun poste ne correspond a ce filtre.</div>';
     return;
   }
 
-  listEl.innerHTML = filtered
-    .map((machine, index) => {
+  const columns = getColumnCount();
+  const totalRows = Math.max(1, Math.ceil(totalCount / columns));
+  const listTop = getListOffsetTop();
+  const scrollTop = getScrollTop();
+  const viewTop = Math.max(0, scrollTop - listTop);
+  const viewBottom = viewTop + getViewportHeight();
+  const rowHeight = Math.max(140, state.virtualRowHeight || 260);
+  const overscan = Math.max(1, state.virtualOverscanRows || 2);
+  const startRow = Math.max(0, findRowForOffset(viewTop, totalRows) - overscan);
+  const endRow = Math.min(totalRows, findRowForOffset(viewBottom, totalRows) + overscan);
+  const startIndex = startRow * columns;
+  const endIndex = Math.min(totalCount, endRow * columns);
+  const edgeThreshold = Math.max(1, columns * overscan);
+  const nearStart = startIndex <= edgeThreshold;
+  const nearEnd = endIndex >= Math.max(0, totalCount - edgeThreshold);
+
+  const rangeUnchanged =
+    isScrollUpdate &&
+    state.virtualRange &&
+    state.virtualRange.start === startIndex &&
+    state.virtualRange.end === endIndex;
+  if (rangeUnchanged) {
+    if (!useQuickFilter) {
+      ensurePagesForRange(startIndex, endIndex);
+    }
+    return;
+  }
+
+  state.virtualRange = { start: startIndex, end: endIndex };
+
+  const topSpacer = getRowOffset(startRow);
+  const bottomSpacer = Math.max(0, getTotalHeight(totalRows) - getRowOffset(endRow));
+  listEl.style.paddingTop = `${Math.max(0, Math.round(topSpacer))}px`;
+  listEl.style.paddingBottom = `${Math.max(0, Math.round(bottomSpacer))}px`;
+
+  const visible = [];
+  for (let idx = startIndex; idx < endIndex; idx += 1) {
+    visible.push({ index: idx, item: useQuickFilter ? filtered[idx] : getItemAtIndex(idx) });
+  }
+  listEl.classList.add('is-virtual');
+  const anchor = isScrollUpdate || state.skipAnchorRestore ? null : captureScrollAnchor();
+  listEl.innerHTML = visible
+    .map((entry, index) => {
+      const machine = entry.item;
+      if (!machine) {
+        return `
+          <article class="machine-card is-placeholder" aria-hidden="true" data-index="${entry.index}">
+            <div class="card-top">
+              <span class="category-pill">...</span>
+            </div>
+            <div class="card-main">
+              <div class="card-left">
+                <div class="skeleton-line"></div>
+                <div class="skeleton-line short"></div>
+                <div class="skeleton-line"></div>
+              </div>
+            </div>
+          </article>
+        `;
+      }
       const category = normalizeCategory(machine.category);
-      const label = categoryLabels[category];
+      const categoryBadge = buildCategoryBadge(category, machine.id);
       const title = escapeHtml(formatPrimary(machine));
       const subtitle = escapeHtml(formatSubtitle(machine));
       const serialValue = machine.serialNumber || '';
@@ -1033,6 +3252,12 @@ function renderList() {
         '';
       const technicianValue = machine.technician || '';
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
+      const tagLabel = getTagLabel(machine);
+      const tagValue = escapeHtml(tagLabel);
+      const tagIdValue = escapeHtml(getTagId(machine));
+      const tagHtml = state.canEditTags && tagIdValue
+        ? `<button class="tag-pill is-editable" type="button" title="${tagValue}" data-tag="${tagValue}" data-tag-id="${tagIdValue}">${tagValue}</button>`
+        : `<span class="tag-pill" title="${tagValue}">${tagValue}</span>`;
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
       const commentDisplay = commentValue || 'Ajouter un commentaire';
       const isEditingComment = state.quickCommentId === machine.id;
@@ -1058,23 +3283,33 @@ function renderList() {
       `;
       const expanded = state.expandedId === machine.id;
       const selected = expanded ? 'selected' : '';
-      const delayClass = delayClasses[index % delayClasses.length];
-      const summary = summarizeComponents(machine.components);
+      const absoluteIndex = startIndex + index;
+      const delayClass = delayClasses[absoluteIndex % delayClasses.length];
+      const summary = summarizeComponents(machine.components, machine.comment);
+      const summaryActive = state.quickFilter && state.quickFilter.type === 'summary';
       const summaryHtml =
         summary.total > 0
           ? `
             <div class="machine-summary">
-              <span class="summary-chip ok">OK ${summary.ok}</span>
-              <span class="summary-chip nok">NOK ${summary.nok}</span>
-              <span class="summary-chip nt">NT ${summary.other}</span>
+              <button class="summary-chip ok${summaryActive && state.quickFilter.value === 'ok' ? ' is-active' : ''}" type="button" data-summary="ok">OK ${summary.ok}</button>
+              <button class="summary-chip nok${summaryActive && state.quickFilter.value === 'nok' ? ' is-active' : ''}" type="button" data-summary="nok">NOK ${summary.nok}</button>
+              <button class="summary-chip nt${summaryActive && state.quickFilter.value === 'nt' ? ' is-active' : ''}" type="button" data-summary="nt">NT ${summary.other}</button>
             </div>
           `
           : `
             <div class="machine-summary">
-              <span class="summary-chip nt">NT --</span>
+              <button class="summary-chip nt" type="button" data-summary="nt">NT --</button>
             </div>
           `;
-      const detailData = expanded ? state.details[machine.id] : null;
+      const overrideId =
+        expanded && state.detailOverrideId && state.expandedId === machine.id
+          ? state.detailOverrideId
+          : null;
+      const detailData = expanded
+        ? overrideId
+          ? state.details[overrideId]
+          : state.details[machine.id]
+        : null;
       const detailHtml = expanded
         ? detailData && detailData.error
           ? '<div class="card-detail"><div class="empty">Impossible de charger les details.</div></div>'
@@ -1085,10 +3320,11 @@ function renderList() {
       const toggleLabel = expanded ? 'Masquer les details' : 'Afficher les details';
 
       return `
-        <article class="machine-card ${delayClass} ${selected}" data-id="${machine.id}" aria-expanded="${expanded}">
+        <article class="machine-card ${delayClass} ${selected}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="${expanded}">
           <div class="card-top">
-            <span class="badge" data-category="${category}">${label}</span>
+            ${categoryBadge}
             <div class="card-top-right">
+              ${tagHtml}
               <span class="machine-meta"><span>${lastSeen}</span></span>
             </div>
           </div>
@@ -1096,10 +3332,12 @@ function renderList() {
             <div class="card-left">
               <h3 class="machine-title">${title}</h3>
               <p class="machine-sub">${subtitle}</p>
-              <div class="machine-meta">
+              <div class="machine-meta-row">
                 ${buildMetaChip('SN', serialValue, serialValue, 'serial', state.activeToken, machine.id)}
-                ${buildMetaChip('MAC', macLabel || '', macValue, 'mac', state.activeToken, machine.id)}
                 ${buildMetaChip('Tech', technicianValue, technicianValue, 'tech', state.activeToken, machine.id)}
+              </div>
+              <div class="machine-meta-row mac-row">
+                ${buildMetaChip('MAC', macLabel || '', macValue, 'mac', state.activeToken, machine.id)}
               </div>
               ${summaryHtml}
             </div>
@@ -1113,6 +3351,81 @@ function renderList() {
       `;
     })
     .join('');
+  if (anchor) {
+    restoreScrollAnchor(anchor);
+  }
+  if (state.skipAnchorRestore) {
+    state.skipAnchorRestore = false;
+  }
+  if (state.scrollAnchorHold) {
+    if (Date.now() > (state.scrollAnchorHold.until || 0)) {
+      state.scrollAnchorHold = null;
+    } else {
+      scheduleAnchorHoldAdjustment();
+    }
+  }
+  if (state.scrollHold && Number.isFinite(state.scrollHold.top)) {
+    scheduleScrollHoldAdjustment();
+  }
+
+  if (!state.virtualCalibrated) {
+    const firstCard = listEl.querySelector('.machine-card');
+    if (firstCard) {
+      const height = Math.round(firstCard.getBoundingClientRect().height);
+      if (height > 0) {
+        state.virtualRowHeight = height;
+        state.virtualCalibrated = true;
+        scheduleVirtualRender();
+      }
+    }
+  }
+
+  if (state.rowMeasureRaf) {
+    window.cancelAnimationFrame(state.rowMeasureRaf);
+  }
+  state.rowMeasureRaf = window.requestAnimationFrame(() => {
+    state.rowMeasureRaf = null;
+    if (Date.now() - (state.lastScrollEventAt || 0) < 140) {
+      return;
+    }
+    const cards = listEl.querySelectorAll('.machine-card:not(.is-placeholder)');
+    if (!cards.length) {
+      return;
+    }
+    let updated = false;
+    const rowHeights = new Map();
+    cards.forEach((card) => {
+      const index = Number.parseInt(card.dataset.index || '', 10);
+      if (!Number.isFinite(index)) {
+        return;
+      }
+      const rowIndex = Math.floor(index / columns);
+      const height = Math.round(card.getBoundingClientRect().height);
+      if (!Number.isFinite(height) || height <= 0) {
+        return;
+      }
+      const current = rowHeights.get(rowIndex) || 0;
+      if (height > current) {
+        rowHeights.set(rowIndex, height);
+      }
+    });
+    rowHeights.forEach((height, rowIndex) => {
+      if (updateRowHeight(rowIndex, height)) {
+        updated = true;
+      }
+    });
+    if (updated) {
+      scheduleVirtualRender();
+    }
+  });
+
+  if (!useQuickFilter) {
+    ensurePagesForRange(startIndex, endIndex);
+  } else if (nearEnd && state.hasMore && state.scrollDirection !== 'up') {
+    loadReportsPage(state.pageStart + state.pages.length * state.pageSize);
+  } else if (nearStart && state.pageStart > 0 && state.scrollDirection !== 'down') {
+    loadReportsPage(state.pageStart - state.pageSize);
+  }
 }
 
 function buildDetailHtml(detail) {
@@ -1124,35 +3437,43 @@ function buildDetailHtml(detail) {
     : '';
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const padStatus = getPadStatus(detail);
-  const padOkActive = padStatus === 'ok' ? 'active' : '';
-  const padNokActive = padStatus === 'nok' ? 'active' : '';
+  const usbStatus = getUsbStatus(detail);
+  const componentDefaults = {
+    biosBattery: 'not_tested',
+    biosLanguage: 'not_tested',
+    biosPassword: 'not_tested'
+  };
+  const rawComponents =
+    detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
+      ? detail.components
+      : {};
+  const components = { ...componentDefaults, ...rawComponents };
+  const cameraStatus = detail.cameraStatus || components.camera || null;
+  const keyboardStatus = detail.keyboardStatus || components.keyboard || null;
+  const badgeStatus = detail.badgeReaderStatus || components.badgeReader || null;
+  const deleteButton = state.canDeleteReport
+    ? `
+        <button class="detail-action danger" type="button" data-action="delete-report" data-id="${detailId}">
+          Supprimer
+        </button>
+      `
+    : '';
+  const alcyoneLink =
+    detail && detail.alcyoneUrl
+      ? `
+        <a class="detail-action" href="${escapeHtml(detail.alcyoneUrl)}" target="_blank" rel="noopener">
+          Ouvrir Alcyone
+        </a>
+      `
+      : '';
   const actionBar = detailId
     ? `
       <div class="detail-actions">
         <button class="detail-action" type="button" data-action="export-pdf" data-id="${detailId}">
           Telecharger PDF
         </button>
-        <div class="pad-control" data-id="${detailId}">
-          <span>Pave tactile</span>
-          <button
-            class="detail-action pad-action ${padOkActive}"
-            type="button"
-            data-action="set-pad"
-            data-status="ok"
-            data-id="${detailId}"
-          >
-            OK
-          </button>
-          <button
-            class="detail-action pad-action ${padNokActive}"
-            type="button"
-            data-action="set-pad"
-            data-status="nok"
-            data-id="${detailId}"
-          >
-            NOK
-          </button>
-        </div>
+        ${alcyoneLink}
+        ${deleteButton}
       </div>
     `
     : '';
@@ -1180,6 +3501,8 @@ function buildDetailHtml(detail) {
     detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
   const cpuInfo = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
   const gpuInfo = payload && payload.gpu && typeof payload.gpu === 'object' ? payload.gpu : null;
+  const inventory =
+    payload && payload.inventory && typeof payload.inventory === 'object' ? payload.inventory : null;
   const diskInfoRaw = payload ? payload.disks : null;
   const diskInfo = Array.isArray(diskInfoRaw) ? diskInfoRaw : diskInfoRaw ? [diskInfoRaw] : [];
   const volumeInfoRaw = payload ? payload.volumes : null;
@@ -1191,10 +3514,6 @@ function buildDetailHtml(detail) {
         .join('')}</div>`
     : '<strong>--</strong>';
 
-  const components =
-    detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
-      ? detail.components
-      : {};
   const componentEntries = Object.entries(components).filter(([key]) => !hiddenComponents.has(key));
   const componentOrderMap = new Map(componentOrder.map((key, index) => [key, index]));
   const sortedComponentEntries = componentEntries.sort((a, b) => {
@@ -1213,7 +3532,7 @@ function buildDetailHtml(detail) {
           return `
             <div class="component-row">
               <span>${escapeHtml(label)}</span>
-              ${renderStatusValue(value)}
+              ${renderStatusValue(value, { id: detailId, key })}
             </div>
           `;
         })
@@ -1258,34 +3577,133 @@ function buildDetailHtml(detail) {
         </div>
         <div class="detail-item">
           <span>Camera</span>
-          ${renderStatus(detail.cameraStatus)}
+          ${renderStatusValue(cameraStatus, { id: detailId, key: 'camera' })}
         </div>
         <div class="detail-item">
           <span>Ports USB</span>
-          ${renderStatus(detail.usbStatus)}
+          ${renderStatusValue(usbStatus, { id: detailId, key: 'usb' })}
         </div>
         <div class="detail-item">
           <span>Clavier</span>
-          ${renderStatus(detail.keyboardStatus)}
+          ${renderStatusValue(keyboardStatus, { id: detailId, key: 'keyboard' })}
         </div>
         <div class="detail-item">
           <span>Pave tactile</span>
-          ${renderStatus(padStatus)}
+          ${renderStatusValue(padStatus, { id: detailId, key: 'pad' })}
         </div>
         <div class="detail-item">
           <span>Lecteur badge</span>
-          ${renderStatus(detail.badgeReaderStatus)}
+          ${renderStatusValue(badgeStatus, { id: detailId, key: 'badgeReader' })}
+        </div>
+        <div class="detail-item">
+          <span>Pile BIOS</span>
+          ${renderStatusValue(components.biosBattery, { id: detailId, key: 'biosBattery' })}
+        </div>
+        <div class="detail-item">
+          <span>Langue BIOS</span>
+          ${renderStatusValue(components.biosLanguage, { id: detailId, key: 'biosLanguage' })}
+        </div>
+        <div class="detail-item">
+          <span>Mot de passe BIOS</span>
+          ${renderStatusValue(components.biosPassword, { id: detailId, key: 'biosPassword' })}
         </div>
       </div>
     </div>
   `;
 
+  let inventoryHtml = '';
+  if (inventory) {
+    const inventoryItems = [];
+
+    const baseboard =
+      inventory.baseboard && typeof inventory.baseboard === 'object' ? inventory.baseboard : null;
+    const baseboardSerial = baseboard && baseboard.serialNumber ? String(baseboard.serialNumber) : '';
+    if (baseboardSerial) {
+      inventoryItems.push({ label: 'Carte mere', value: baseboardSerial });
+    }
+
+    const batteryRaw = inventory.battery;
+    const batteryList = Array.isArray(batteryRaw) ? batteryRaw : batteryRaw ? [batteryRaw] : [];
+    const batteryValues = batteryList
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return '';
+        }
+        const serial = item.serialNumber ? String(item.serialNumber).trim() : '';
+        const deviceId = item.deviceId ? String(item.deviceId).trim() : '';
+        return serial || deviceId || '';
+      })
+      .filter(Boolean);
+    if (batteryValues.length) {
+      inventoryItems.push({ label: 'Batterie', value: batteryValues.join(' • ') });
+    }
+
+    const disksRaw = inventory.disks;
+    const diskList = Array.isArray(disksRaw) ? disksRaw : disksRaw ? [disksRaw] : [];
+    const diskValues = diskList
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return '';
+        }
+        const serial = item.serialNumber ? String(item.serialNumber).trim() : '';
+        const tag = item.tag ? String(item.tag).trim() : '';
+        if (serial && tag) {
+          return `${serial} (${tag})`;
+        }
+        return serial || tag || '';
+      })
+      .filter(Boolean);
+    if (diskValues.length) {
+      inventoryItems.push({ label: 'Disques', value: diskValues.join(' • ') });
+    }
+
+    const memoryRaw = inventory.memory;
+    const memoryList = Array.isArray(memoryRaw) ? memoryRaw : memoryRaw ? [memoryRaw] : [];
+    const memoryValues = memoryList
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return '';
+        }
+        const serial = item.serialNumber ? String(item.serialNumber).trim() : '';
+        const bank = item.bankLabel ? String(item.bankLabel).trim() : '';
+        if (serial && bank) {
+          return `${bank}: ${serial}`;
+        }
+        return serial || '';
+      })
+      .filter(Boolean);
+    if (memoryValues.length) {
+      inventoryItems.push({ label: 'RAM', value: memoryValues.join(' • ') });
+    }
+
+    if (inventoryItems.length) {
+      inventoryHtml = `
+        <div class="hardware">
+          <h3>Identifiants materiel</h3>
+          <div class="detail-grid hardware-grid">
+            ${inventoryItems
+              .map(
+                (item) => `
+                  <div class="detail-item">
+                    <span>${escapeHtml(item.label)}</span>
+                    <strong>${escapeHtml(item.value)}</strong>
+                  </div>
+                `
+              )
+              .join('')}
+          </div>
+        </div>
+      `;
+    }
+  }
+
   const diagnosticsHtml = buildDiagnosticsHtml(detail);
+  const historyHtml = buildReportHistory(detail);
 
   return `
     <div class="detail-header">
       <h2 class="detail-title">${title}</h2>
-      <span class="badge detail-category" data-category="${category}">${categoryLabels[category]}</span>
+      ${buildCategoryBadge(category, detailId, 'detail-category')}
       <p class="machine-sub">${subtitle}</p>
       ${technicianLine}
       ${actionBar}
@@ -1320,8 +3738,10 @@ function buildDetailHtml(detail) {
         <strong>${escapeHtml(detail.lastIp || '--')}</strong>
       </div>
     </div>
+    ${historyHtml}
     ${commentHtml}
     ${hardwareHtml}
+    ${inventoryHtml}
     ${diagnosticsHtml}
     <div class="components">
       <h3>Etat des composants</h3>
@@ -1359,6 +3779,16 @@ function buildReportDocument(detail) {
         .map((mac) => `<span class="mac-chip">${escapeHtml(mac)}</span>`)
         .join('')}</div>`
     : '<strong>--</strong>';
+  const componentDefaults = {
+    biosBattery: 'not_tested',
+    biosLanguage: 'not_tested',
+    biosPassword: 'not_tested'
+  };
+  const rawComponents =
+    detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
+      ? detail.components
+      : {};
+  const components = { ...componentDefaults, ...rawComponents };
 
   const diagnosticsHtml = buildDiagnosticsHtml(detail);
   const diagnosticsSection = diagnosticsHtml
@@ -1370,10 +3800,6 @@ function buildReportDocument(detail) {
       </div>
     `;
 
-  const components =
-    detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
-      ? detail.components
-      : {};
   const componentEntries = Object.entries(components).filter(([key]) => !hiddenComponents.has(key));
   const componentOrderMap = new Map(componentOrder.map((key, index) => [key, index]));
   const sortedComponentEntries = componentEntries.sort((a, b) => {
@@ -1392,7 +3818,7 @@ function buildReportDocument(detail) {
           return `
             <div class="component-row">
               <span>${escapeHtml(label)}</span>
-              ${renderStatusValue(value)}
+              ${renderStatusValue(value, { key })}
             </div>
           `;
         })
@@ -1455,6 +3881,18 @@ function buildReportDocument(detail) {
           <span>Lecteur badge</span>
           ${renderStatus(detail.badgeReaderStatus)}
         </div>
+        <div class="detail-item">
+          <span>Pile BIOS</span>
+          ${renderStatusValue(components.biosBattery, { key: 'biosBattery' })}
+        </div>
+        <div class="detail-item">
+          <span>Langue BIOS</span>
+          ${renderStatusValue(components.biosLanguage, { key: 'biosLanguage' })}
+        </div>
+        <div class="detail-item">
+          <span>Mot de passe BIOS</span>
+          ${renderStatusValue(components.biosPassword, { key: 'biosPassword' })}
+        </div>
       </div>
     </div>
   `;
@@ -1463,15 +3901,16 @@ function buildReportDocument(detail) {
     ? `<pre>${escapeHtml(JSON.stringify(detail.payload, null, 2))}</pre>`
     : '<div class="empty">Payload non disponible.</div>';
 
-  const summary = summarizeComponents(detail.components);
+  const summary = summarizeComponents(detail.components, detail.comment);
+  const summaryActive = state.quickFilter && state.quickFilter.type === 'summary';
   const summaryHtml =
     summary.total > 0
       ? `
-          <span class="summary-chip ok">OK ${summary.ok}</span>
-          <span class="summary-chip nok">NOK ${summary.nok}</span>
-          <span class="summary-chip nt">NT ${summary.other}</span>
+          <button class="summary-chip ok${summaryActive && state.quickFilter.value === 'ok' ? ' is-active' : ''}" type="button" data-summary="ok">OK ${summary.ok}</button>
+          <button class="summary-chip nok${summaryActive && state.quickFilter.value === 'nok' ? ' is-active' : ''}" type="button" data-summary="nok">NOK ${summary.nok}</button>
+          <button class="summary-chip nt${summaryActive && state.quickFilter.value === 'nt' ? ' is-active' : ''}" type="button" data-summary="nt">NT ${summary.other}</button>
         `
-      : '<span class="summary-chip nt">NT --</span>';
+      : '<button class="summary-chip nt" type="button" data-summary="nt">NT --</button>';
 
   const styles = `
     * { box-sizing: border-box; }
@@ -1796,41 +4235,74 @@ function openReportPdf(detail) {
 
 async function loadMachines() {
   listEl.innerHTML = '<div class="loading">Chargement des postes...</div>';
-  try {
-    const response = await fetch('/api/machines');
-    if (response.status === 401) {
-      window.location.href = '/login';
-      return;
-    }
-    if (!response.ok) {
-      throw new Error('fetch_failed');
-    }
-    const data = await response.json();
-    state.machines = Array.isArray(data.machines) ? data.machines : [];
-    state.lastUpdated = new Date();
-    renderTechFilters();
-    updateCommentFilterButtons();
-    updateStats();
-    renderList();
-    updateLastUpdated();
-    if (state.expandedId) {
-      await ensureMachineDetail(state.expandedId);
-    }
-  } catch (error) {
-    listEl.innerHTML = '<div class="empty">Erreur lors du chargement.</div>';
+  resetPagination();
+  if (Array.isArray(state.tagFilter)) {
+    state.tagFilter = state.tagFilter.map((value) => normalizeTagId(value)).filter(Boolean);
+  }
+  await loadMeta();
+  await Promise.all([loadStats(), loadReportsPage(0)]);
+  renderTechnicianOptions();
+  updateCommentFilterButtons();
+  if (state.expandedId) {
+    await ensureMachineDetail(state.expandedId);
   }
 }
 
-async function ensureMachineDetail(id) {
+function updateExpandedDetailHtml(reportId, preserveScroll = false) {
+  if (!listEl || !state.expandedId) {
+    return false;
+  }
+  const holdTop = preserveScroll ? getScrollTop() : null;
+  const restoreScroll = () => {
+    if (!preserveScroll || holdTop == null) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        setScrollTop(holdTop);
+      });
+    });
+  };
+  const safeId =
+    window.CSS && CSS.escape ? CSS.escape(state.expandedId) : String(state.expandedId).replace(/"/g, '\\"');
+  const card = listEl.querySelector(`.machine-card[data-id="${safeId}"]`);
+  if (!card) {
+    return false;
+  }
+  const detailWrap = card.querySelector('.card-detail');
+  if (!detailWrap) {
+    return false;
+  }
+  const detailData = reportId != null ? state.details[String(reportId)] : null;
+  if (detailData && detailData.error) {
+    detailWrap.innerHTML = '<div class="empty">Impossible de charger les details.</div>';
+    restoreScroll();
+    return true;
+  }
+  if (detailData) {
+    detailWrap.innerHTML = buildDetailHtml(detailData);
+    restoreScroll();
+    return true;
+  }
+  detailWrap.innerHTML = '<div class="loading">Chargement des details...</div>';
+  restoreScroll();
+  return true;
+}
+
+async function ensureMachineDetail(id, options = {}) {
   const detailId = id != null ? String(id) : '';
   if (!detailId) {
     return;
   }
   if (state.details[detailId]) {
-    renderList();
+    if (!options.skipRender) {
+      renderList();
+    }
     return;
   }
-  renderList();
+  if (!options.skipRender) {
+    renderList();
+  }
   try {
     const response = await fetch(`/api/machines/${encodeURIComponent(detailId)}`);
     if (response.status === 401) {
@@ -1842,10 +4314,14 @@ async function ensureMachineDetail(id) {
     }
     const data = await response.json();
     state.details[detailId] = data.machine;
-    renderList();
+    if (!options.skipRender) {
+      renderList();
+    }
   } catch (error) {
     state.details[detailId] = { error: true };
-    renderList();
+    if (!options.skipRender) {
+      renderList();
+    }
   }
 }
 
@@ -1860,16 +4336,26 @@ function updateLastUpdated() {
   })}`;
 }
 
-categoryFilterButtons.forEach((button) => {
-  button.addEventListener('click', () => {
-    categoryFilterButtons.forEach((btn) => {
-      btn.classList.remove('active');
-      btn.setAttribute('aria-pressed', 'false');
-    });
-    button.classList.add('active');
-    button.setAttribute('aria-pressed', 'true');
-    state.filter = button.dataset.filter;
-    renderList();
+statFilterCards.forEach((card) => {
+  const activate = () => {
+    const filter = card.dataset.filter || 'all';
+    if (statTotalCard && card === statTotalCard) {
+      cycleDateFilter(false);
+      setCategoryFilter('all');
+      return;
+    }
+    if (filter === state.filter) {
+      setCategoryFilter('all');
+      return;
+    }
+    setCategoryFilter(filter);
+  };
+  card.addEventListener('click', activate);
+  card.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      activate();
+    }
   });
 });
 
@@ -1879,11 +4365,65 @@ if (techFiltersEl) {
     if (!button) {
       return;
     }
-    state.techFilter = button.dataset.tech || 'all';
+    const next = button.dataset.tech || 'all';
+    state.techFilter = next === state.techFilter ? 'all' : next;
     updateTechFilterButtons();
-    renderList();
+    savePreferences();
+    reloadReports();
   });
 }
+
+if (tagFiltersEl) {
+  tagFiltersEl.addEventListener('click', (event) => {
+    const toggle = event.target.closest('.tag-select-toggle');
+    if (toggle) {
+      event.preventDefault();
+      tagFiltersEl.classList.toggle('is-open');
+      updateTagFilterButtons();
+      return;
+    }
+    const clear = event.target.closest('[data-action="clear-tags"]');
+    if (clear) {
+      event.preventDefault();
+      state.tagFilter = [];
+      savePreferences();
+      renderTagFilters();
+      renderTechFilters();
+      reloadReports();
+      return;
+    }
+  });
+  tagFiltersEl.addEventListener('change', (event) => {
+    const input = event.target.closest('.tag-select-input');
+    if (!input) {
+      return;
+    }
+    const id = normalizeTagId(input.value);
+    const selected = new Set(Array.isArray(state.tagFilter) ? state.tagFilter : []);
+    if (input.checked) {
+      if (id) {
+        selected.add(id);
+      }
+    } else {
+      selected.delete(id);
+    }
+    state.tagFilter = Array.from(selected);
+    savePreferences();
+    renderTagFilters();
+    renderTechFilters();
+    reloadReports();
+  });
+}
+
+document.addEventListener('click', (event) => {
+  if (!tagFiltersEl || !tagFiltersEl.classList.contains('is-open')) {
+    return;
+  }
+  if (!tagFiltersEl.contains(event.target)) {
+    tagFiltersEl.classList.remove('is-open');
+    updateTagFilterButtons();
+  }
+});
 
 layoutButtons.forEach((button) => {
   button.addEventListener('click', () => {
@@ -1895,55 +4435,177 @@ layoutButtons.forEach((button) => {
     if (window.localStorage) {
       localStorage.setItem(layoutStorageKey, layout);
     }
+    savePreferences();
     updateLayoutButtons();
     applyLayout();
+    scheduleVirtualRender();
   });
 });
 
 testFilterButtons.forEach((button) => {
   button.addEventListener('click', () => {
-    testFilterButtons.forEach((btn) => {
-      btn.classList.remove('active');
-      btn.setAttribute('aria-pressed', 'false');
-    });
-    button.classList.add('active');
-    button.setAttribute('aria-pressed', 'true');
-    state.componentFilter = button.dataset.component || 'all';
-    renderList();
+    const next = button.dataset.component || 'all';
+    state.componentFilter = next === state.componentFilter ? 'all' : next;
+    updateTestFilterButtons();
+    savePreferences();
+    reloadReports();
   });
 });
 
 commentFilterButtons.forEach((button) => {
   button.addEventListener('click', () => {
-    commentFilterButtons.forEach((btn) => {
-      btn.classList.remove('active');
-      btn.setAttribute('aria-pressed', 'false');
-    });
-    button.classList.add('active');
-    button.setAttribute('aria-pressed', 'true');
-    state.commentFilter = button.dataset.comment || 'all';
-    renderList();
+    const next = button.dataset.comment || 'all';
+    state.commentFilter = next === state.commentFilter ? 'all' : next;
+    updateCommentFilterButtons();
+    savePreferences();
+    reloadReports();
   });
 });
 
 updateLayoutButtons();
 updateTestFilterButtons();
 updateCommentFilterButtons();
+updateTagFilterButtons();
 applyLayout();
+updateTimeFilterLabel();
+updateStatFilterCards();
 
-searchInput.addEventListener('input', (event) => {
-  state.search = event.target.value;
-  renderList();
-});
+if (searchToggle && searchWrap && searchInput) {
+  searchToggle.addEventListener('click', () => {
+    searchWrap.classList.remove('is-collapsed');
+    searchInput.focus();
+  });
+  searchInput.addEventListener('focus', () => {
+    searchWrap.classList.remove('is-collapsed');
+  });
+  searchInput.addEventListener('blur', () => {
+    if (!searchInput.value.trim()) {
+      searchWrap.classList.add('is-collapsed');
+    }
+  });
+}
+
+if (searchInput) {
+  searchInput.addEventListener('input', (event) => {
+    state.search = event.target.value;
+    savePreferences();
+    updateSearchCollapse();
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+    }
+    searchTimer = setTimeout(() => {
+      reloadReports();
+    }, 300);
+  });
+}
 
 refreshBtn.addEventListener('click', () => {
   loadMachines();
 });
 
-sortSelect.addEventListener('change', (event) => {
-  state.sort = event.target.value;
-  renderList();
+if (reportZeroBtn) {
+  reportZeroBtn.addEventListener('click', () => {
+    openReportZeroModal();
+  });
+}
+
+if (reportZeroForm) {
+  reportZeroForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const payload = getReportZeroPayload();
+    if (!payload) {
+      return;
+    }
+    if (!payload.hostname && !payload.serialNumber && !payload.macAddress) {
+      showReportZeroError('Renseigne au moins un identifiant.');
+      return;
+    }
+    createReportZero(payload);
+  });
+}
+
+if (reportZeroCloseButtons.length) {
+  reportZeroCloseButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      closeReportZeroModal();
+    });
+  });
+}
+
+if (reportZeroModal) {
+  reportZeroModal.addEventListener('click', (event) => {
+    if (event.target === reportZeroModal) {
+      closeReportZeroModal();
+    }
+  });
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && reportZeroModal && !reportZeroModal.hidden) {
+    closeReportZeroModal();
+  }
+  if (event.key === 'Escape' && suggestionModal && !suggestionModal.hidden) {
+    closeSuggestionModal();
+  }
 });
+
+if (suggestionBtn) {
+  suggestionBtn.addEventListener('click', () => {
+    openSuggestionModal();
+  });
+}
+
+if (suggestionAddBtn) {
+  suggestionAddBtn.addEventListener('click', () => {
+    if (suggestionForm) {
+      suggestionForm.hidden = false;
+      if (suggestionTitleInput) {
+        suggestionTitleInput.focus();
+      }
+    }
+  });
+}
+
+if (suggestionCancelBtn) {
+  suggestionCancelBtn.addEventListener('click', () => {
+    if (suggestionForm) {
+      suggestionForm.reset();
+      suggestionForm.hidden = true;
+    }
+    showSuggestionError('');
+  });
+}
+
+if (suggestionForm) {
+  suggestionForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const payload = getSuggestionPayload();
+    if (!payload) {
+      return;
+    }
+    if (!payload.title || !payload.body) {
+      showSuggestionError('Renseigne un titre et un detail.');
+      return;
+    }
+    submitSuggestion(payload);
+  });
+}
+
+if (suggestionCloseButtons.length) {
+  suggestionCloseButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      closeSuggestionModal();
+    });
+  });
+}
+
+if (suggestionModal) {
+  suggestionModal.addEventListener('click', (event) => {
+    if (event.target === suggestionModal) {
+      closeSuggestionModal();
+    }
+  });
+}
 
 listEl.addEventListener('click', (event) => {
   const commentInput = event.target.closest('.comment-inline');
@@ -1963,6 +4625,23 @@ listEl.addEventListener('click', (event) => {
       renderList();
       focusInlineComment(id);
     }
+    return;
+  }
+  const tagPill = event.target.closest('.tag-pill');
+  if (tagPill && tagPill.dataset.tagId) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!state.canEditTags) {
+      return;
+    }
+    const tagId = tagPill.dataset.tagId;
+    const currentTag = tagPill.dataset.tag || DEFAULT_TAG_LABEL;
+    const nextTag = window.prompt('Renommer le tag', currentTag);
+    const trimmed = nextTag ? nextTag.trim() : '';
+    if (!trimmed || trimmed === currentTag) {
+      return;
+    }
+    renameTag(tagId, trimmed);
     return;
   }
   const metaBtn = event.target.closest('.meta-chip');
@@ -1988,7 +4667,95 @@ listEl.addEventListener('click', (event) => {
       state.quickFilter = { type, value };
       state.activeToken = { id, type, value };
     }
+    savePreferences();
     renderList();
+    return;
+  }
+  const summaryBtn = event.target.closest('.summary-chip[data-summary]');
+  if (summaryBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const value = summaryBtn.dataset.summary;
+    if (!value) {
+      return;
+    }
+    if (state.quickFilter && state.quickFilter.type === 'summary' && state.quickFilter.value === value) {
+      state.quickFilter = null;
+    } else {
+      state.quickFilter = { type: 'summary', value };
+    }
+    state.activeToken = null;
+    savePreferences();
+    renderList();
+    return;
+  }
+  const cycleBtn = event.target.closest('[data-action="cycle-status"]');
+  if (cycleBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = cycleBtn.dataset.id;
+    const key = cycleBtn.dataset.key;
+    if (!id || !key) {
+      return;
+    }
+    const nextStatus = nextCycleStatus(key, cycleBtn.dataset.status);
+    updateComponentStatus(id, key, nextStatus, cycleBtn);
+    return;
+  }
+  const categoryBtn = event.target.closest('[data-action="cycle-category"]');
+  if (categoryBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = categoryBtn.dataset.id;
+    if (!id) {
+      return;
+    }
+    const nextValue = nextCategory(categoryBtn.dataset.category);
+    updateCategory(id, nextValue, categoryBtn);
+    return;
+  }
+  const reportLink = event.target.closest('[data-action="open-report"]');
+  if (reportLink) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = reportLink.dataset.id;
+    if (!id) {
+      return;
+    }
+    const targetId = String(id);
+    const activeEl = document.activeElement;
+    if (activeEl && typeof activeEl.blur === 'function') {
+      activeEl.blur();
+    }
+    if (state.expandedId && state.expandedId !== targetId) {
+      holdScrollTop(6, false);
+    }
+    const isLoaded = state.machines.some((machine) => String(machine.id) === targetId);
+    if (!isLoaded && state.expandedId && state.expandedId !== targetId) {
+      holdCardAnchor(state.expandedId);
+    }
+    if (isLoaded) {
+      state.detailOverrideId = null;
+      state.expandedId = targetId;
+      renderList();
+      ensureMachineDetail(targetId);
+      return;
+    }
+    if (!state.expandedId) {
+      state.expandedId = targetId;
+      renderList();
+      ensureMachineDetail(targetId);
+      return;
+    }
+    state.detailOverrideId = targetId;
+    updateExpandedDetailHtml(targetId, true);
+    ensureMachineDetail(targetId, { skipRender: true }).then(() => {
+      if (state.detailOverrideId === targetId) {
+        if (!updateExpandedDetailHtml(targetId, true)) {
+          renderList();
+        }
+      }
+    });
     return;
   }
   const padBtn = event.target.closest('[data-action="set-pad"]');
@@ -2001,6 +4768,29 @@ listEl.addEventListener('click', (event) => {
       return;
     }
     updatePadStatus(id, status);
+    return;
+  }
+  const usbBtn = event.target.closest('[data-action="set-usb"]');
+  if (usbBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = usbBtn.dataset.id;
+    const status = usbBtn.dataset.status;
+    if (!id || !status) {
+      return;
+    }
+    updateUsbStatus(id, status);
+    return;
+  }
+  const deleteBtn = event.target.closest('[data-action="delete-report"]');
+  if (deleteBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = deleteBtn.dataset.id;
+    if (!id) {
+      return;
+    }
+    deleteReport(id);
     return;
   }
   const clearCommentBtn = event.target.closest('[data-action="clear-comment"]');
@@ -2044,6 +4834,7 @@ listEl.addEventListener('click', (event) => {
   if (!id) {
     return;
   }
+  state.detailOverrideId = null;
   if (state.expandedId === id) {
     state.expandedId = null;
     renderList();
@@ -2085,5 +4876,13 @@ listEl.addEventListener(
   true
 );
 
+if (patchnoteOkBtn) {
+  patchnoteOkBtn.addEventListener('click', () => {
+    acknowledgePatchnote();
+  });
+}
+
 initAdminLink();
+initPatchnote();
+initInfiniteScroll();
 loadMachines();

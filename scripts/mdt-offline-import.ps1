@@ -115,9 +115,22 @@ if ($tests.diskRead) { $components.diskReadTest = $tests.diskRead }
 if ($tests.diskWrite) { $components.diskWriteTest = $tests.diskWrite }
 
 $rawFiles = @()
-Get-ChildItem -Path $bundleRoot -File -Recurse | ForEach-Object {
-  $relative = $_.FullName.Substring($bundleRoot.Length).TrimStart('\', '/')
-  $rawFiles += $relative
+Push-Location -LiteralPath $bundleRoot
+try {
+  Get-ChildItem -Path $bundleRoot -File -Recurse | ForEach-Object {
+    $relative = $null
+    try {
+      $relative = (Resolve-Path -Relative -Path $_.FullName)
+    } catch {
+      $relative = $_.Name
+    }
+    if ($relative) {
+      $relative = $relative.TrimStart('.', '\', '/')
+      $rawFiles += $relative
+    }
+  }
+} finally {
+  Pop-Location
 }
 
 $payload = [ordered]@{

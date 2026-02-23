@@ -57,8 +57,6 @@ param(
   [string]$ObjectStorageAccessKey = $env:MDT_OBJECT_STORAGE_ACCESS_KEY,
   [string]$ObjectStorageSecretKey = $env:MDT_OBJECT_STORAGE_SECRET_KEY,
   [string]$ObjectStoragePrefix = $env:MDT_OBJECT_STORAGE_PREFIX,
-  [string]$ReportTag = $env:MDT_REPORT_TAG,
-  [string]$ReportTagId = $env:MDT_REPORT_TAG_ID,
   [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
   [switch]$SkipRawUpload
 )
@@ -78,7 +76,7 @@ if (-not $LogPath) {
   $LogPath = Join-Path $PSScriptRoot 'mdt-report.log'
 }
 
-if (-not $Technician) { $Technician = 'Melisse' }
+if (-not $Technician) { $Technician = 'Rémi' }
 if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
   $SkipRawUpload = $true
 }

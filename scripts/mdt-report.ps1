@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$ApiUrl = $env:MDT_API_URL,
   [ValidateSet('auto', 'laptop', 'desktop', 'unknown')][string]$Category = 'auto',
@@ -57,6 +57,8 @@ param(
   [string]$ObjectStorageAccessKey = $env:MDT_OBJECT_STORAGE_ACCESS_KEY,
   [string]$ObjectStorageSecretKey = $env:MDT_OBJECT_STORAGE_SECRET_KEY,
   [string]$ObjectStoragePrefix = $env:MDT_OBJECT_STORAGE_PREFIX,
+  [string]$ReportTag = $env:MDT_REPORT_TAG,
+  [string]$ReportTagId = $env:MDT_REPORT_TAG_ID,
   [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
   [switch]$SkipRawUpload
 )
@@ -76,7 +78,7 @@ if (-not $LogPath) {
   $LogPath = Join-Path $PSScriptRoot 'mdt-report.log'
 }
 
-$Technician = 'Rémi'
+if (-not $Technician) { $Technician = 'Rémi' }
 if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
   $SkipRawUpload = $true
 }
@@ -89,6 +91,7 @@ if (-not $ObjectStorageBucket) { $ObjectStorageBucket = 'alcyone-archive' }
 if (-not $ObjectStorageAccessKey) { $ObjectStorageAccessKey = 'codexminio' }
 if (-not $ObjectStorageSecretKey) { $ObjectStorageSecretKey = 'semngIYo36sZq27tixYVXeFF' }
 if (-not $ObjectStoragePrefix) { $ObjectStoragePrefix = 'run' }
+if (-not $ReportTag) { $ReportTag = 'En cours' }
 
 if (-not $WinSatDataStorePath) {
   try {
@@ -106,10 +109,10 @@ function Write-Log {
 
   $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
   $line = "[$timestamp][$Level] $Message"
+  try { Write-Host $line } catch { }
   try {
     Add-Content -Path $LogPath -Value $line
   } catch {
-    Write-Output $line
   }
 }
 
@@ -311,6 +314,319 @@ function Normalize-ArgumentList {
   return $Values
 }
 
+function Get-TestLabel {
+  param([string]$Key)
+
+  switch ($Key) {
+    'diskRead' { return 'Lecture disque' }
+    'diskWrite' { return 'Ecriture disque' }
+    'ramTest' { return 'RAM (WinSAT)' }
+    'cpuTest' { return 'CPU (WinSAT)' }
+    'gpuTest' { return 'GPU (WinSAT)' }
+    'cpuStress' { return 'CPU (stress)' }
+    'gpuStress' { return 'GPU (stress)' }
+    'network' { return 'Reseau (iperf)' }
+    'networkPing' { return 'Ping' }
+    'fsCheck' { return 'Check disque' }
+    'memDiag' { return 'Diag memoire' }
+    'cameraStatus' { return 'Camera' }
+    'usbStatus' { return 'USB' }
+    'keyboardStatus' { return 'Clavier' }
+    'padStatus' { return 'Pave tactile' }
+    'badgeReaderStatus' { return 'Badge' }
+    'gpuStatus' { return 'GPU (etat)' }
+    'thermalStatus' { return 'Thermique' }
+    default { return $Key }
+  }
+}
+
+function Get-NonOkTests {
+  param(
+    [hashtable]$Tests,
+    [hashtable]$Extras
+  )
+
+  if (-not $Tests -and -not $Extras) { return @() }
+  $combined = @{}
+  if ($Tests) {
+    foreach ($entry in $Tests.GetEnumerator()) { $combined[$entry.Key] = $entry.Value }
+  }
+  if ($Extras) {
+    foreach ($entry in $Extras.GetEnumerator()) { $combined[$entry.Key] = $entry.Value }
+  }
+
+  $statusKeys = @(
+    'diskRead',
+    'diskWrite',
+    'ramTest',
+    'cpuTest',
+    'gpuTest',
+    'cpuStress',
+    'gpuStress',
+    'network',
+    'networkPing',
+    'fsCheck',
+    'memDiag',
+    'cameraStatus',
+    'usbStatus',
+    'keyboardStatus',
+    'padStatus',
+    'badgeReaderStatus',
+    'gpuStatus',
+    'thermalStatus'
+  )
+  $results = @()
+  foreach ($key in $statusKeys) {
+    if (-not $combined.ContainsKey($key)) { continue }
+    $value = $combined[$key]
+    if (-not ($value -is [string])) { continue }
+    if ([string]::IsNullOrWhiteSpace($value)) { continue }
+    $status = $value.Trim().ToLowerInvariant()
+    if ($status -eq 'ok' -or $status -eq 'not_tested') { continue }
+    $results += [ordered]@{
+      key = $key
+      label = Get-TestLabel -Key $key
+      status = $status
+    }
+  }
+  return $results
+}
+
+function Start-TestCommentCapture {
+  param(
+    [object[]]$Tests,
+    [string]$RunDir,
+    [string]$ApiUrl,
+    [string]$ReportId,
+    [string]$CommentUser,
+    [string]$CommentPassword,
+    [string]$LogPath,
+    [int]$TimeoutSec = 120
+  )
+
+  if (-not $Tests -or $Tests.Count -eq 0) { return $false }
+  if (-not $RunDir) { return $false }
+  if (-not $ApiUrl) { return $false }
+  if (-not $ReportId) { return $false }
+
+  $testsPath = Join-Path $RunDir 'tests-nok.json'
+  $scriptPath = Join-Path $RunDir 'mdt-comment-capture.ps1'
+  try {
+    $Tests | ConvertTo-Json -Depth 4 | Set-Content -Path $testsPath -Encoding UTF8
+  } catch {
+    Write-Log "Failed to write tests list for comment capture: $($_.Exception.Message)" 'WARN'
+    return $false
+  }
+
+  $commentScript = @'
+param(
+  [string]$ApiUrl,
+  [string]$ReportId,
+  [string]$TestsPath,
+  [string]$CommentUser,
+  [string]$CommentPassword,
+  [string]$LogPath,
+  [int]$TimeoutSec = 120
+)
+
+function Write-CommentLog {
+  param([string]$Message)
+  if (-not $TestsPath) { return }
+  $dir = Split-Path $TestsPath -Parent
+  if (-not $dir) { return }
+  $logPath = Join-Path $dir 'mdt-comment.log'
+  $line = "[{0}] {1}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $Message
+  try { Add-Content -Path $logPath -Value $line } catch { }
+  if ($LogPath) {
+    try { Add-Content -Path $LogPath -Value $line } catch { }
+  }
+}
+
+function Get-ApiBaseUrl {
+  param([string]$Url)
+  if (-not $Url) { return $null }
+  try {
+    $uri = [Uri]$Url
+    $port = if ($uri.IsDefaultPort) { '' } else { ':' + $uri.Port }
+    return "$($uri.Scheme)://$($uri.Host)$port"
+  } catch {
+    return ($Url -replace '/api/.*$', '')
+  }
+}
+
+if (-not (Test-Path $TestsPath)) { return }
+$tests = $null
+try { $tests = Get-Content -Path $TestsPath -Raw | ConvertFrom-Json } catch { $tests = $null }
+if (-not $tests) { return }
+if (-not $ApiUrl -or -not $ReportId) { Write-CommentLog 'Missing ApiUrl or ReportId'; return }
+if (-not $CommentUser -or -not $CommentPassword) { Write-CommentLog 'Missing comment credentials'; return }
+
+$hasUi = $true
+try {
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
+} catch {
+  $hasUi = $false
+}
+if (-not $hasUi) { return }
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'MDT report - Tests NOK'
+$form.StartPosition = 'CenterScreen'
+$form.TopMost = $true
+$form.Size = New-Object System.Drawing.Size(720, 520)
+
+$panel = New-Object System.Windows.Forms.TableLayoutPanel
+$panel.Dock = 'Fill'
+$panel.AutoScroll = $true
+$panel.ColumnCount = 2
+$panel.RowCount = 4
+$panel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 35)))
+$panel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 65)))
+
+$timerLabel = New-Object System.Windows.Forms.Label
+$timerLabel.Text = "Temps restant: ${TimeoutSec}s"
+$timerLabel.AutoSize = $true
+$timerLabel.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+$panel.Controls.Add($timerLabel, 0, 0)
+$panel.SetColumnSpan($timerLabel, 2)
+
+$summaryLabel = New-Object System.Windows.Forms.Label
+$summaryText = ($tests | ForEach-Object { "$($_.label) [$($_.status)]" }) -join ', '
+$summaryLabel.Text = "Tests NOK: $summaryText"
+$summaryLabel.AutoSize = $true
+$summaryLabel.Margin = New-Object System.Windows.Forms.Padding(6, 8, 6, 8)
+$panel.Controls.Add($summaryLabel, 0, 1)
+$panel.SetColumnSpan($summaryLabel, 2)
+
+$commentLabel = New-Object System.Windows.Forms.Label
+$commentLabel.Text = 'Commentaire'
+$commentLabel.AutoSize = $true
+$commentLabel.Margin = New-Object System.Windows.Forms.Padding(6, 8, 6, 8)
+$panel.Controls.Add($commentLabel, 0, 2)
+
+$commentBox = New-Object System.Windows.Forms.TextBox
+$commentBox.Multiline = $true
+$commentBox.Height = 80
+$commentBox.Margin = New-Object System.Windows.Forms.Padding(6, 6, 6, 6)
+$panel.Controls.Add($commentBox, 1, 2)
+
+$btn = New-Object System.Windows.Forms.Button
+$btn.Text = 'Envoyer'
+$btn.Height = 32
+$btn.Width = 120
+$btn.Margin = New-Object System.Windows.Forms.Padding(6, 10, 6, 10)
+$btn.Add_Click({ $form.Close() })
+$panel.Controls.Add($btn, 0, 3)
+$panel.SetColumnSpan($btn, 2)
+
+$form.Controls.Add($panel)
+
+$remaining = [int]$TimeoutSec
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 1000
+$timer.Add_Tick({
+  $remaining--
+  if ($remaining -lt 0) { $remaining = 0 }
+  $timerLabel.Text = "Temps restant: ${remaining}s"
+  if ($remaining -le 0) {
+    $timer.Stop()
+    $form.Close()
+  }
+})
+$timer.Start()
+
+try {
+  $null = $form.ShowDialog()
+} finally {
+  $timer.Stop()
+}
+
+$commentText = $null
+if ($commentBox -and $commentBox.Text) {
+  $commentText = $commentBox.Text.Trim()
+}
+if (-not $commentText) { return }
+
+$baseUrl = Get-ApiBaseUrl -Url $ApiUrl
+if (-not $baseUrl) { Write-CommentLog 'Failed to derive API base URL'; return }
+
+$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+try {
+  $loginBody = @{ username = $CommentUser; password = $CommentPassword } | ConvertTo-Json
+  $loginResp = Invoke-RestMethod -Uri "$baseUrl/api/login" -Method Post -ContentType 'application/json' -Body $loginBody -WebSession $session
+  if (-not $loginResp -or -not $loginResp.ok) {
+    Write-CommentLog 'Login failed for comment update'
+    return
+  }
+  Write-CommentLog 'Login ok for comment update'
+} catch {
+  $statusLine = $null
+  try {
+    if ($_.Exception.Response) {
+      $statusLine = "$([int]$_.Exception.Response.StatusCode) $($_.Exception.Response.StatusDescription)"
+    }
+  } catch { }
+  if ($statusLine) {
+    Write-CommentLog "Login error ($statusLine): $($_.Exception.Message)"
+  } else {
+    Write-CommentLog "Login error: $($_.Exception.Message)"
+  }
+  return
+}
+
+try {
+  $commentBody = @{ comment = $commentText } | ConvertTo-Json
+  Invoke-RestMethod -Uri "$baseUrl/api/machines/$ReportId/comment" -Method Put -ContentType 'application/json' -Body $commentBody -WebSession $session | Out-Null
+  Write-CommentLog 'Comment updated via API'
+} catch {
+  $statusLine = $null
+  $responseBody = $null
+  try {
+    if ($_.Exception.Response) {
+      $statusLine = "$([int]$_.Exception.Response.StatusCode) $($_.Exception.Response.StatusDescription)"
+      $stream = $_.Exception.Response.GetResponseStream()
+      if ($stream) {
+        $reader = New-Object System.IO.StreamReader($stream)
+        $responseBody = $reader.ReadToEnd()
+      }
+    }
+  } catch { }
+  if ($statusLine -and $responseBody) {
+    Write-CommentLog "Comment update failed ($statusLine): $responseBody"
+  } elseif ($statusLine) {
+    Write-CommentLog "Comment update failed ($statusLine): $($_.Exception.Message)"
+  } else {
+    Write-CommentLog "Comment update failed: $($_.Exception.Message)"
+  }
+}
+'@
+  Set-Content -Path $scriptPath -Value $commentScript -Encoding UTF8
+
+  try {
+    $psCmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if (-not $psCmd) { return $false }
+    $args = @(
+      '-NoProfile',
+      '-ExecutionPolicy', 'Bypass',
+      '-STA',
+      '-File', $scriptPath,
+      '-ApiUrl', $ApiUrl,
+      '-ReportId', $ReportId,
+      '-TestsPath', $testsPath,
+      '-CommentUser', $CommentUser,
+      '-CommentPassword', $CommentPassword,
+      '-LogPath', $LogPath,
+      '-TimeoutSec', $TimeoutSec
+    )
+    Start-Process -FilePath $psCmd.Source -ArgumentList $args -WindowStyle Normal | Out-Null
+    return $true
+  } catch {
+    Write-Log "Failed to start comment capture: $($_.Exception.Message)" 'WARN'
+    return $false
+  }
+}
+
 function Convert-WinsatNumber {
   param([string]$Value)
 
@@ -328,13 +644,24 @@ function Convert-WinsatNumber {
 
 function Update-MaxValue {
   param(
-    [hashtable]$Target,
+    [System.Collections.IDictionary]$Target,
     [string]$Key,
     $Value
   )
 
   if ($null -eq $Value) { return }
-  if (-not $Target.ContainsKey($Key) -or $Target[$Key] -lt $Value) {
+  if ($null -eq $Target) { return }
+  $hasKey = $false
+  try {
+    if ($Target -is [System.Collections.Specialized.OrderedDictionary]) {
+      $hasKey = $Target.Contains($Key)
+    } else {
+      $hasKey = $Target.ContainsKey($Key)
+    }
+  } catch {
+    try { $hasKey = $Target.Contains($Key) } catch { $hasKey = $false }
+  }
+  if (-not $hasKey -or $Target[$Key] -lt $Value) {
     $Target[$Key] = $Value
   }
 }
@@ -538,6 +865,152 @@ function Get-WinsatFromDataStore {
   }
 
   return $winsat
+}
+
+function Get-WinsatFromXmlFile {
+  param([string]$Path)
+
+  if (-not $Path -or -not (Test-Path -Path $Path)) { return $null }
+  $doc = Read-WinsatXml -Path $Path
+  if (-not $doc) { return $null }
+
+  $winsat = [ordered]@{
+    source = (Split-Path $Path -Parent)
+    files = @{}
+    winSPR = [ordered]@{}
+    metrics = [ordered]@{}
+    cpu = [ordered]@{}
+    cpuStatus = $null
+    memory = [ordered]@{}
+    disk = [ordered]@{}
+    graphics = [ordered]@{}
+    limitsApplied = @()
+    hasNoD3DTest = $false
+  }
+
+  $winsat.files['formal'] = (Split-Path $Path -Leaf)
+  $limits = New-Object 'System.Collections.Generic.HashSet[string]'
+  $sprFields = @('SystemScore', 'MemoryScore', 'CpuScore', 'CPUSubAggScore', 'VideoEncodeScore', 'GraphicsScore', 'GamingScore', 'DiskScore', 'Dx9SubScore', 'Dx10SubScore')
+
+  foreach ($field in $sprFields) {
+    $raw = Get-XmlText -Doc $doc -XPath "//WinSPR/$field"
+    $value = Convert-WinsatNumber $raw
+    Update-MaxValue -Target $winsat.winSPR -Key $field -Value $value
+  }
+
+  try {
+    $cpuNode = $doc.SelectSingleNode('/WinSAT/CompletionStatus')
+    if ($cpuNode) {
+      $cpuCode = $null
+      $cpuDesc = $null
+      try { $cpuCode = $cpuNode.InnerText.Trim() } catch { }
+      try { $cpuDesc = $cpuNode.GetAttribute('description') } catch { }
+      $cpuOk = $false
+      if ($cpuCode -eq '0') { $cpuOk = $true }
+      elseif ($cpuDesc -and $cpuDesc -match '(?i)réussite|success') { $cpuOk = $true }
+      $winsat.cpuStatus = if ($cpuOk) { 'ok' } else { 'nok' }
+    }
+  } catch { }
+
+  $limitNodes = $doc.SelectNodes('//WinSPR/LimitsApplied//LimitApplied')
+  if ($limitNodes) {
+    foreach ($node in $limitNodes) {
+      $limitText = $null
+      try {
+        $friendly = $node.GetAttribute('Friendly')
+        if ($friendly) { $limitText = $friendly.Trim() }
+      } catch { }
+      if (-not $limitText -and $node.InnerText) { $limitText = $node.InnerText.Trim() }
+      if ($limitText) { [void]$limits.Add($limitText) }
+    }
+  }
+
+  $cpuNodes = $doc.SelectNodes('//Metrics/CPUMetrics/*')
+  if ($cpuNodes) {
+    foreach ($node in $cpuNodes) {
+      $value = Convert-WinsatNumber $node.InnerText
+      Update-MaxValue -Target $winsat.cpu -Key $node.Name -Value $value
+    }
+  }
+
+  $memBandwidth = Convert-WinsatNumber (Get-XmlText -Doc $doc -XPath '//Metrics/MemoryMetrics/Bandwidth')
+  Update-MaxValue -Target $winsat.memory -Key 'bandwidthMBps' -Value $memBandwidth
+
+  $diskNodes = $doc.SelectNodes('//Metrics/DiskMetrics/AvgThroughput')
+  if ($diskNodes) {
+    foreach ($node in $diskNodes) {
+      $kind = $null
+      try { $kind = $node.GetAttribute('kind') } catch { }
+      $value = Convert-WinsatNumber $node.InnerText
+      if (-not $kind) { continue }
+      if ($kind -match 'Sequential\\s+Read|Séquentielles\\s+Lire') {
+        Update-MaxValue -Target $winsat.disk -Key 'seqReadMBps' -Value $value
+      } elseif ($kind -match 'Sequential\\s+Write|Séquentielles\\s+Ecriture|Séquentielles\\s+Écriture') {
+        Update-MaxValue -Target $winsat.disk -Key 'seqWriteMBps' -Value $value
+      } elseif ($kind -match 'Random\\s+Read|Aléatoires\\s+Lire') {
+        Update-MaxValue -Target $winsat.disk -Key 'randReadMBps' -Value $value
+      } elseif ($kind -match 'Random\\s+Write|Aléatoires\\s+Ecriture|Aléatoires\\s+Écriture') {
+        Update-MaxValue -Target $winsat.disk -Key 'randWriteMBps' -Value $value
+      }
+    }
+  }
+
+  $dwmFps = Convert-WinsatNumber (Get-XmlText -Doc $doc -XPath '//Metrics/GraphicsMetrics/DWMFps')
+  Update-MaxValue -Target $winsat.graphics -Key 'dwmFps' -Value $dwmFps
+  $videoMem = Convert-WinsatNumber (Get-XmlText -Doc $doc -XPath '//Metrics/GraphicsMetrics/VideoMemBandwidth')
+  Update-MaxValue -Target $winsat.graphics -Key 'videoMemBandwidthMBps' -Value $videoMem
+
+  if ($limits.Count -gt 0) {
+    $winsat.limitsApplied = @($limits)
+    foreach ($limit in $winsat.limitsApplied) {
+      if ($limit -match 'NoD3DTestRun|D3D|D3D test') {
+        $winsat.hasNoD3DTest = $true
+        break
+      }
+    }
+  }
+
+  if ($winsat.cpu.Count -gt 0) {
+    $cpuValues = @()
+    foreach ($val in $winsat.cpu.Values) {
+      if ($val -is [double]) { $cpuValues += $val }
+    }
+    if ($cpuValues.Count -gt 0) {
+      $winsat.cpu.maxMBps = [math]::Round(($cpuValues | Measure-Object -Maximum).Maximum, 1)
+    }
+  }
+
+  return $winsat
+}
+
+function Get-WinsatDiskFromXml {
+  param([string]$Path)
+
+  if (-not $Path -or -not (Test-Path -Path $Path)) { return $null }
+  $doc = Read-WinsatXml -Path $Path
+  if (-not $doc) { return $null }
+
+  $disk = [ordered]@{}
+  $diskNodes = $doc.SelectNodes('//Metrics/DiskMetrics/AvgThroughput')
+  if ($diskNodes) {
+    foreach ($node in $diskNodes) {
+      $kind = $null
+      try { $kind = $node.GetAttribute('kind') } catch { }
+      $value = Convert-WinsatNumber $node.InnerText
+      if (-not $kind) { continue }
+      if ($kind -match 'Sequential\\s+Read|Séquentielles\\s+Lire') {
+        $disk['seqReadMBps'] = $value
+      } elseif ($kind -match 'Sequential\\s+Write|Séquentielles\\s+Ecriture|Séquentielles\\s+Écriture') {
+        $disk['seqWriteMBps'] = $value
+      } elseif ($kind -match 'Random\\s+Read|Aléatoires\\s+Lire') {
+        $disk['randReadMBps'] = $value
+      } elseif ($kind -match 'Random\\s+Write|Aléatoires\\s+Ecriture|Aléatoires\\s+Écriture') {
+        $disk['randWriteMBps'] = $value
+      }
+    }
+  }
+  if ($disk.Count -gt 0) { return $disk }
+  return $null
 }
 
 function Get-WinsatCpuFallback {
@@ -786,6 +1259,7 @@ function Get-MacSerialKey {
     [string]$Hostname
   )
 
+  if ($SerialNumber -and $MacAddress) { return "sn:$SerialNumber|mac:$MacAddress" }
   if ($SerialNumber) { return "sn:$SerialNumber" }
   if ($MacAddress) { return "mac:$MacAddress" }
   if ($Hostname) { return "host:$Hostname" }
@@ -813,6 +1287,13 @@ function Copy-FileSafe {
 
   if (-not $Source -or -not (Test-Path $Source)) { return $false }
   try {
+    if ($Destination -and (Test-Path $Destination)) {
+      try {
+        $srcItem = Get-Item -Path $Source -ErrorAction Stop
+        $dstItem = Get-Item -Path $Destination -ErrorAction Stop
+        if ($srcItem.FullName -eq $dstItem.FullName) { return $true }
+      } catch { }
+    }
     $targetDir = Split-Path $Destination -Parent
     if ($targetDir) { Ensure-Directory -Path $targetDir | Out-Null }
     Copy-Item -Path $Source -Destination $Destination -Force -ErrorAction Stop
@@ -956,6 +1437,7 @@ function Upload-RunArtifacts {
     [string]$AccessKey,
     [string]$SecretKey,
     [string]$Prefix,
+    [string]$Tag,
     [string]$MacSerialKey,
     [string]$ClientRunId,
     [string]$McPath
@@ -975,7 +1457,9 @@ function Upload-RunArtifacts {
     return $result
   }
 
-  $rootPrefix = if ($Prefix) { $Prefix.Trim('/','\\') } else { 'run' }
+  $rootPrefix = if ($Prefix) { $Prefix.Trim('/','\') } else { 'run' }
+  $tagSegment = if ($Tag) { Get-SafeKey -Value $Tag } else { '' }
+  if ($tagSegment) { $rootPrefix = "$rootPrefix/$tagSegment" }
   $safeKey = Get-SafeKey -Value $MacSerialKey
   $destPath = ("{0}/{1}/{2}/{3}/{4}" -f 'diagobj', $Bucket, $rootPrefix, $safeKey, $ClientRunId)
   $result.attempted = $true
@@ -1011,7 +1495,8 @@ function Get-CameraStatusFromOutput {
   )
 
   if (-not $OutputDir -or -not (Test-Path $OutputDir)) {
-    return if ($FallbackStatus -eq 'ok') { 'ok' } else { 'nok' }
+    if ($FallbackStatus -eq 'ok') { return 'ok' }
+    return 'nok'
   }
 
   $errorLog = Join-Path $OutputDir 'camera_error.log'
@@ -1025,7 +1510,8 @@ function Get-CameraStatusFromOutput {
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($photoFile) { return 'ok' }
 
-  return if ($FallbackStatus -eq 'ok') { 'ok' } else { 'nok' }
+  if ($FallbackStatus -eq 'ok') { return 'ok' }
+  return 'nok'
 }
 
 function Invoke-CameraTest {
@@ -2467,22 +2953,20 @@ function Get-VolumeInventory {
 function Invoke-WinsatCapture {
   param(
     [string[]]$Arguments,
-    [int]$TimeoutSec
+    [int]$TimeoutSec,
+    [string]$OutputXmlPath
   )
 
   $cmd = Get-Command winsat -ErrorAction SilentlyContinue
   if (-not $cmd) { return @{ status = 'absent'; mbps = $null } }
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $cmd.Source
-  $psi.Arguments = ($Arguments -join ' ')
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-
-  $proc = New-Object System.Diagnostics.Process
-  $proc.StartInfo = $psi
+  $argList = @()
+  if ($Arguments) { $argList += $Arguments }
+  if ($OutputXmlPath) { $argList += @('-xml', ('"' + $OutputXmlPath + '"')) }
+  $argString = ($argList -join ' ')
+  $exitCode = 1
+  $proc = $null
   try {
-    [void]$proc.Start()
+    $proc = Start-Process -FilePath $cmd.Source -ArgumentList $argString -NoNewWindow -PassThru
   } catch {
     Write-Log "WinSAT start failed: $($_.Exception.Message)" 'WARN'
     return @{ status = 'denied'; mbps = $null }
@@ -2498,48 +2982,19 @@ function Invoke-WinsatCapture {
     return @{ status = 'nok'; mbps = $null }
   }
 
-  $output = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
+  $exitCode = if ($proc) { $proc.ExitCode } else { 1 }
 
-  $matches = [regex]::Matches($output, '([0-9]+(?:[\.,][0-9]+)?)\s*M(?:B|o)/s')
-  $mbps = $null
-  if ($matches.Count -gt 0) {
-    $values = @()
-    foreach ($match in $matches) {
-      $raw = $match.Groups[1].Value.Replace(',', '.')
-      $parsed = [double]::Parse($raw, [System.Globalization.CultureInfo]::InvariantCulture)
-      $values += $parsed
-    }
-    if ($values.Count -gt 0) {
-      $mbps = [math]::Round(($values | Measure-Object -Maximum).Maximum, 1)
-    }
-  }
-
-  $outputLower = $output.ToLowerInvariant()
   $status = $null
-  if ($outputLower -match 'battery|sur batterie|power adapter|secteur') {
-    $status = 'denied'
-  } elseif ($outputLower -match 'already running|déjà en cours') {
-    $status = 'not_tested'
-  } elseif ($outputLower -match 'not available|not supported|introuvable|n''est pas disponible|pas pris en charge') {
-    $status = 'absent'
-  } elseif ($outputLower -match 'access is denied|permission|acc[eè]s refus[eé]|autorisation|droits') {
-    $status = 'denied'
-  } elseif ($proc.ExitCode -ne 0 -and $mbps -ne $null) {
-    Write-Log "WinSAT exit code $($proc.ExitCode) but MB/s found; treating as ok." 'WARN'
+  if ($OutputXmlPath -and (Test-Path $OutputXmlPath)) {
     $status = 'ok'
   } else {
-    $status = if ($proc.ExitCode -eq 0) { 'ok' } else { 'nok' }
+    $status = if ($exitCode -eq 0) { 'ok' } else { 'nok' }
   }
-
   if ($status -ne 'ok') {
-    Write-Log "WinSAT exit code $($proc.ExitCode)" 'WARN'
-  }
-  if ($status -ne 'ok' -and $output) {
-    $snippet = ($output -split "`r?`n" | Where-Object { $_ -ne '' } | Select-Object -Last 4) -join ' | '
-    if ($snippet) { Write-Log "WinSAT output: $snippet" 'WARN' }
+    Write-Log "WinSAT exit code $exitCode" 'WARN'
   }
 
-  return @{ status = $status; mbps = $mbps }
+  return @{ status = $status; mbps = $null }
 }
 
 function Invoke-ExternalTest {
@@ -3276,6 +3731,82 @@ function Get-AntivirusNames {
   return ($av | Select-Object -ExpandProperty displayName)
 }
 
+function Normalize-InventoryString {
+  param([object]$Value)
+
+  if ($Value -eq $null) { return $null }
+  $text = [string]$Value
+  $text = $text.Trim()
+  if (-not $text) { return $null }
+  return $text
+}
+
+function Get-BatteryInventory {
+  $items = Get-CimInstanceSafe -ClassName 'Win32_Battery'
+  if (-not $items) { return @() }
+  $list = @()
+  foreach ($item in $items) {
+    $serial = Normalize-InventoryString $item.SerialNumber
+    $deviceId = Normalize-InventoryString $item.DeviceID
+    if ($serial -or $deviceId) {
+      $list += [ordered]@{ serialNumber = $serial; deviceId = $deviceId }
+    }
+  }
+  return $list
+}
+
+function Get-PhysicalMediaInventory {
+  $items = Get-CimInstanceSafe -ClassName 'Win32_PhysicalMedia'
+  if (-not $items) { return @() }
+  $list = @()
+  foreach ($item in $items) {
+    $tag = Normalize-InventoryString $item.Tag
+    $serial = Normalize-InventoryString $item.SerialNumber
+    if ($tag -or $serial) {
+      $list += [ordered]@{ tag = $tag; serialNumber = $serial }
+    }
+  }
+  return $list
+}
+
+function Get-MemorySerialInventory {
+  param([object[]]$Modules)
+
+  $items = $Modules
+  if (-not $items) {
+    $items = Get-CimInstanceSafe -ClassName 'Win32_PhysicalMemory'
+  }
+  if (-not $items) { return @() }
+  $list = @()
+  foreach ($module in $items) {
+    $bank = Normalize-InventoryString $module.BankLabel
+    $manufacturer = Normalize-InventoryString $module.Manufacturer
+    $part = Normalize-InventoryString $module.PartNumber
+    $serial = Normalize-InventoryString $module.SerialNumber
+    if ($bank -or $manufacturer -or $part -or $serial) {
+      $list += [ordered]@{
+        bankLabel = $bank
+        manufacturer = $manufacturer
+        partNumber = $part
+        serialNumber = $serial
+      }
+    }
+  }
+  return $list
+}
+
+function Get-BaseboardInventory {
+  $items = Get-CimInstanceSafe -ClassName 'Win32_BaseBoard'
+  if (-not $items) { return $null }
+  $board = $items | Select-Object -First 1
+  if (-not $board) { return $null }
+  return [ordered]@{
+    manufacturer = Normalize-InventoryString $board.Manufacturer
+    product = Normalize-InventoryString $board.Product
+    serialNumber = Normalize-InventoryString $board.SerialNumber
+  }
+}
+
 function Get-MemoryTypeLabel {
   param([int]$Type)
 
@@ -3420,6 +3951,7 @@ $vendor = ($system | Select-Object -First 1).Manufacturer
 $model = ($system | Select-Object -First 1).Model
 
 $baseboard = Get-CimInstanceSafe -ClassName 'Win32_BaseBoard' | Select-Object -First 1
+$baseboardInventory = Get-BaseboardInventory
 $biosInfo = Get-CimInstanceSafe -ClassName 'Win32_BIOS' | Select-Object -First 1
 
 $hostname = $env:COMPUTERNAME
@@ -3430,7 +3962,14 @@ if ($macAddressesLog) { Write-Log ("MAC list (primary+secondary): {0}" -f $macAd
 $serialNumber = Get-SerialNumber
 $macSerialKey = Get-MacSerialKey -MacAddress $macAddress -SerialNumber $serialNumber -Hostname $hostname
 $artifactRunDir = New-ArtifactRunDir -ArtifactRoot $artifactRootResolved -MacSerialKey $macSerialKey -ClientRunId $clientRunId
-if ($artifactRunDir) { Write-Log "Artifact run dir: $artifactRunDir" }
+if ($artifactRunDir) {
+  Write-Log "Artifact run dir: $artifactRunDir"
+  $script:WinSatLogDir = Join-Path $artifactRunDir 'winsat'
+  Ensure-Directory -Path $script:WinSatLogDir | Out-Null
+}
+if ($script:WinSatLogDir -and ($winsatRoots -notcontains $script:WinSatLogDir)) {
+  $winsatRoots += $script:WinSatLogDir
+}
 $msinfoReportMacs = @()
 if ($artifactRunDir) {
   $msinfoDir = Join-Path $artifactRunDir 'Msinfo'
@@ -3441,6 +3980,7 @@ $ramMb = Get-RamMb
 $slotsInfo = Get-RamSlots
 $batteryHealth = Get-BatteryHealth
 $batteryInfo = Get-BatteryInfo
+$batteryInventory = Get-BatteryInventory
 $batteryReport = $null
 if ($artifactRunDir -and ($batteryInfo -or $batteryHealth -ne $null)) {
   $batteryReport = Invoke-BatteryReport -OutputDir (Join-Path $artifactRunDir 'Battery')
@@ -3529,6 +4069,7 @@ if ($skipPeripheralTests) {
 
 $diskSmart = $null
 $diskInventory = Get-DiskInventory
+$physicalMediaInventory = Get-PhysicalMediaInventory
 $volumeInventory = Get-VolumeInventory
 Step-Progress -Status 'Stockage'
 
@@ -3536,19 +4077,36 @@ $systemDrive = $env:SystemDrive
 if (-not $systemDrive) { $systemDrive = 'C:' }
 $driveLetter = $systemDrive.TrimEnd('\')
 
-$diskReadTest = Run-WinsatLoop -Arguments @('disk', '-seq', '-read', '-drive', $driveLetter) -Loops $testLoops -TimeoutSec $DiskTestTimeoutSec
-$diskWriteTest = Run-WinsatLoop -Arguments @('disk', '-seq', '-write', '-drive', $driveLetter) -Loops $testLoops -TimeoutSec $DiskTestTimeoutSec
-$memTest = Run-WinsatLoop -Arguments @('mem') -Loops $testLoops -TimeoutSec $MemTestTimeoutSec
-
+$diskReadTest = $null
+$diskWriteTest = $null
+$memTest = $null
 $cpuTest = $null
 $gpuTest = $null
+$formalTest = $null
+$formalAttempted = $false
+$formalStatus = $null
+$formalTimeoutSec = [int](($DiskTestTimeoutSec, $MemTestTimeoutSec, $CpuTestTimeoutSec, $GpuTestTimeoutSec | Measure-Object -Maximum).Maximum)
 if ($testLoops -gt 0) {
-  $cpuTest = Run-WinsatCpuLoop -Loops $testLoops -TimeoutSec $CpuTestTimeoutSec
-  $gpuTest = Invoke-WinsatScore -Arguments @('d3d') -TimeoutSec $GpuTestTimeoutSec
+  $formalAttempted = $true
+  Write-Log 'WinSAT formal run'
+  $formalXmlPath = $null
+  if ($script:WinSatLogDir) {
+    $formalXmlPath = Join-Path $script:WinSatLogDir ("Formal.Assessment.{0}.WinSAT.xml" -f $clientRunId)
+    Write-Log ("WinSAT formal xml: {0}" -f $formalXmlPath)
+  }
+  $script:WinSatFormalXmlPath = $formalXmlPath
+  $formalTest = Invoke-WinsatCapture -Arguments @('formal') -TimeoutSec $formalTimeoutSec -OutputXmlPath $formalXmlPath
 }
-if ($gpuTest -and $gpuTest.status -eq 'timeout') {
-  Write-Log 'WinSAT GPU timeout; marking as not_tested.' 'WARN'
-  $gpuTest.status = 'not_tested'
+if ($formalTest -and $formalTest.status -eq 'timeout') {
+  Write-Log 'WinSAT formal timeout; marking as not_tested.' 'WARN'
+  $formalTest.status = 'not_tested'
+}
+if ($formalTest -and $formalTest.status -ne 'ok' -and $script:WinSatFormalXmlPath -and (Test-Path $script:WinSatFormalXmlPath)) {
+  Write-Log 'WinSAT formal XML present; treating status as ok.' 'INFO'
+  $formalTest.status = 'ok'
+}
+if ($formalTest -and $formalTest.status -and $formalTest.status -ne 'ok') {
+  $formalStatus = $formalTest.status
 }
 
 $cpuExternalStatus = $null
@@ -3631,6 +4189,7 @@ $gpuInfo = [ordered]@{
 }
 
 $memoryModules = Get-CimInstanceSafe -ClassName 'Win32_PhysicalMemory'
+$memorySerials = Get-MemorySerialInventory -Modules $memoryModules
 $memType = $null
 $memSpeed = $null
 if ($memoryModules) {
@@ -3689,26 +4248,7 @@ if ($clientRunId) { $diag.clientRunId = $clientRunId }
 if ($macSerialKey) { $diag.macSerialKey = $macSerialKey }
 
 $tests = [ordered]@{}
-if ($diskReadTest) {
-  $tests.diskRead = $diskReadTest.status
-  if ($diskReadTest.mbps -ne $null) { $tests.diskReadMBps = $diskReadTest.mbps }
-}
-if ($diskWriteTest) {
-  $tests.diskWrite = $diskWriteTest.status
-  if ($diskWriteTest.mbps -ne $null) { $tests.diskWriteMBps = $diskWriteTest.mbps }
-}
-if ($memTest) {
-  $tests.ramTest = $memTest.status
-  if ($memTest.mbps -ne $null) { $tests.ramMBps = $memTest.mbps }
-}
-if ($cpuTest) {
-  $tests.cpuTest = $cpuTest.status
-  if ($cpuTest.mbps -ne $null) { $tests.cpuMBps = $cpuTest.mbps }
-}
-if ($gpuTest) {
-  $tests.gpuTest = $gpuTest.status
-  if ($gpuTest.score -ne $null) { $tests.gpuScore = $gpuTest.score }
-}
+
 if ($cpuExternalStatus) { $tests.cpuStress = $cpuExternalStatus }
 if ($gpuExternalStatus) { $tests.gpuStress = $gpuExternalStatus }
 if ($networkPingResult) {
@@ -3723,9 +4263,17 @@ if ($iperfResult) {
 if ($fsCheckResult) { $tests.fsCheck = $fsCheckResult.status }
 if ($memDiagStatus) { $tests.memDiag = $memDiagStatus }
 
-if (-not $winsatStore -and -not $SkipWinSatDataStore -and $winsatRoots.Count -gt 0) {
+$refreshWinsat = $false
+if (-not $winsatStore -or $formalAttempted) { $refreshWinsat = $true }
+if ($refreshWinsat -and -not $SkipWinSatDataStore -and $winsatRoots.Count -gt 0) {
   $winsatStore = Get-WinsatFromDataStore -Paths $winsatRoots
   if ($winsatStore) { Write-Log 'WinSAT datastore refreshed after tests.' 'INFO' }
+}
+if (-not $winsatStore -and $script:WinSatFormalXmlPath) {
+  $winsatStore = Get-WinsatFromXmlFile -Path $script:WinSatFormalXmlPath
+  if ($winsatStore) {
+    Write-Log ("WinSAT parsed from formal XML: {0}" -f $script:WinSatFormalXmlPath)
+  }
 }
 
 $winsatCpuScore = $null
@@ -3761,6 +4309,14 @@ if ($winsatStore) {
     if ($tests.ramMBps -eq $null) { $tests.ramMBps = [math]::Round($memBandwidth, 1) }
   }
 
+  if (($winsatStore.disk -eq $null -or $winsatStore.disk.Count -eq 0) -and $script:WinSatFormalXmlPath) {
+    $diskFromXml = Get-WinsatDiskFromXml -Path $script:WinSatFormalXmlPath
+    if ($diskFromXml) {
+      $winsatStore.disk = $diskFromXml
+      Write-Log ("WinSAT disk metrics from XML: seqRead={0} seqWrite={1}" -f $diskFromXml.seqReadMBps, $diskFromXml.seqWriteMBps)
+    }
+  }
+
   $diskSeqRead = $null
   if ($winsatStore.disk -and $winsatStore.disk.seqReadMBps -ne $null) { $diskSeqRead = $winsatStore.disk.seqReadMBps }
   if ($diskSeqRead -ne $null) {
@@ -3772,16 +4328,21 @@ if ($winsatStore) {
     $tests.diskWriteMBps = [math]::Round($winsatStore.disk.seqWriteMBps, 1)
     if (-not $tests.diskWrite -or $tests.diskWrite -ne 'ok') { $tests.diskWrite = 'ok' }
   }
+  if ($winsatStore.winSPR -and $winsatStore.winSPR.DiskScore -ne $null) {
+    if (-not $tests.diskRead -or $tests.diskRead -ne 'ok') { $tests.diskRead = 'ok' }
+    if (-not $tests.diskWrite -or $tests.diskWrite -ne 'ok') { $tests.diskWrite = 'ok' }
+  }
 
-  if (-not $winsatStore.hasNoD3DTest) {
-    if ($winsatStore.winSPR -and $winsatStore.winSPR.GamingScore -ne $null) { $winsatGraphicsScore = $winsatStore.winSPR.GamingScore }
-    if ($winsatGraphicsScore -eq $null -and $winsatStore.winSPR -and $winsatStore.winSPR.GraphicsScore -ne $null) {
-      $winsatGraphicsScore = $winsatStore.winSPR.GraphicsScore
+  if ($winsatStore.winSPR -and $winsatStore.winSPR.GamingScore -ne $null) { $winsatGraphicsScore = $winsatStore.winSPR.GamingScore }
+  if ($winsatGraphicsScore -eq $null -and $winsatStore.winSPR -and $winsatStore.winSPR.GraphicsScore -ne $null) {
+    $winsatGraphicsScore = $winsatStore.winSPR.GraphicsScore
+  }
+  if ($winsatGraphicsScore -ne $null) {
+    if ($winsatStore.hasNoD3DTest) {
+      Write-Log 'WinSAT D3D test skipped; using WinSPR GraphicsScore/GamingScore for GPU.' 'WARN'
     }
-    if ($winsatGraphicsScore -ne $null) {
-      if (-not $tests.gpuTest -or $tests.gpuTest -ne 'ok') { $tests.gpuTest = 'ok' }
-      if ($tests.gpuScore -eq $null) { $tests.gpuScore = $winsatGraphicsScore }
-    }
+    if (-not $tests.gpuTest -or $tests.gpuTest -ne 'ok') { $tests.gpuTest = 'ok' }
+    if ($tests.gpuScore -eq $null) { $tests.gpuScore = $winsatGraphicsScore }
   }
 } else {
   if (-not $SkipWinSatDataStore) {
@@ -3799,6 +4360,14 @@ if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
       if ($tests.cpuMBps -eq $null -and $cpuFallback.maxMBps -ne $null) { $tests.cpuMBps = $cpuFallback.maxMBps }
     }
   }
+}
+
+if ($formalStatus -and $formalStatus -ne 'ok') {
+  if (-not $tests.diskRead) { $tests.diskRead = $formalStatus }
+  if (-not $tests.diskWrite) { $tests.diskWrite = $formalStatus }
+  if (-not $tests.ramTest) { $tests.ramTest = $formalStatus }
+  if (-not $tests.cpuTest) { $tests.cpuTest = $formalStatus }
+  if (-not $tests.gpuTest) { $tests.gpuTest = $formalStatus }
 }
 
 if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
@@ -3859,6 +4428,21 @@ if (-not $SkipGpuAssessment) {
   }
 }
 
+$commentCaptureStarted = $false
+$nonOkTests = @()
+if ($artifactRunDir) {
+  $componentStatuses = @{}
+  if ($cameraStatus) { $componentStatuses.cameraStatus = $cameraStatus }
+  if ($usbStatus) { $componentStatuses.usbStatus = $usbStatus }
+  if ($keyboardStatus) { $componentStatuses.keyboardStatus = $keyboardStatus }
+  if ($padStatus) { $componentStatuses.padStatus = $padStatus }
+  if ($badgeStatus) { $componentStatuses.badgeReaderStatus = $badgeStatus }
+  if ($gpuStatus) { $componentStatuses.gpuStatus = $gpuStatus }
+  if ($thermalInfo -and $thermalInfo.status) { $componentStatuses.thermalStatus = $thermalInfo.status }
+
+  $nonOkTests = Get-NonOkTests -Tests $tests -Extras $componentStatuses
+}
+
 $diag.diagnosticsPerformed = $tests.Keys.Count
 
 $stopwatch.Stop()
@@ -3873,6 +4457,8 @@ if ($macAddress) { $payload.macAddress = $macAddress }
 if ($macAddresses -and $macAddresses.Count -gt 0) { $payload.macAddresses = $macAddresses }
 if ($serialNumber) { $payload.serialNumber = $serialNumber }
 if ($categoryValue) { $payload.category = $categoryValue }
+if ($ReportTag) { $payload.tag = $ReportTag }
+if ($ReportTagId) { $payload.tagId = $ReportTagId }
 if ($technicianValue) { $payload.technician = $technicianValue }
 if ($vendor) { $payload.vendor = $vendor }
 if ($model) { $payload.model = $model }
@@ -3894,6 +4480,14 @@ if ($volumeInventory) {
   $volumeList = @($volumeInventory)
   if ($volumeList.Count -gt 0) { $payload.volumes = $volumeList }
 }
+
+$inventory = [ordered]@{}
+if ($batteryInventory -and $batteryInventory.Count -gt 0) { $inventory.battery = $batteryInventory }
+if ($physicalMediaInventory -and $physicalMediaInventory.Count -gt 0) { $inventory.disks = $physicalMediaInventory }
+if ($memorySerials -and $memorySerials.Count -gt 0) { $inventory.memory = $memorySerials }
+if ($baseboardInventory) { $inventory.baseboard = $baseboardInventory }
+if ($inventory.Count -gt 0) { $payload.inventory = $inventory }
+
 
 $payload.diag = $diag
 $payload.device = [ordered]@{
@@ -3994,6 +4588,8 @@ if ($artifactRunDir) {
   if ($ObjectStorageEndpoint) { $payload.rawArtifacts.endpoint = $ObjectStorageEndpoint }
   if ($ObjectStorageBucket) { $payload.rawArtifacts.bucket = $ObjectStorageBucket }
   if ($ObjectStoragePrefix) { $payload.rawArtifacts.prefix = $ObjectStoragePrefix }
+  if ($ReportTag) { $payload.rawArtifacts.tag = $ReportTag }
+  if ($ReportTagId) { $payload.rawArtifacts.tagId = $ReportTagId }
 
   $payloadJson = $payload | ConvertTo-Json -Depth 10
   Stage-RunArtifacts `
@@ -4013,6 +4609,7 @@ if ($artifactRunDir) {
       -AccessKey $ObjectStorageAccessKey `
       -SecretKey $ObjectStorageSecretKey `
       -Prefix $ObjectStoragePrefix `
+      -Tag $ReportTag `
       -MacSerialKey $macSerialKey `
       -ClientRunId $clientRunId `
       -McPath $ObjectStorageMcPath
@@ -4049,6 +4646,36 @@ try {
   Complete-Progress
   Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
   exit 1
+}
+
+if ($ingestOk -and $artifactRunDir -and $nonOkTests -and $nonOkTests.Count -gt 0) {
+  $commentUser = if ($env:MDT_COMMENT_USER) { $env:MDT_COMMENT_USER } elseif ($env:MDT_HYDRA_USER) { $env:MDT_HYDRA_USER } else { 'admin' }
+  $commentPassword = if ($env:MDT_COMMENT_PASSWORD) { $env:MDT_COMMENT_PASSWORD } elseif ($env:MDT_HYDRA_PASSWORD) { $env:MDT_HYDRA_PASSWORD } else { 'admin' }
+  if (-not $commentUser -or -not $commentPassword) {
+    Write-Log 'Comment capture skipped: missing MDT_COMMENT_USER/MDT_COMMENT_PASSWORD.' 'WARN'
+  } else {
+    $reportIdValue = $null
+    if ($response -and $response.reportId) { $reportIdValue = $response.reportId }
+    elseif ($response -and $response.id) { $reportIdValue = $response.id }
+    elseif ($clientRunId) { $reportIdValue = $clientRunId }
+    if ($reportIdValue) {
+      $commentCaptureStarted = Start-TestCommentCapture `
+        -Tests $nonOkTests `
+        -RunDir $artifactRunDir `
+        -ApiUrl $ApiUrl `
+        -ReportId $reportIdValue `
+        -CommentUser $commentUser `
+        -CommentPassword $commentPassword `
+        -LogPath $LogPath `
+        -TimeoutSec 120
+      if ($commentCaptureStarted) {
+        $labels = ($nonOkTests | ForEach-Object { $_.label }) -join ', '
+        Write-Log "NOK tests detected; comment capture started (120s): $labels"
+      }
+    } else {
+      Write-Log 'Comment capture skipped: reportId missing.' 'WARN'
+    }
+  }
 }
 
 if ($ingestOk -and -not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
@@ -4102,6 +4729,7 @@ if ($artifactRunDir) {
       -AccessKey $ObjectStorageAccessKey `
       -SecretKey $ObjectStorageSecretKey `
       -Prefix $ObjectStoragePrefix `
+      -Tag $ReportTag `
       -MacSerialKey $macSerialKey `
       -ClientRunId $clientRunId `
       -McPath $ObjectStorageMcPath

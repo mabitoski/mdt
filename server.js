@@ -1,5 +1,13 @@
 const crypto = require('crypto');
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
+const os = require('os');
 const path = require('path');
+const { URL } = require('url');
+const { spawn } = require('child_process');
+const net = require('net');
+const tls = require('tls');
 const express = require('express');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -21,7 +29,52 @@ const SESSION_NAME = process.env.SESSION_NAME || 'mdt.sid';
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
 const ALLOW_LOCAL_ADMIN = process.env.ALLOW_LOCAL_ADMIN !== '0';
 const LOCAL_ADMIN_USER = process.env.LOCAL_ADMIN_USER || 'admin';
-const LOCAL_ADMIN_PASSWORD = process.env.LOCAL_ADMIN_PASSWORD || 'admin';
+const LOCAL_ADMIN_PASSWORD = process.env.LOCAL_ADMIN_PASSWORD || '';
+const VAULT_URL = process.env.VAULT_URL || '';
+const VAULT_AUTH_PATH = process.env.VAULT_AUTH_PATH || '/auth/service';
+const VAULT_AUTH_TOKEN = process.env.VAULT_AUTH_TOKEN || '';
+const VAULT_AUTH_SCOPES = process.env.VAULT_AUTH_SCOPES || 'read';
+const VAULT_BEARER_TOKEN = process.env.VAULT_BEARER_TOKEN || '';
+const VAULT_SECRET_PATH = process.env.VAULT_SECRET_PATH || '';
+const VAULT_SECRET_USER_FIELD = process.env.VAULT_SECRET_USER_FIELD || 'username';
+const VAULT_SECRET_PASSWORD_FIELD = process.env.VAULT_SECRET_PASSWORD_FIELD || 'password';
+const VAULT_CACHE_TTL_SEC = Number.parseInt(process.env.VAULT_CACHE_TTL_SEC || '300', 10);
+const VAULT_TIMEOUT_MS = Number.parseInt(process.env.VAULT_TIMEOUT_MS || '4000', 10);
+const SUGGESTION_EMAIL_ENABLED = process.env.SUGGESTION_EMAIL_ENABLED !== '0';
+const SUGGESTION_EMAIL_TO = process.env.SUGGESTION_EMAIL_TO || 'jordan.turck@marl-ds.com';
+const SUGGESTION_EMAIL_FROM = process.env.SUGGESTION_EMAIL_FROM || '';
+const SUGGESTION_SMTP_HOST = process.env.SUGGESTION_SMTP_HOST || 'smtp.gmail.com';
+const SUGGESTION_SMTP_PORT = Number.parseInt(process.env.SUGGESTION_SMTP_PORT || '465', 10);
+const SUGGESTION_SMTP_SECURE = process.env.SUGGESTION_SMTP_SECURE !== '0';
+const SUGGESTION_SMTP_TIMEOUT_MS = Number.parseInt(
+  process.env.SUGGESTION_SMTP_TIMEOUT_MS || '10000',
+  10
+);
+const SUGGESTION_SMTP_USER = process.env.SUGGESTION_SMTP_USER || '';
+const SUGGESTION_SMTP_PASS = process.env.SUGGESTION_SMTP_PASS || '';
+const SUGGESTION_VAULT_SECRET_PATH =
+  process.env.SUGGESTION_VAULT_SECRET_PATH || '';
+const SUGGESTION_VAULT_USER_FIELD =
+  process.env.SUGGESTION_VAULT_USER_FIELD || 'username';
+const SUGGESTION_VAULT_PASSWORD_FIELD =
+  process.env.SUGGESTION_VAULT_PASSWORD_FIELD || 'password';
+const OBJECT_STORAGE_ENDPOINT =
+  process.env.OBJECT_STORAGE_ENDPOINT || process.env.MDT_OBJECT_STORAGE_ENDPOINT || '';
+const OBJECT_STORAGE_BUCKET =
+  process.env.OBJECT_STORAGE_BUCKET || process.env.MDT_OBJECT_STORAGE_BUCKET || 'alcyone-archive';
+const OBJECT_STORAGE_ACCESS_KEY =
+  process.env.OBJECT_STORAGE_ACCESS_KEY || process.env.MDT_OBJECT_STORAGE_ACCESS_KEY || '';
+const OBJECT_STORAGE_SECRET_KEY =
+  process.env.OBJECT_STORAGE_SECRET_KEY || process.env.MDT_OBJECT_STORAGE_SECRET_KEY || '';
+const OBJECT_STORAGE_PREFIX =
+  process.env.OBJECT_STORAGE_PREFIX || process.env.MDT_OBJECT_STORAGE_PREFIX || 'run';
+const OBJECT_STORAGE_ALIAS = process.env.OBJECT_STORAGE_ALIAS || 'alcyone';
+const OBJECT_STORAGE_CONSOLE_URL =
+  process.env.OBJECT_STORAGE_CONSOLE_URL || process.env.MDT_OBJECT_STORAGE_CONSOLE_URL || '';
+const OBJECT_STORAGE_BROWSER_PATH =
+  process.env.OBJECT_STORAGE_BROWSER_PATH || '/browser';
+const OBJECT_STORAGE_RENAME_ON_TAG =
+  ['1', 'true', 'yes', 'on'].includes((process.env.OBJECT_STORAGE_RENAME_ON_TAG || '').toLowerCase());
 const DEFAULT_LDAP_SEARCH_FILTER = '(sAMAccountName={{username}})';
 const DEFAULT_LDAP_SEARCH_ATTRIBUTES = 'dn,cn,mail';
 const LDAP_URL = process.env.LDAP_URL || '';
@@ -35,6 +88,10 @@ const LDAP_SEARCH_ATTRIBUTES_RAW =
 const LDAP_TLS_REJECT_UNAUTHORIZED =
   process.env.LDAP_TLS_REJECT_UNAUTHORIZED !== '0';
 const ENV_LDAP_ENABLED = Boolean(LDAP_URL && LDAP_SEARCH_BASE);
+const HYDRA_ADMIN_GROUP_DN = (
+  process.env.HYDRA_ADMIN_GROUP_DN ||
+  'CN=HYDRA_ADMINS,OU=GROUPS,OU=TIER2,DC=nova,DC=local'
+).toLowerCase();
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const PGSSLMODE = (process.env.PGSSLMODE || '').toLowerCase();
 const PGSSL =
@@ -46,6 +103,8 @@ const PGSSL_REJECT_UNAUTHORIZED = process.env.PGSSL_REJECT_UNAUTHORIZED !== '0';
 const AUDIT_LOG_ENABLED = process.env.AUDIT_LOG_ENABLED !== '0';
 const AUDIT_LOG_LIMIT_DEFAULT = Number.parseInt(process.env.AUDIT_LOG_LIMIT || '100', 10);
 const AUDIT_LOG_LIMIT_MAX = Number.parseInt(process.env.AUDIT_LOG_LIMIT_MAX || '500', 10);
+const REPORT_PAGE_LIMIT_DEFAULT = Number.parseInt(process.env.REPORT_PAGE_LIMIT || '60', 10);
+const REPORT_PAGE_LIMIT_MAX = Number.parseInt(process.env.REPORT_PAGE_LIMIT_MAX || '200', 10);
 
 if (!Number.isFinite(PORT)) {
   throw new Error('PORT must be a number');
@@ -79,6 +138,266 @@ function generateUuid() {
   return normalizeUuid(hex);
 }
 
+function normalizeObjectStorageSegment(value) {
+  if (!value) {
+    return '';
+  }
+  return String(value)
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function hasObjectStorageConfig() {
+  return Boolean(
+    OBJECT_STORAGE_ENDPOINT &&
+      OBJECT_STORAGE_BUCKET &&
+      OBJECT_STORAGE_ACCESS_KEY &&
+      OBJECT_STORAGE_SECRET_KEY
+  );
+}
+
+function runMcCommand(args, configDir) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env, MC_CONFIG_DIR: configDir };
+    const proc = spawn('mc', args, { env });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on('error', (error) => {
+      reject(error);
+    });
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      reject(new Error(`mc ${args.join(' ')} failed (${code}): ${stderr || stdout}`));
+    });
+  });
+}
+
+async function renameObjectStoragePrefix(oldPrefix, newPrefix) {
+  const source = normalizeObjectStorageSegment(oldPrefix);
+  const destination = normalizeObjectStorageSegment(newPrefix);
+  if (!source || !destination || source === destination) {
+    return { ok: false, error: 'invalid_prefix', source, destination };
+  }
+  if (!hasObjectStorageConfig()) {
+    return { ok: false, error: 'object_storage_not_configured', source, destination };
+  }
+
+  const configDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mc-'));
+  try {
+    await runMcCommand(
+      ['alias', 'set', OBJECT_STORAGE_ALIAS, OBJECT_STORAGE_ENDPOINT, OBJECT_STORAGE_ACCESS_KEY, OBJECT_STORAGE_SECRET_KEY],
+      configDir
+    );
+    const srcPath = `${OBJECT_STORAGE_ALIAS}/${OBJECT_STORAGE_BUCKET}/${source}/`;
+    const dstPath = `${OBJECT_STORAGE_ALIAS}/${OBJECT_STORAGE_BUCKET}/${destination}/`;
+    await runMcCommand(['mirror', '--overwrite', srcPath, dstPath], configDir);
+    await runMcCommand(
+      ['rm', '--recursive', '--force', `${OBJECT_STORAGE_ALIAS}/${OBJECT_STORAGE_BUCKET}/${source}`],
+      configDir
+    );
+    return { ok: true, source, destination };
+  } catch (error) {
+    return { ok: false, error: error.message || String(error), source, destination };
+  } finally {
+    try {
+      await fs.promises.rm(configDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.warn('Failed to cleanup mc config dir', cleanupError);
+    }
+  }
+}
+
+function buildAlcyoneConsoleUrl({
+  reportId,
+  tagName,
+  serialNumber,
+  macAddress,
+  machineKey,
+  rawDestination
+}) {
+  if (!OBJECT_STORAGE_CONSOLE_URL || !reportId) {
+    return '';
+  }
+  const base = String(OBJECT_STORAGE_CONSOLE_URL).replace(/\/+$/, '');
+  const browserPath = `/${String(OBJECT_STORAGE_BROWSER_PATH || '/browser').replace(/^\/+/, '')}`;
+  let bucket = OBJECT_STORAGE_BUCKET;
+  let pathParts = [];
+
+  if (rawDestination) {
+    const cleaned = String(rawDestination).replace(/^\/+/, '');
+    const parts = cleaned.split('/').filter(Boolean);
+    if (parts.length >= 3) {
+      let start = 0;
+      if (parts[0] === OBJECT_STORAGE_ALIAS) {
+        start = 1;
+      }
+      if (parts[start]) {
+        bucket = parts[start];
+        pathParts = parts.slice(start + 1);
+      }
+    }
+  }
+
+  if (!pathParts.length) {
+    const tagSegment = normalizeObjectStorageSegment(tagName || DEFAULT_REPORT_TAG || 'en-cours');
+    const keyRaw =
+      buildMachineKey(serialNumber, macAddress, null) ||
+      (machineKey ? String(machineKey) : 'unknown');
+    const keySegment = normalizeObjectStorageSegment(keyRaw || 'unknown');
+    pathParts = [
+      normalizeObjectStorageSegment(OBJECT_STORAGE_PREFIX || 'run'),
+      tagSegment,
+      keySegment,
+      reportId
+    ];
+  }
+
+  const parts = [
+    browserPath,
+    encodeURIComponent(bucket),
+    ...pathParts.filter(Boolean).map((segment) => encodeURIComponent(segment))
+  ];
+  return `${base}${parts.join('/')}`;
+}
+
+async function getActiveTag(client) {
+  const result = await client.query(
+    'SELECT id, name, is_active FROM tags WHERE is_active = true ORDER BY updated_at DESC LIMIT 1'
+  );
+  const row = result.rows && result.rows[0] ? result.rows[0] : null;
+  return row || null;
+}
+
+async function ensureActiveTag(client) {
+  const existing = await getActiveTag(client);
+  if (existing) {
+    return existing;
+  }
+  const fallbackResult = await client.query(
+    'SELECT id, name, is_active FROM tags WHERE LOWER(name) = LOWER($1) LIMIT 1',
+    [DEFAULT_REPORT_TAG]
+  );
+  const fallback = fallbackResult.rows && fallbackResult.rows[0] ? fallbackResult.rows[0] : null;
+  if (fallback) {
+    await client.query('UPDATE tags SET is_active = true, updated_at = NOW() WHERE id = $1', [
+      fallback.id
+    ]);
+    return { ...fallback, is_active: true };
+  }
+  const id = generateUuid();
+  await client.query(
+    `
+      INSERT INTO tags (id, name, is_active, created_at, updated_at)
+      VALUES ($1, $2, true, NOW(), NOW())
+    `,
+    [id, DEFAULT_REPORT_TAG]
+  );
+  return { id, name: DEFAULT_REPORT_TAG, is_active: true };
+}
+
+async function resolveTagForIngest(client, tagIdRaw, tagNameRaw) {
+  const tagId = normalizeUuid(tagIdRaw);
+  const tagName = cleanString(tagNameRaw, 64);
+
+  if (tagId) {
+    const result = await client.query('SELECT id, name, is_active FROM tags WHERE id = $1', [
+      tagId
+    ]);
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (row) {
+      return row;
+    }
+  }
+
+  if (tagName) {
+    const lookup = await client.query(
+      'SELECT id, name, is_active FROM tags WHERE LOWER(name) = LOWER($1) LIMIT 1',
+      [tagName]
+    );
+    if (lookup.rows && lookup.rows[0]) {
+      return lookup.rows[0];
+    }
+    const newId = generateUuid();
+    try {
+      await client.query(
+        `
+          INSERT INTO tags (id, name, is_active, created_at, updated_at)
+          VALUES ($1, $2, false, NOW(), NOW())
+        `,
+        [newId, tagName]
+      );
+      return { id: newId, name: tagName, is_active: false };
+    } catch (error) {
+      const retry = await client.query(
+        'SELECT id, name, is_active FROM tags WHERE LOWER(name) = LOWER($1) LIMIT 1',
+        [tagName]
+      );
+      if (retry.rows && retry.rows[0]) {
+        return retry.rows[0];
+      }
+    }
+  }
+
+  return ensureActiveTag(client);
+}
+
+async function listTags(client) {
+  const result = await client.query(
+    'SELECT id, name, is_active FROM tags ORDER BY LOWER(name)'
+  );
+  return Array.isArray(result.rows) ? result.rows : [];
+}
+
+function buildLegacyFilterClause(flag) {
+  const legacyFlag = String(flag || '').toLowerCase();
+  if (legacyFlag === '1' || legacyFlag === 'true') {
+    return `payload IS NOT NULL AND payload <> '' AND payload::jsonb ? 'legacy'`;
+  }
+  if (legacyFlag === '0' || legacyFlag === 'false') {
+    return `(payload IS NULL OR payload = '' OR NOT (payload::jsonb ? 'legacy'))`;
+  }
+  return '';
+}
+
+async function listTagsWithCounts(client, { legacyFlag = null, includeActive = true } = {}) {
+  const legacyClause = buildLegacyFilterClause(legacyFlag);
+  const reportWhereParts = ['tag_id IS NOT NULL'];
+  if (legacyClause) {
+    reportWhereParts.push(legacyClause);
+  }
+  const reportWhere = reportWhereParts.length ? `WHERE ${reportWhereParts.join(' AND ')}` : '';
+  const activeWhere = includeActive ? 'tags.is_active = true OR ' : '';
+  const result = await client.query(
+    `
+      SELECT
+        tags.id,
+        tags.name,
+        tags.is_active,
+        COALESCE(report_counts.count, 0) AS report_count
+      FROM tags
+      LEFT JOIN (
+        SELECT tag_id, COUNT(*) AS count
+        FROM reports
+        ${reportWhere}
+        GROUP BY tag_id
+      ) report_counts ON report_counts.tag_id = tags.id
+      WHERE ${activeWhere} COALESCE(report_counts.count, 0) > 0
+      ORDER BY LOWER(tags.name)
+    `
+  );
+  return Array.isArray(result.rows) ? result.rows : [];
+}
+
 async function backfillReportsFromMachines() {
   try {
     const reportCount = await pool.query('SELECT COUNT(*) AS count FROM reports');
@@ -95,6 +414,8 @@ async function backfillReportsFromMachines() {
         mac_addresses,
         serial_number,
         category,
+        tag,
+        tag_id,
         model,
         vendor,
         technician,
@@ -136,6 +457,8 @@ async function backfillReportsFromMachines() {
               mac_addresses,
               serial_number,
               category,
+              tag,
+              tag_id,
               model,
               vendor,
               technician,
@@ -156,38 +479,40 @@ async function backfillReportsFromMachines() {
               last_ip
             ) VALUES (
               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-              $21, $22, $23, $24, $25
-            )
-          `,
-          [
-            reportId,
-            row.machine_key,
-            row.hostname,
-            row.mac_address,
-            row.mac_addresses,
-            row.serial_number,
-            row.category,
-            row.model,
-            row.vendor,
-            row.technician,
-            row.os_version,
-            row.ram_mb,
-            row.ram_slots_total,
-            row.ram_slots_free,
-            row.battery_health,
-            row.camera_status,
-            row.usb_status,
-            row.keyboard_status,
-            row.pad_status,
-            row.badge_reader_status,
-            row.last_seen,
-            row.created_at,
-            row.components,
-            row.payload,
-            row.last_ip
-          ]
-        );
+            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+            $21, $22, $23, $24, $25, $26, $27
+          )
+        `,
+        [
+          reportId,
+          row.machine_key,
+          row.hostname,
+          row.mac_address,
+          row.mac_addresses,
+          row.serial_number,
+          row.category,
+          row.tag,
+          row.tag_id,
+          row.model,
+          row.vendor,
+          row.technician,
+          row.os_version,
+          row.ram_mb,
+          row.ram_slots_total,
+          row.ram_slots_free,
+          row.battery_health,
+          row.camera_status,
+          row.usb_status,
+          row.keyboard_status,
+          row.pad_status,
+          row.badge_reader_status,
+          row.last_seen,
+          row.created_at,
+          row.components,
+          row.payload,
+          row.last_ip
+        ]
+      );
       }
       await client.query('COMMIT');
       console.log(`Backfilled ${machines.rows.length} reports from machines.`);
@@ -203,6 +528,99 @@ async function backfillReportsFromMachines() {
     }
   } catch (error) {
     console.error('Report backfill check failed', error);
+  }
+}
+
+async function backfillTags() {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const distinctTags = await client.query(`
+      SELECT DISTINCT tag AS name
+      FROM (
+        SELECT tag FROM reports WHERE tag IS NOT NULL AND tag <> ''
+        UNION ALL
+        SELECT tag FROM machines WHERE tag IS NOT NULL AND tag <> ''
+      ) AS tags
+    `);
+
+    for (const row of distinctTags.rows || []) {
+      const name = cleanString(row.name, 64);
+      if (!name) {
+        continue;
+      }
+      const existing = await client.query(
+        'SELECT id FROM tags WHERE LOWER(name) = LOWER($1) LIMIT 1',
+        [name]
+      );
+      if (existing.rows && existing.rows[0]) {
+        continue;
+      }
+      await client.query(
+        `
+          INSERT INTO tags (id, name, is_active, created_at, updated_at)
+          VALUES ($1, $2, false, NOW(), NOW())
+        `,
+        [generateUuid(), name]
+      );
+    }
+
+    const activeTag = await ensureActiveTag(client);
+    if (activeTag) {
+      await client.query(
+        `
+          UPDATE reports
+          SET tag_id = $1, tag = $2
+          WHERE tag_id IS NULL AND (tag IS NULL OR tag = '')
+        `,
+        [activeTag.id, activeTag.name]
+      );
+      await client.query(
+        `
+          UPDATE machines
+          SET tag_id = $1, tag = $2
+          WHERE tag_id IS NULL AND (tag IS NULL OR tag = '')
+        `,
+        [activeTag.id, activeTag.name]
+      );
+    }
+
+    await client.query(`
+      UPDATE reports
+      SET tag_id = tags.id,
+          tag = tags.name
+      FROM tags
+      WHERE reports.tag_id IS NULL
+        AND reports.tag IS NOT NULL
+        AND LOWER(reports.tag) = LOWER(tags.name)
+    `);
+
+    await client.query(`
+      UPDATE machines
+      SET tag_id = tags.id,
+          tag = tags.name
+      FROM tags
+      WHERE machines.tag_id IS NULL
+        AND machines.tag IS NOT NULL
+        AND LOWER(machines.tag) = LOWER(tags.name)
+    `);
+
+    await client.query('COMMIT');
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback tag backfill', rollbackError);
+      }
+    }
+    console.error('Tag backfill failed', error);
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 }
 
@@ -236,6 +654,8 @@ async function initDb() {
       mac_addresses TEXT,
       serial_number TEXT,
       category TEXT NOT NULL DEFAULT 'unknown',
+      tag TEXT,
+      tag_id UUID,
       model TEXT,
       vendor TEXT,
       technician TEXT,
@@ -266,6 +686,8 @@ async function initDb() {
       mac_addresses TEXT,
       serial_number TEXT,
       category TEXT NOT NULL DEFAULT 'unknown',
+      tag TEXT,
+      tag_id UUID,
       model TEXT,
       vendor TEXT,
       technician TEXT,
@@ -289,6 +711,22 @@ async function initDb() {
     );
   `);
 
+  // Backfill columns for older schemas that predate tags.
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS tag TEXT;`);
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS tag_id UUID;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag TEXT;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag_id UUID;`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tags (
+      id UUID PRIMARY KEY,
+      name TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT false,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ldap_settings (
       id SMALLINT PRIMARY KEY,
@@ -304,6 +742,35 @@ async function initDb() {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS patchnotes (
+      id BIGSERIAL PRIMARY KEY,
+      version TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS patchnote_views (
+      id BIGSERIAL PRIMARY KEY,
+      patchnote_id BIGINT NOT NULL REFERENCES patchnotes(id) ON DELETE CASCADE,
+      username TEXT NOT NULL,
+      user_type TEXT NOT NULL,
+      seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS suggestions (
+      id BIGSERIAL PRIMARY KEY,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
   const columns = [
     ['ram_mb', 'INTEGER'],
     ['ram_slots_total', 'INTEGER'],
@@ -316,6 +783,8 @@ async function initDb() {
     ['pad_status', 'TEXT'],
     ['badge_reader_status', 'TEXT'],
     ['technician', 'TEXT'],
+    ['tag', 'TEXT'],
+    ['tag_id', 'UUID'],
     ['last_ip', 'TEXT'],
     ['components', 'TEXT'],
     ['payload', 'TEXT'],
@@ -334,6 +803,8 @@ async function initDb() {
     ['mac_addresses', 'TEXT'],
     ['serial_number', 'TEXT'],
     ['category', "TEXT NOT NULL DEFAULT 'unknown'"],
+    ['tag', 'TEXT'],
+    ['tag_id', 'UUID'],
     ['model', 'TEXT'],
     ['vendor', 'TEXT'],
     ['technician', 'TEXT'],
@@ -378,11 +849,29 @@ async function initDb() {
 
   await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_machines_machine_key ON machines(machine_key)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_category ON machines(category)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_tag ON machines(tag)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_tag_id ON machines(tag_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_machine_key ON reports(machine_key)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_category ON reports(category)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_tag ON reports(tag)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_tag_id ON reports(tag_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_last_seen ON reports(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_technician ON reports(technician)');
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_reports_machine_key_last_seen_id ON reports(machine_key, last_seen DESC, id DESC)'
+  );
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_unique ON tags (LOWER(name))');
+  await pool.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_active_unique ON tags ((is_active)) WHERE is_active'
+  );
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_patchnotes_version ON patchnotes(version)');
+  await pool.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_patchnote_views_unique ON patchnote_views(patchnote_id, username, user_type)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_patchnote_views_user ON patchnote_views(username, user_type)'
+  );
 
   if (AUDIT_LOG_ENABLED) {
     await pool.query(`
@@ -519,6 +1008,7 @@ async function initDb() {
   }
 
   await backfillReportsFromMachines();
+  await backfillTags();
 }
 
 const upsertMachineQuery = `
@@ -529,94 +1019,8 @@ const upsertMachineQuery = `
     mac_addresses,
     serial_number,
     category,
-    model,
-    vendor,
-    technician,
-    os_version,
-    ram_mb,
-    ram_slots_total,
-    ram_slots_free,
-    battery_health,
-    camera_status,
-    usb_status,
-    keyboard_status,
-    pad_status,
-    badge_reader_status,
-    last_seen,
-    created_at,
-    components,
-    payload,
-    last_ip
-  ) VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6,
-    $7,
-    $8,
-    $9,
-    $10,
-    $11,
-    $12,
-    $13,
-    $14,
-    $15,
-    $16,
-    $17,
-    $18,
-    $19,
-    $20,
-    $21,
-    $22,
-    $23,
-    $24
-  )
-  ON CONFLICT(machine_key) DO UPDATE SET
-    hostname = COALESCE(excluded.hostname, machines.hostname),
-    mac_address = COALESCE(excluded.mac_address, machines.mac_address),
-    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
-    serial_number = COALESCE(excluded.serial_number, machines.serial_number),
-    category = CASE
-      WHEN excluded.category != 'unknown' THEN excluded.category
-      ELSE machines.category
-    END,
-    model = COALESCE(excluded.model, machines.model),
-    vendor = COALESCE(excluded.vendor, machines.vendor),
-    technician = COALESCE(excluded.technician, machines.technician),
-    os_version = COALESCE(excluded.os_version, machines.os_version),
-    ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
-    ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
-    ram_slots_free = COALESCE(excluded.ram_slots_free, machines.ram_slots_free),
-    battery_health = COALESCE(excluded.battery_health, machines.battery_health),
-    camera_status = COALESCE(excluded.camera_status, machines.camera_status),
-    usb_status = COALESCE(excluded.usb_status, machines.usb_status),
-    keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
-    pad_status = COALESCE(excluded.pad_status, machines.pad_status),
-    badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
-    last_seen = excluded.last_seen,
-    components = CASE
-      WHEN excluded.components IS NULL THEN machines.components
-      ELSE (
-        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
-        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
-      )::text
-    END,
-    payload = COALESCE(excluded.payload, machines.payload),
-    last_ip = excluded.last_ip
-  RETURNING id
-`;
-
-const upsertReportQuery = `
-  INSERT INTO reports (
-    id,
-    machine_key,
-    hostname,
-    mac_address,
-    mac_addresses,
-    serial_number,
-    category,
+    tag,
+    tag_id,
     model,
     vendor,
     technician,
@@ -660,7 +1064,103 @@ const upsertReportQuery = `
     $22,
     $23,
     $24,
-    $25
+    $25,
+    $26
+  )
+  ON CONFLICT(machine_key) DO UPDATE SET
+    hostname = COALESCE(excluded.hostname, machines.hostname),
+    mac_address = COALESCE(excluded.mac_address, machines.mac_address),
+    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
+    serial_number = COALESCE(excluded.serial_number, machines.serial_number),
+    category = CASE
+      WHEN excluded.category != 'unknown' THEN excluded.category
+      ELSE machines.category
+    END,
+    tag = COALESCE(excluded.tag, machines.tag),
+    tag_id = COALESCE(excluded.tag_id, machines.tag_id),
+    model = COALESCE(excluded.model, machines.model),
+    vendor = COALESCE(excluded.vendor, machines.vendor),
+    technician = COALESCE(excluded.technician, machines.technician),
+    os_version = COALESCE(excluded.os_version, machines.os_version),
+    ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
+    ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
+    ram_slots_free = COALESCE(excluded.ram_slots_free, machines.ram_slots_free),
+    battery_health = COALESCE(excluded.battery_health, machines.battery_health),
+    camera_status = COALESCE(excluded.camera_status, machines.camera_status),
+    usb_status = COALESCE(excluded.usb_status, machines.usb_status),
+    keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
+    pad_status = COALESCE(excluded.pad_status, machines.pad_status),
+    badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
+    last_seen = excluded.last_seen,
+    components = CASE
+      WHEN excluded.components IS NULL THEN machines.components
+      ELSE (
+        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
+        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
+      )::text
+    END,
+    payload = COALESCE(excluded.payload, machines.payload),
+    last_ip = excluded.last_ip
+  RETURNING id
+`;
+
+const upsertReportQuery = `
+  INSERT INTO reports (
+    id,
+    machine_key,
+    hostname,
+    mac_address,
+    mac_addresses,
+    serial_number,
+    category,
+    tag,
+    tag_id,
+    model,
+    vendor,
+    technician,
+    os_version,
+    ram_mb,
+    ram_slots_total,
+    ram_slots_free,
+    battery_health,
+    camera_status,
+    usb_status,
+    keyboard_status,
+    pad_status,
+    badge_reader_status,
+    last_seen,
+    created_at,
+    components,
+    payload,
+    last_ip
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12,
+    $13,
+    $14,
+    $15,
+    $16,
+    $17,
+    $18,
+    $19,
+    $20,
+    $21,
+    $22,
+    $23,
+    $24,
+    $25,
+    $26,
+    $27
   )
   ON CONFLICT(id) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, reports.hostname),
@@ -671,6 +1171,8 @@ const upsertReportQuery = `
       WHEN excluded.category != 'unknown' THEN excluded.category
       ELSE reports.category
     END,
+    tag = COALESCE(excluded.tag, reports.tag),
+    tag_id = COALESCE(excluded.tag_id, reports.tag_id),
     model = COALESCE(excluded.model, reports.model),
     vendor = COALESCE(excluded.vendor, reports.vendor),
     technician = COALESCE(excluded.technician, reports.technician),
@@ -699,13 +1201,16 @@ const upsertReportQuery = `
 
 const listReportsQuery = `
   SELECT
-    id,
+    reports.id AS id,
     machine_key,
     hostname,
     mac_address,
     mac_addresses,
     serial_number,
     category,
+    tag,
+    tag_id,
+    COALESCE(tags.name, reports.tag) AS tag_name,
     model,
     vendor,
     technician,
@@ -724,39 +1229,52 @@ const listReportsQuery = `
     components,
     comment
   FROM reports
-  ORDER BY last_seen DESC
+  LEFT JOIN tags ON tags.id = reports.tag_id
+  ORDER BY reports.last_seen DESC
 `;
 
 const getReportByIdQuery = `
   SELECT
-    id,
-    hostname,
-    mac_address,
-    mac_addresses,
-    serial_number,
-    category,
-    model,
-    vendor,
-    technician,
-    os_version,
-    ram_mb,
-    ram_slots_total,
-    ram_slots_free,
-    battery_health,
-    camera_status,
-    usb_status,
-    keyboard_status,
-    pad_status,
-    badge_reader_status,
-    last_seen,
-    created_at,
-    components,
-    payload,
-    last_ip,
-    comment,
-    commented_at
+    reports.id,
+    reports.machine_key,
+    reports.hostname,
+    reports.mac_address,
+    reports.mac_addresses,
+    reports.serial_number,
+    reports.category,
+    reports.tag,
+    reports.tag_id,
+    COALESCE(tags.name, reports.tag) AS report_tag_name,
+    reports.model,
+    reports.vendor,
+    reports.technician,
+    reports.os_version,
+    reports.ram_mb,
+    reports.ram_slots_total,
+    reports.ram_slots_free,
+    reports.battery_health,
+    reports.camera_status,
+    reports.usb_status,
+    reports.keyboard_status,
+    reports.pad_status,
+    reports.badge_reader_status,
+    reports.last_seen AS report_last_seen,
+    reports.created_at AS report_created_at,
+    reports.components,
+    reports.payload,
+    reports.last_ip,
+    reports.comment,
+    reports.commented_at,
+    machines.last_seen AS machine_last_seen,
+    machines.created_at AS machine_created_at,
+    machines.tag AS machine_tag,
+    machines.tag_id AS machine_tag_id,
+    machines.payload AS machine_payload,
+    machines.components AS machine_components
   FROM reports
-  WHERE id = $1
+  LEFT JOIN machines ON machines.machine_key = reports.machine_key
+  LEFT JOIN tags ON tags.id = reports.tag_id
+  WHERE reports.id = $1
 `;
 
 const ingestLimiter = rateLimit({
@@ -773,9 +1291,12 @@ const CATEGORY_LABELS = {
   desktop: 'Tour',
   unknown: 'Inconnu'
 };
+const DEFAULT_REPORT_TAG = 'En cours';
 const STATUS_LABELS = {
   ok: 'OK',
   nok: 'NOK',
+  fr: 'FR',
+  en: 'EN',
   absent: 'Absent',
   not_tested: 'Non teste',
   denied: 'Refuse',
@@ -786,6 +1307,8 @@ const STATUS_LABELS = {
 const STATUS_STYLES = {
   ok: { background: '#DDF3E6', color: '#1B4C38' },
   nok: { background: '#F9D9D3', color: '#8D1F12' },
+  fr: { background: '#E6EEF9', color: '#1F3F8D' },
+  en: { background: '#E6EEF9', color: '#1F3F8D' },
   absent: { background: '#EFEFEF', color: '#4B4B4B' },
   not_tested: { background: '#EFEFEF', color: '#4B4B4B' },
   denied: { background: '#EFEFEF', color: '#4B4B4B' },
@@ -808,7 +1331,10 @@ const COMPONENT_LABELS = {
   keyboard: 'Clavier',
   camera: 'Camera',
   pad: 'Pave tactile',
-  badgeReader: 'Lecteur badge'
+  badgeReader: 'Lecteur badge',
+  biosBattery: 'Pile BIOS',
+  biosLanguage: 'Langue BIOS',
+  biosPassword: 'Mot de passe BIOS'
 };
 const COMPONENT_ORDER = [
   'diskReadTest',
@@ -825,10 +1351,35 @@ const COMPONENT_ORDER = [
   'keyboard',
   'camera',
   'pad',
-  'badgeReader'
+  'badgeReader',
+  'biosBattery',
+  'biosLanguage',
+  'biosPassword'
 ];
 const HIDDEN_COMPONENTS = new Set(['diskSmart', 'networkTest', 'memDiag', 'thermal']);
 const VALID_PAD_STATUSES = new Set(['ok', 'nok']);
+const VALID_USB_STATUSES = new Set(['ok', 'nok']);
+const DEFAULT_COMPONENT_STATUSES = new Set(['not_tested', 'ok', 'nok']);
+const COMPONENT_ALLOWED_STATUSES = {
+  biosLanguage: new Set(['not_tested', 'fr', 'en'])
+};
+const VALID_COMPONENT_KEYS = new Set(COMPONENT_ORDER);
+const COMPONENT_STATUS_COLUMNS = {
+  camera: 'camera_status',
+  usb: 'usb_status',
+  keyboard: 'keyboard_status',
+  pad: 'pad_status',
+  badgeReader: 'badge_reader_status'
+};
+const MANUAL_COMPONENT_DEFAULTS = {
+  biosBattery: 'not_tested',
+  biosLanguage: 'not_tested',
+  biosPassword: 'not_tested'
+};
+
+function getAllowedComponentStatuses(key) {
+  return COMPONENT_ALLOWED_STATUSES[key] || DEFAULT_COMPONENT_STATUSES;
+}
 
 app.set('trust proxy', process.env.TRUST_PROXY === '1');
 app.use(express.json({ limit: JSON_LIMIT }));
@@ -902,6 +1453,176 @@ function requireAdminPage(req, res, next) {
   return next();
 }
 
+function getPatchnoteUser(req) {
+  const user = req.session && req.session.user ? req.session.user : null;
+  if (!user || !user.username || !user.type) {
+    return null;
+  }
+  return { username: user.username, type: user.type };
+}
+
+function getLdapAttribute(ldapUser, key) {
+  if (!ldapUser || typeof ldapUser !== 'object') {
+    return null;
+  }
+  if (Object.prototype.hasOwnProperty.call(ldapUser, key)) {
+    return ldapUser[key];
+  }
+  const match = Object.keys(ldapUser).find(
+    (field) => field.toLowerCase() === key.toLowerCase()
+  );
+  return match ? ldapUser[match] : null;
+}
+
+function normalizeLdapValues(value) {
+  if (value == null) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => (entry == null ? '' : String(entry).trim()))
+      .filter(Boolean);
+  }
+  const stringValue = String(value).trim();
+  return stringValue ? [stringValue] : [];
+}
+
+function extractLdapGroups(ldapUser) {
+  const memberOf = getLdapAttribute(ldapUser, 'memberOf');
+  return normalizeLdapValues(memberOf);
+}
+
+function isHydraAdminMember(groups) {
+  if (!Array.isArray(groups) || !groups.length) {
+    return false;
+  }
+  return groups.some((group) => String(group).toLowerCase() === HYDRA_ADMIN_GROUP_DN);
+}
+
+async function fetchLdapUserRecord(username, config) {
+  if (!username) {
+    return null;
+  }
+  if (!config || !config.enabled || !config.url || !config.searchBase) {
+    return null;
+  }
+
+  const options = {
+    url: config.url,
+    searchBase: config.searchBase,
+    searchFilter: normalizeLdapSearchFilter(config.searchFilter).replace(
+      '{{username}}',
+      escapeLdapFilter(username)
+    ),
+    searchAttributes: ensureLdapAttributes(config.searchAttributes, ['memberOf']),
+    reconnect: true,
+    tlsOptions: {
+      rejectUnauthorized: config.tlsRejectUnauthorized !== false
+    }
+  };
+
+  if (config.bindDn && config.bindPassword) {
+    options.bindDN = config.bindDn;
+    options.bindCredentials = config.bindPassword;
+  }
+
+  const ldap = new LdapAuth(options);
+  return new Promise((resolve, reject) => {
+    ldap._findUser(username, (err, user) => {
+      ldap.close(() => {});
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(user || null);
+    });
+  });
+}
+
+async function refreshLdapPermissions(req) {
+  if (!req.session || !req.session.user || req.session.user.type !== 'ldap') {
+    return req.session?.user || null;
+  }
+  const user = req.session.user;
+  if (user.isHydraAdmin === true && user.permissions && user.permissions.canDeleteReport === true) {
+    return user;
+  }
+  try {
+    const ldapConfig = await getEffectiveLdapConfig();
+    const ldapUser = await fetchLdapUserRecord(user.username, ldapConfig);
+    if (!ldapUser) {
+      return user;
+    }
+    const groups = extractLdapGroups(ldapUser);
+    const isHydraAdmin = isHydraAdminMember(groups);
+    const updated = {
+      ...user,
+      groups,
+      isHydraAdmin,
+      permissions: {
+        ...(user.permissions || {}),
+        canDeleteReport: isHydraAdmin
+      }
+    };
+    req.session.user = updated;
+    req.session.save(() => {});
+    return updated;
+  } catch (error) {
+    return user;
+  }
+}
+
+function canDeleteReports(user) {
+  if (!user) {
+    return false;
+  }
+  if (user.type === 'local') {
+    return true;
+  }
+  if (user.permissions && user.permissions.canDeleteReport) {
+    return true;
+  }
+  return Boolean(user.isHydraAdmin);
+}
+
+function canEditTags(user) {
+  return canDeleteReports(user);
+}
+
+function requireReportDelete(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+  if (canDeleteReports(req.session.user)) {
+    return next();
+  }
+  refreshLdapPermissions(req)
+    .then((user) => {
+      if (!canDeleteReports(user)) {
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      }
+      return next();
+    })
+    .catch(() => res.status(403).json({ ok: false, error: 'forbidden' }));
+}
+
+function requireTagEdit(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+  if (canEditTags(req.session.user)) {
+    return next();
+  }
+  refreshLdapPermissions(req)
+    .then((user) => {
+      if (!canEditTags(user)) {
+        return res.status(403).json({ ok: false, error: 'forbidden' });
+      }
+      return next();
+    })
+    .catch(() => res.status(403).json({ ok: false, error: 'forbidden' }));
+}
+
 function cleanString(value, maxLength) {
   if (typeof value !== 'string') {
     return null;
@@ -940,6 +1661,154 @@ function normalizeUuid(value) {
     return trimmed.toLowerCase();
   }
   return null;
+}
+
+const TECH_TRANSLATE_FROM =
+  'àáâäãåçèéêëìíîïñòóôöõùúûüýÿÀÁÂÄÃÅÇÈÉÊËÌÍÎÏÑÒÓÔÖÕÙÚÛÜÝ';
+const TECH_TRANSLATE_TO =
+  'aaaaaaceeeeiiiinooooouuuuyyAAAAAACEEEEIIIINOOOOOUUUUY';
+
+function normalizeTechKey(value) {
+  if (!value) {
+    return '';
+  }
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function normalizeTextSql(column) {
+  return `lower(translate(coalesce(${column}, ''), '${TECH_TRANSLATE_FROM}', '${TECH_TRANSLATE_TO}'))`;
+}
+
+function parseTagIds(raw) {
+  if (!raw) {
+    return [];
+  }
+  const parts = Array.isArray(raw)
+    ? raw
+    : String(raw)
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+  const ids = [];
+  for (const value of parts) {
+    const id = normalizeUuid(value);
+    if (id) {
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+function getDateRange(dateFilter) {
+  const now = new Date();
+  if (dateFilter === 'today') {
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+  if (dateFilter === 'week') {
+    const day = now.getDay();
+    const diff = (day + 6) % 7;
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    end.setHours(23, 59, 59, 999);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+  return null;
+}
+
+function buildReportFilters(query, { includeCategory = true, activeTagId = null } = {}) {
+  const clauses = [];
+  const values = [];
+  let idx = 1;
+
+  const techRaw = cleanString(query.tech, 64);
+  const tech = techRaw ? normalizeTechKey(techRaw) : '';
+  if (tech) {
+    clauses.push(`${normalizeTextSql('technician')} = $${idx}`);
+    values.push(tech);
+    idx += 1;
+  }
+
+  const tagIds = parseTagIds(query.tags || query.tagIds);
+  if (tagIds.length) {
+    const activeId = normalizeUuid(activeTagId);
+    const includeNull = activeId && tagIds.includes(activeId);
+    if (includeNull) {
+      clauses.push(`(tag_id = ANY($${idx}::uuid[]) OR tag_id IS NULL)`);
+    } else {
+      clauses.push(`tag_id = ANY($${idx}::uuid[])`);
+    }
+    values.push(tagIds);
+    idx += 1;
+  }
+
+  const legacyFlag = String(query.legacy || '').toLowerCase();
+  if (legacyFlag === '1' || legacyFlag === 'true') {
+    clauses.push(`payload IS NOT NULL AND payload <> '' AND payload::jsonb ? 'legacy'`);
+  } else if (legacyFlag === '0' || legacyFlag === 'false') {
+    clauses.push(`(payload IS NULL OR payload = '' OR NOT (payload::jsonb ? 'legacy'))`);
+  }
+
+  if (includeCategory) {
+    const categoryRaw = cleanString(query.category, 32);
+    if (categoryRaw && categoryRaw !== 'all') {
+      const category = normalizeCategory(categoryRaw);
+      clauses.push(`category = $${idx}`);
+      values.push(category);
+      idx += 1;
+    }
+  }
+
+  const commentFilter = query.comment;
+  if (commentFilter === 'with') {
+    clauses.push(`comment IS NOT NULL AND comment <> ''`);
+  } else if (commentFilter === 'without') {
+    clauses.push(`comment IS NULL OR comment = ''`);
+  }
+
+  const component = cleanString(query.component, 64);
+  if (component && component !== 'all') {
+    clauses.push(
+      `lower(COALESCE(NULLIF(components, ''), '{}')::jsonb ->> $${idx}) = 'nok'`
+    );
+    values.push(component);
+    idx += 1;
+  }
+
+  const dateFilter = query.date;
+  const range = getDateRange(dateFilter);
+  if (range) {
+    clauses.push(`last_seen >= $${idx} AND last_seen <= $${idx + 1}`);
+    values.push(range.start, range.end);
+    idx += 2;
+  }
+
+  const search = cleanString(query.search, 128);
+  if (search) {
+    clauses.push(
+      `lower(` +
+        `coalesce(hostname,'') || ' ' || coalesce(serial_number,'') || ' ' || coalesce(mac_address,'') || ' ' || ` +
+        `coalesce(mac_addresses,'') || ' ' || coalesce(machine_key,'') || ' ' || coalesce(technician,'') || ' ' || ` +
+        `coalesce(vendor,'') || ' ' || coalesce(model,'') || ' ' || coalesce(comment,'') || ' ' || coalesce(tag,'')` +
+        `) LIKE $${idx}`
+    );
+    values.push(`%${search.toLowerCase()}%`);
+    idx += 1;
+  }
+
+  return { clauses, values };
+}
+
+function shouldUseLatest(query) {
+  const raw = String(query.latest || '').toLowerCase();
+  return raw === '1' || raw === 'true';
 }
 
 function normalizeMac(value) {
@@ -995,6 +1864,24 @@ function normalizeSerial(value) {
     return null;
   }
   return serial.toUpperCase();
+}
+
+function buildMachineKey(serialNumber, macAddress, hostname) {
+  const serial = normalizeSerial(serialNumber);
+  const mac = normalizeMac(macAddress);
+  if (serial && mac) {
+    return `sn:${serial}|mac:${mac}`;
+  }
+  if (serial) {
+    return `sn:${serial}`;
+  }
+  if (mac) {
+    return `mac:${mac}`;
+  }
+  if (hostname) {
+    return `host:${String(hostname).toLowerCase()}`;
+  }
+  return null;
 }
 
 function normalizeCategory(value) {
@@ -1100,6 +1987,17 @@ function parseLdapSearchAttributes(value) {
     .filter(Boolean);
 }
 
+function ensureLdapAttributes(value, requiredAttributes = []) {
+  const list = parseLdapSearchAttributes(value);
+  const normalized = list.map((attr) => attr.toLowerCase());
+  requiredAttributes.forEach((attr) => {
+    if (!normalized.includes(attr.toLowerCase())) {
+      list.push(attr);
+    }
+  });
+  return list;
+}
+
 async function loadLdapSettingsFromDb() {
   try {
     const result = await pool.query(`
@@ -1185,11 +2083,507 @@ function formatLdapConfigForResponse(config) {
   };
 }
 
-function isLocalAdmin(username, password) {
+const vaultAdminCache = {
+  username: null,
+  password: null,
+  expiresAt: 0,
+  inflight: null
+};
+
+const suggestionMailCache = {
+  username: null,
+  password: null,
+  expiresAt: 0,
+  inflight: null
+};
+
+function parseVaultScopes(value) {
+  if (!value) {
+    return [];
+  }
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function buildVaultUrl(pathname) {
+  try {
+    return new URL(pathname, VAULT_URL).toString();
+  } catch (error) {
+    return '';
+  }
+}
+
+function shouldUseVaultAdmin() {
+  return Boolean(VAULT_URL && VAULT_SECRET_PATH && (VAULT_AUTH_TOKEN || VAULT_BEARER_TOKEN));
+}
+
+function shouldUseSuggestionVault() {
+  return Boolean(
+    VAULT_URL &&
+      SUGGESTION_VAULT_SECRET_PATH &&
+      (VAULT_AUTH_TOKEN || VAULT_BEARER_TOKEN)
+  );
+}
+
+function requestJson(method, urlString, headers, body, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (!urlString) {
+      reject(new Error('missing_url'));
+      return;
+    }
+    const urlObj = new URL(urlString);
+    const lib = urlObj.protocol === 'https:' ? https : http;
+    const payload =
+      body == null ? null : typeof body === 'string' ? body : JSON.stringify(body);
+    const requestHeaders = { ...(headers || {}) };
+    if (payload && !requestHeaders['Content-Type']) {
+      requestHeaders['Content-Type'] = 'application/json';
+    }
+    if (payload && !requestHeaders['Content-Length']) {
+      requestHeaders['Content-Length'] = Buffer.byteLength(payload);
+    }
+    const req = lib.request(
+      {
+        method,
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: `${urlObj.pathname}${urlObj.search}`,
+        headers: requestHeaders
+      },
+      (res) => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          let json = null;
+          if (raw) {
+            try {
+              json = JSON.parse(raw);
+            } catch (error) {
+              json = null;
+            }
+          }
+          resolve({ statusCode: res.statusCode || 0, json, raw });
+        });
+      }
+    );
+    req.on('error', reject);
+    if (timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error('timeout'));
+      });
+    }
+    if (payload) {
+      req.write(payload);
+    }
+    req.end();
+  });
+}
+
+async function fetchVaultAccessToken() {
+  if (VAULT_BEARER_TOKEN) {
+    return VAULT_BEARER_TOKEN;
+  }
+  if (!VAULT_AUTH_TOKEN) {
+    return '';
+  }
+  const authUrl = buildVaultUrl(VAULT_AUTH_PATH);
+  if (!authUrl) {
+    return '';
+  }
+  const payload = {
+    token: VAULT_AUTH_TOKEN,
+    scopes: parseVaultScopes(VAULT_AUTH_SCOPES)
+  };
+  const response = await requestJson(
+    'POST',
+    authUrl,
+    { 'Content-Type': 'application/json' },
+    payload,
+    VAULT_TIMEOUT_MS
+  );
+  if (!response || response.statusCode < 200 || response.statusCode >= 300) {
+    return '';
+  }
+  if (response.json && typeof response.json.access_token === 'string') {
+    return response.json.access_token;
+  }
+  if (response.json && typeof response.json.token === 'string') {
+    return response.json.token;
+  }
+  return '';
+}
+
+function extractVaultSecretData(responseJson) {
+  if (!responseJson || typeof responseJson !== 'object') {
+    return null;
+  }
+  if (responseJson.data && typeof responseJson.data === 'object') {
+    return responseJson.data;
+  }
+  return responseJson;
+}
+
+async function fetchVaultAdminCredentials() {
+  if (!ALLOW_LOCAL_ADMIN || !shouldUseVaultAdmin()) {
+    return null;
+  }
+  const now = Date.now();
+  if (vaultAdminCache.expiresAt > now && vaultAdminCache.password) {
+    return { username: vaultAdminCache.username, password: vaultAdminCache.password };
+  }
+  if (vaultAdminCache.inflight) {
+    return vaultAdminCache.inflight;
+  }
+  vaultAdminCache.inflight = (async () => {
+    try {
+      const accessToken = await fetchVaultAccessToken();
+      if (!accessToken) {
+        return null;
+      }
+      const secretUrl = buildVaultUrl(VAULT_SECRET_PATH);
+      if (!secretUrl) {
+        return null;
+      }
+      const secretResponse = await requestJson(
+        'GET',
+        secretUrl,
+        { Authorization: `Bearer ${accessToken}` },
+        null,
+        VAULT_TIMEOUT_MS
+      );
+      if (!secretResponse || secretResponse.statusCode < 200 || secretResponse.statusCode >= 300) {
+        return null;
+      }
+      const secretData = extractVaultSecretData(secretResponse.json);
+      if (!secretData || typeof secretData !== 'object') {
+        return null;
+      }
+      const username =
+        cleanString(secretData[VAULT_SECRET_USER_FIELD], 128) || LOCAL_ADMIN_USER;
+      const password =
+        typeof secretData[VAULT_SECRET_PASSWORD_FIELD] === 'string'
+          ? secretData[VAULT_SECRET_PASSWORD_FIELD]
+          : '';
+      if (!password) {
+        return null;
+      }
+      const ttlMs =
+        Number.isFinite(VAULT_CACHE_TTL_SEC) && VAULT_CACHE_TTL_SEC > 0
+          ? VAULT_CACHE_TTL_SEC * 1000
+          : 300000;
+      vaultAdminCache.username = username;
+      vaultAdminCache.password = password;
+      vaultAdminCache.expiresAt = Date.now() + ttlMs;
+      return { username, password };
+    } catch (error) {
+      console.error('Vault admin fetch failed', error);
+      return null;
+    } finally {
+      vaultAdminCache.inflight = null;
+    }
+  })();
+  return vaultAdminCache.inflight;
+}
+
+async function fetchSuggestionCredentials() {
+  if (!SUGGESTION_EMAIL_ENABLED || !shouldUseSuggestionVault()) {
+    return null;
+  }
+  const now = Date.now();
+  if (suggestionMailCache.expiresAt > now && suggestionMailCache.password) {
+    return {
+      username: suggestionMailCache.username,
+      password: suggestionMailCache.password
+    };
+  }
+  if (suggestionMailCache.inflight) {
+    return suggestionMailCache.inflight;
+  }
+  suggestionMailCache.inflight = (async () => {
+    try {
+      const accessToken = await fetchVaultAccessToken();
+      if (!accessToken) {
+        return null;
+      }
+      const secretUrl = buildVaultUrl(SUGGESTION_VAULT_SECRET_PATH);
+      if (!secretUrl) {
+        return null;
+      }
+      const secretResponse = await requestJson(
+        'GET',
+        secretUrl,
+        { Authorization: `Bearer ${accessToken}` },
+        null,
+        VAULT_TIMEOUT_MS
+      );
+      if (!secretResponse || secretResponse.statusCode < 200 || secretResponse.statusCode >= 300) {
+        return null;
+      }
+      const secretData = extractVaultSecretData(secretResponse.json);
+      if (!secretData || typeof secretData !== 'object') {
+        return null;
+      }
+      let username =
+        cleanString(secretData[SUGGESTION_VAULT_USER_FIELD], 256) || null;
+      if (!username && SUGGESTION_SMTP_USER) {
+        username = SUGGESTION_SMTP_USER;
+      }
+      const password =
+        typeof secretData[SUGGESTION_VAULT_PASSWORD_FIELD] === 'string'
+          ? secretData[SUGGESTION_VAULT_PASSWORD_FIELD]
+          : '';
+      const resolvedPassword = password || SUGGESTION_SMTP_PASS || '';
+      if (!resolvedPassword) {
+        return null;
+      }
+      const ttlMs =
+        Number.isFinite(VAULT_CACHE_TTL_SEC) && VAULT_CACHE_TTL_SEC > 0
+          ? VAULT_CACHE_TTL_SEC * 1000
+          : 300000;
+      suggestionMailCache.username = username;
+      suggestionMailCache.password = resolvedPassword;
+      suggestionMailCache.expiresAt = Date.now() + ttlMs;
+      return { username, password: resolvedPassword };
+    } catch (error) {
+      console.error('Suggestion mail vault fetch failed', error);
+      return null;
+    } finally {
+      suggestionMailCache.inflight = null;
+    }
+  })();
+  return suggestionMailCache.inflight;
+}
+
+async function getSuggestionSmtpCredentials() {
+  if (!SUGGESTION_EMAIL_ENABLED) {
+    return null;
+  }
+  if (SUGGESTION_SMTP_USER && SUGGESTION_SMTP_PASS) {
+    return { username: SUGGESTION_SMTP_USER, password: SUGGESTION_SMTP_PASS };
+  }
+  return fetchSuggestionCredentials();
+}
+
+function readSmtpResponse(socket) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    function onData(chunk) {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split(/\r?\n/).filter(Boolean);
+      if (!lines.length) {
+        return;
+      }
+      const last = lines[lines.length - 1];
+      const match = last.match(/^(\d{3})\s/);
+      if (match) {
+        cleanup();
+        resolve({ code: match[1], raw: buffer });
+      }
+    }
+    function onError(err) {
+      cleanup();
+      reject(err);
+    }
+    function cleanup() {
+      socket.off('data', onData);
+      socket.off('error', onError);
+    }
+    socket.on('data', onData);
+    socket.on('error', onError);
+  });
+}
+
+async function sendSmtpCommand(socket, command, expectCodes) {
+  if (command) {
+    socket.write(`${command}\r\n`);
+  }
+  const response = await readSmtpResponse(socket);
+  const ok = Array.isArray(expectCodes)
+    ? expectCodes.includes(response.code)
+    : response.code === expectCodes;
+  if (!ok) {
+    throw new Error(`SMTP ${command || 'read'} failed: ${response.code}`);
+  }
+  return response;
+}
+
+async function sendSmtpMail({ from, to, subject, text, authUser, authPass }) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const timeout = setTimeout(() => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      try {
+        socket.destroy(new Error('smtp_timeout'));
+      } catch (error) {
+        // ignore
+      }
+      reject(new Error('smtp_timeout'));
+    }, Math.max(1000, SUGGESTION_SMTP_TIMEOUT_MS));
+
+    const connectOptions = {
+      host: SUGGESTION_SMTP_HOST,
+      port: SUGGESTION_SMTP_PORT,
+      servername: SUGGESTION_SMTP_HOST
+    };
+
+    let socket = (SUGGESTION_SMTP_SECURE
+      ? tls.connect(connectOptions)
+      : net.connect({ host: connectOptions.host, port: connectOptions.port })
+    );
+
+    const onError = (err) => {
+      if (!finished) {
+        finished = true;
+        clearTimeout(timeout);
+        reject(err);
+      }
+    };
+
+    socket.on('error', onError);
+
+    socket.on('connect', async () => {
+      try {
+        await sendSmtpCommand(socket, null, '220');
+        await sendSmtpCommand(socket, `EHLO ${os.hostname()}`, ['250']);
+        if (!SUGGESTION_SMTP_SECURE) {
+          await sendSmtpCommand(socket, 'STARTTLS', '220');
+          socket.removeAllListeners('error');
+          socket = tls.connect({ socket, servername: SUGGESTION_SMTP_HOST });
+          socket.on('error', onError);
+          await sendSmtpCommand(socket, `EHLO ${os.hostname()}`, ['250']);
+        }
+        await sendSmtpCommand(socket, 'AUTH LOGIN', '334');
+        await sendSmtpCommand(socket, Buffer.from(authUser).toString('base64'), '334');
+        await sendSmtpCommand(socket, Buffer.from(authPass).toString('base64'), '235');
+        await sendSmtpCommand(socket, `MAIL FROM:<${from}>`, ['250']);
+        await sendSmtpCommand(socket, `RCPT TO:<${to}>`, ['250', '251']);
+        await sendSmtpCommand(socket, 'DATA', '354');
+        const lines = [
+          `From: MDT Live Ops <${from}>`,
+          `To: ${to}`,
+          `Subject: ${subject}`,
+          'Content-Type: text/plain; charset=utf-8',
+          '',
+          text
+        ];
+        const message = lines.join('\r\n').replace(/\n\./g, '\n..');
+        socket.write(`${message}\r\n.\r\n`);
+        await sendSmtpCommand(socket, null, '250');
+        await sendSmtpCommand(socket, 'QUIT', ['221', '250']);
+        socket.end();
+        if (!finished) {
+          finished = true;
+          clearTimeout(timeout);
+          resolve({ ok: true });
+        }
+      } catch (err) {
+        socket.end();
+        if (!finished) {
+          finished = true;
+          clearTimeout(timeout);
+          reject(err);
+        }
+      }
+    });
+  });
+}
+
+async function sendSuggestionEmail({ title, body, createdBy, pageLabel }) {
+  if (!SUGGESTION_EMAIL_ENABLED) {
+    return { ok: false, error: 'disabled' };
+  }
+  const creds = await getSuggestionSmtpCredentials();
+  if (!creds || !creds.password || !creds.username) {
+    return { ok: false, error: 'missing_credentials' };
+  }
+  const fromAddress = SUGGESTION_EMAIL_FROM || creds.username;
+  const subject = `Suggestion MDT: ${title}`;
+  const text = [
+    `Suggestion: ${title}`,
+    '',
+    body,
+    '',
+    `Page: ${pageLabel || '--'}`,
+    `Auteur: ${createdBy || 'inconnu'}`
+  ].join('\n');
+  try {
+    await sendSmtpMail({
+      from: fromAddress,
+      to: SUGGESTION_EMAIL_TO,
+      subject,
+      text,
+      authUser: creds.username,
+      authPass: creds.password
+    });
+    return { ok: true };
+  } catch (error) {
+    console.error('Failed to send suggestion email', error);
+    return { ok: false, error: 'send_failed' };
+  }
+}
+
+async function getLocalAdminCredentials() {
+  if (!ALLOW_LOCAL_ADMIN) {
+    return null;
+  }
+  const vaultCreds = await fetchVaultAdminCredentials();
+  if (vaultCreds && vaultCreds.password) {
+    return vaultCreds;
+  }
+  if (!LOCAL_ADMIN_PASSWORD) {
+    return null;
+  }
+  return {
+    username: LOCAL_ADMIN_USER,
+    password: LOCAL_ADMIN_PASSWORD
+  };
+}
+
+async function isLocalAdmin(username, password) {
   if (!ALLOW_LOCAL_ADMIN) {
     return false;
   }
-  return username === LOCAL_ADMIN_USER && password === LOCAL_ADMIN_PASSWORD;
+  const creds = await getLocalAdminCredentials();
+  if (!creds) {
+    return false;
+  }
+  return username === creds.username && password === creds.password;
+}
+
+function buildLocalSessionUser(username) {
+  return {
+    username,
+    type: 'local',
+    isHydraAdmin: true,
+    permissions: {
+      canDeleteReport: true
+    }
+  };
+}
+
+function buildLdapSessionUser(username, ldapUser) {
+  const groups = extractLdapGroups(ldapUser);
+  const isHydraAdmin = isHydraAdminMember(groups);
+  return {
+    username,
+    type: 'ldap',
+    displayName: ldapUser.cn || ldapUser.displayName || ldapUser.uid || username,
+    dn: ldapUser.dn || null,
+    mail: ldapUser.mail || null,
+    groups,
+    isHydraAdmin,
+    permissions: {
+      canDeleteReport: isHydraAdmin
+    }
+  };
 }
 
 async function authenticateLdap(username, password, configOverride = null) {
@@ -1206,7 +2600,7 @@ async function authenticateLdap(username, password, configOverride = null) {
     url: config.url,
     searchBase: config.searchBase,
     searchFilter,
-    searchAttributes: config.searchAttributes,
+    searchAttributes: ensureLdapAttributes(config.searchAttributes, ['memberOf']),
     reconnect: true,
     tlsOptions: {
       rejectUnauthorized: config.tlsRejectUnauthorized !== false
@@ -1307,6 +2701,101 @@ function normalizeStatus(value) {
   return null;
 }
 
+function normalizeBiosLanguage(value) {
+  if (value == null) {
+    return null;
+  }
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+  const cleaned = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (
+    cleaned.includes('not tested') ||
+    cleaned.includes('not_tested') ||
+    cleaned.includes('non teste') ||
+    cleaned.includes('non testee') ||
+    cleaned.includes('pas teste') ||
+    cleaned.includes('not run')
+  ) {
+    return 'not_tested';
+  }
+  if (
+    cleaned === 'fr' ||
+    cleaned.startsWith('fr-') ||
+    cleaned.includes('francais') ||
+    cleaned.includes('france') ||
+    cleaned.includes('french')
+  ) {
+    return 'fr';
+  }
+  if (
+    cleaned === 'en' ||
+    cleaned.startsWith('en-') ||
+    cleaned.includes('anglais') ||
+    cleaned.includes('english')
+  ) {
+    return 'en';
+  }
+  return null;
+}
+
+function normalizeBiosPasswordStatus(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'nok' : 'ok';
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return 'nok';
+    }
+    if (value === 0) {
+      return 'ok';
+    }
+  }
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+  const cleaned = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (
+    cleaned.includes('not tested') ||
+    cleaned.includes('not_tested') ||
+    cleaned.includes('non teste') ||
+    cleaned.includes('non testee') ||
+    cleaned.includes('pas teste') ||
+    cleaned.includes('not run')
+  ) {
+    return 'not_tested';
+  }
+  if (
+    cleaned === 'oui' ||
+    cleaned === 'yes' ||
+    cleaned === 'true' ||
+    cleaned === '1' ||
+    cleaned.includes('enabled') ||
+    cleaned.includes('active') ||
+    cleaned.includes('set')
+  ) {
+    return 'nok';
+  }
+  if (
+    cleaned === 'non' ||
+    cleaned === 'no' ||
+    cleaned === 'false' ||
+    cleaned === '0' ||
+    cleaned.includes('disabled') ||
+    cleaned.includes('none') ||
+    cleaned.includes('unset')
+  ) {
+    return 'ok';
+  }
+  const fallback = normalizeStatus(cleaned);
+  return fallback === 'ok' || fallback === 'nok' || fallback === 'not_tested' ? fallback : null;
+}
+
 function normalizeBatteryHealth(value) {
   if (value == null) {
     return null;
@@ -1382,6 +2871,20 @@ function normalizeRamMb(value) {
   return amount < 128 ? Math.round(amount * 1024) : Math.round(amount);
 }
 
+function withManualComponentDefaults(components) {
+  const result = { ...MANUAL_COMPONENT_DEFAULTS };
+  if (components && typeof components === 'object' && !Array.isArray(components)) {
+    Object.entries(components).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        result[key] = value;
+      } else if (!Object.prototype.hasOwnProperty.call(result, key)) {
+        result[key] = value;
+      }
+    });
+  }
+  return result;
+}
+
 function sanitizeComponents(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
@@ -1397,9 +2900,25 @@ function sanitizeComponents(value) {
       continue;
     }
     const cleanValue = cleanString(String(raw), 128);
-    sanitized[cleanKey] = cleanValue || '';
+    if (!cleanValue) {
+      sanitized[cleanKey] = '';
+      continue;
+    }
+    if (cleanKey === 'biosBattery') {
+      sanitized[cleanKey] = normalizeStatus(cleanValue) || 'not_tested';
+      continue;
+    }
+    if (cleanKey === 'biosLanguage') {
+      sanitized[cleanKey] = normalizeBiosLanguage(cleanValue) || 'not_tested';
+      continue;
+    }
+    if (cleanKey === 'biosPassword') {
+      sanitized[cleanKey] = normalizeBiosPasswordStatus(cleanValue) || 'not_tested';
+      continue;
+    }
+    sanitized[cleanKey] = cleanValue;
   }
-  return Object.keys(sanitized).length > 0 ? sanitized : null;
+  return Object.keys(sanitized).length > 0 ? withManualComponentDefaults(sanitized) : null;
 }
 
 function mergeComponentSets(base, override) {
@@ -1425,6 +2944,12 @@ function buildDerivedComponents(body, sources) {
       derived[key] = status;
     }
   };
+  const addValue = (key, value, normalizer) => {
+    const normalized = normalizer(value);
+    if (normalized) {
+      derived[key] = normalized;
+    }
+  };
   addStatus('camera', pickFirstFromSources(sources, ['cameraStatus', 'camera']));
   addStatus('usb', pickFirstFromSources(sources, ['usbStatus', 'usb']));
   addStatus('keyboard', pickFirstFromSources(sources, ['keyboardStatus', 'keyboard']));
@@ -1441,6 +2966,26 @@ function buildDerivedComponents(body, sources) {
   addStatus(
     'badgeReader',
     pickFirstFromSources(sources, ['badgeReaderStatus', 'badgeReader', 'badge', 'smartCardReader'])
+  );
+  addStatus(
+    'biosBattery',
+    pickFirstFromSources(sources, ['biosBatteryStatus', 'biosBattery', 'cmosBatteryStatus', 'cmosBattery'])
+  );
+  addValue(
+    'biosLanguage',
+    pickFirstFromSources(sources, ['biosLanguage', 'biosLanguageStatus', 'languageBios', 'biosLocale']),
+    normalizeBiosLanguage
+  );
+  addValue(
+    'biosPassword',
+    pickFirstFromSources(sources, [
+      'biosPassword',
+      'biosPasswordStatus',
+      'biosPasswordSet',
+      'biosPasswordEnabled',
+      'biosPwd'
+    ]),
+    normalizeBiosPasswordStatus
   );
   addStatus('diskSmart', pickFirstFromSources(sources, ['diskSmart', 'smartDisk', 'smart']));
 
@@ -1464,7 +3009,7 @@ function buildDerivedComponents(body, sources) {
     addStatus('thermal', body.thermal.status);
   }
 
-  return Object.keys(derived).length > 0 ? derived : null;
+  return withManualComponentDefaults(Object.keys(derived).length > 0 ? derived : null);
 }
 
 function safeJsonStringify(value, maxBytes) {
@@ -1598,14 +3143,18 @@ function summarizeComponents(components) {
   if (!components || typeof components !== 'object' || Array.isArray(components)) {
     return summary;
   }
-  Object.values(components).forEach((value) => {
-    const key = normalizeStatusKey(value);
-    if (!key) {
+  Object.entries(components).forEach(([componentKey, value]) => {
+    if (componentKey === 'biosLanguage') {
       return;
     }
-    if (key === 'ok') {
+    const statusKey =
+      componentKey === 'biosPassword' ? normalizeBiosPasswordStatus(value) : normalizeStatusKey(value);
+    if (!statusKey) {
+      return;
+    }
+    if (statusKey === 'ok') {
       summary.ok += 1;
-    } else if (key === 'nok') {
+    } else if (statusKey === 'nok') {
       summary.nok += 1;
     } else {
       summary.other += 1;
@@ -1630,6 +3179,29 @@ function formatDateTime(value) {
     hour: '2-digit',
     minute: '2-digit'
   });
+}
+
+function mergeHardwarePayload(primary, fallback) {
+  const base =
+    primary && typeof primary === 'object' && !Array.isArray(primary) ? { ...primary } : null;
+  const fallbackObj =
+    fallback && typeof fallback === 'object' && !Array.isArray(fallback) ? fallback : null;
+
+  if (!base && fallbackObj) {
+    return fallbackObj;
+  }
+  if (!base || !fallbackObj) {
+    return base || null;
+  }
+
+  const keys = ['cpu', 'gpu', 'disks', 'volumes'];
+  keys.forEach((key) => {
+    if (base[key] == null && fallbackObj[key] != null) {
+      base[key] = fallbackObj[key];
+    }
+  });
+
+  return base;
 }
 
 function formatRam(value) {
@@ -1852,11 +3424,84 @@ function buildDiagnosticsRows(payload) {
   return rows;
 }
 
-function buildComponentRows(components) {
-  if (!components || typeof components !== 'object' || Array.isArray(components)) {
+function buildInventoryRows(payload) {
+  const inventory =
+    payload && payload.inventory && typeof payload.inventory === 'object' ? payload.inventory : null;
+  if (!inventory) {
     return [];
   }
-  const entries = Object.entries(components).filter(([key]) => !HIDDEN_COMPONENTS.has(key));
+
+  const rows = [];
+
+  const baseboard =
+    inventory.baseboard && typeof inventory.baseboard === 'object' ? inventory.baseboard : null;
+  const baseboardSerial = baseboard && baseboard.serialNumber ? String(baseboard.serialNumber) : '';
+  if (baseboardSerial) {
+    rows.push({ label: 'Carte mere', value: baseboardSerial });
+  }
+
+  const batteryRaw = inventory.battery;
+  const batteryList = Array.isArray(batteryRaw) ? batteryRaw : batteryRaw ? [batteryRaw] : [];
+  const batteryValues = batteryList
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+      const serial = item.serialNumber ? String(item.serialNumber).trim() : '';
+      const deviceId = item.deviceId ? String(item.deviceId).trim() : '';
+      return serial || deviceId || '';
+    })
+    .filter(Boolean);
+  if (batteryValues.length) {
+    rows.push({ label: 'Batterie', value: batteryValues.join(' • ') });
+  }
+
+  const disksRaw = inventory.disks;
+  const diskList = Array.isArray(disksRaw) ? disksRaw : disksRaw ? [disksRaw] : [];
+  const diskValues = diskList
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+      const serial = item.serialNumber ? String(item.serialNumber).trim() : '';
+      const tag = item.tag ? String(item.tag).trim() : '';
+      if (serial && tag) {
+        return `${serial} (${tag})`;
+      }
+      return serial || tag || '';
+    })
+    .filter(Boolean);
+  if (diskValues.length) {
+    rows.push({ label: 'Disques', value: diskValues.join(' • ') });
+  }
+
+  const memoryRaw = inventory.memory;
+  const memoryList = Array.isArray(memoryRaw) ? memoryRaw : memoryRaw ? [memoryRaw] : [];
+  const memoryValues = memoryList
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+      const serial = item.serialNumber ? String(item.serialNumber).trim() : '';
+      const bank = item.bankLabel ? String(item.bankLabel).trim() : '';
+      if (serial && bank) {
+        return `${bank}: ${serial}`;
+      }
+      return serial || '';
+    })
+    .filter(Boolean);
+  if (memoryValues.length) {
+    rows.push({ label: 'RAM', value: memoryValues.join(' • ') });
+  }
+
+  return rows;
+}
+
+function buildComponentRows(components) {
+  const source = withManualComponentDefaults(
+    components && typeof components === 'object' && !Array.isArray(components) ? components : null
+  );
+  const entries = Object.entries(source).filter(([key]) => !HIDDEN_COMPONENTS.has(key));
   const orderMap = new Map(COMPONENT_ORDER.map((key, index) => [key, index]));
   return entries
     .sort((a, b) => {
@@ -1868,9 +3513,37 @@ function buildComponentRows(components) {
       return a[0].localeCompare(b[0], 'fr');
     })
     .map(([key, value]) => ({
+      key,
       label: COMPONENT_LABELS[key] || key,
       status: value
     }));
+}
+
+function resolveComponentStatusDisplay(key, value) {
+  if (key === 'biosLanguage') {
+    const lang = normalizeBiosLanguage(value);
+    if (lang === 'fr') {
+      return { statusKey: 'fr', statusLabel: 'FR' };
+    }
+    if (lang === 'en') {
+      return { statusKey: 'en', statusLabel: 'EN' };
+    }
+    return { statusKey: 'not_tested', statusLabel: STATUS_LABELS.not_tested };
+  }
+
+  if (key === 'biosPassword') {
+    const normalized = normalizeBiosPasswordStatus(value);
+    if (normalized === 'ok') {
+      return { statusKey: 'ok', statusLabel: 'Non' };
+    }
+    if (normalized === 'nok') {
+      return { statusKey: 'nok', statusLabel: 'Oui' };
+    }
+    return { statusKey: 'not_tested', statusLabel: STATUS_LABELS.not_tested };
+  }
+
+  const normalized = normalizeStatusKey(value) || 'unknown';
+  return { statusKey: normalized, statusLabel: STATUS_LABELS[normalized] || STATUS_LABELS.unknown };
 }
 
 function ensureSpace(doc, height) {
@@ -1948,8 +3621,7 @@ function drawStatusRows(doc, rows) {
   rows.forEach((row) => {
     ensureSpace(doc, rowHeight + 8);
     const y = doc.y;
-    const statusKey = normalizeStatusKey(row.status) || 'unknown';
-    const statusLabel = STATUS_LABELS[statusKey] || STATUS_LABELS.unknown;
+    const { statusKey, statusLabel } = resolveComponentStatusDisplay(row.key, row.status);
     const extraText = row.extra ? ` ${row.extra}` : '';
     const pillText = `${statusLabel}${extraText}`.trim();
     doc.fontSize(10).fillColor('#1D211F').text(row.label, margin, y, {
@@ -2025,6 +3697,11 @@ function drawReportPdf(doc, data) {
     { label: 'Lecteur badge', value: STATUS_LABELS[normalizeStatusKey(data.badgeReaderStatus) || 'unknown'] }
   ], 2);
 
+  if (data.inventoryRows && data.inventoryRows.length) {
+    drawSectionTitle(doc, 'Identifiants materiel');
+    drawKeyValueGrid(doc, data.inventoryRows, 1);
+  }
+
   drawSectionTitle(doc, 'Diagnostics');
   if (data.diagnostics.length) {
     drawStatusRows(doc, data.diagnostics);
@@ -2085,20 +3762,14 @@ app.post('/login', async (req, res) => {
   }
 
   let user = null;
-  if (isLocalAdmin(username, password)) {
-    user = { username, type: 'local' };
+  if (await isLocalAdmin(username, password)) {
+    user = buildLocalSessionUser(username);
   } else {
     try {
       const ldapConfig = await getEffectiveLdapConfig();
       if (ldapConfig.enabled && ldapConfig.url && ldapConfig.searchBase) {
         const ldapUser = await authenticateLdap(username, password, ldapConfig);
-        user = {
-          username,
-          type: 'ldap',
-          displayName: ldapUser.cn || ldapUser.displayName || ldapUser.uid || username,
-          dn: ldapUser.dn || null,
-          mail: ldapUser.mail || null
-        };
+        user = buildLdapSessionUser(username, ldapUser);
       }
     } catch (error) {
       user = null;
@@ -2127,20 +3798,14 @@ app.post('/api/login', async (req, res) => {
   }
 
   let user = null;
-  if (isLocalAdmin(username, password)) {
-    user = { username, type: 'local' };
+  if (await isLocalAdmin(username, password)) {
+    user = buildLocalSessionUser(username);
   } else {
     try {
       const ldapConfig = await getEffectiveLdapConfig();
       if (ldapConfig.enabled && ldapConfig.url && ldapConfig.searchBase) {
         const ldapUser = await authenticateLdap(username, password, ldapConfig);
-        user = {
-          username,
-          type: 'ldap',
-          displayName: ldapUser.cn || ldapUser.displayName || ldapUser.uid || username,
-          dn: ldapUser.dn || null,
-          mail: ldapUser.mail || null
-        };
+        user = buildLdapSessionUser(username, ldapUser);
       }
     } catch (error) {
       user = null;
@@ -2167,6 +3832,18 @@ app.get('/logout', (req, res) => {
   return req.session.destroy(() => res.redirect('/login'));
 });
 
+app.get('/patchnotes', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'patchnotes.html'));
+});
+
+app.get('/legacy-imports', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'legacy-imports.html'));
+});
+
+app.get('/legacy-imports.html', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'legacy-imports.html'));
+});
+
 app.use(express.static(PUBLIC_DIR, { extensions: ['html'], index: false }));
 
 app.get('/api/health', (req, res) => {
@@ -2174,7 +3851,178 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/me', requireAuth, (req, res) => {
-  res.json({ ok: true, user: req.session.user });
+  refreshLdapPermissions(req)
+    .then((user) => {
+      res.json({ ok: true, user: user || req.session.user });
+    })
+    .catch(() => {
+      res.json({ ok: true, user: req.session.user });
+    });
+});
+
+app.get('/api/patchnotes/latest', requireAuth, async (req, res) => {
+  const user = getPatchnoteUser(req);
+  if (!user) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
+  try {
+    const latest = await pool.query(
+      `
+        SELECT id, version, body
+        FROM patchnotes
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+      `
+    );
+    if (!latest.rows.length) {
+      return res.json({ ok: true, patchnote: null });
+    }
+
+    const patchnote = latest.rows[0];
+    const seen = await pool.query(
+      `
+        SELECT 1
+        FROM patchnote_views
+        WHERE patchnote_id = $1 AND username = $2 AND user_type = $3
+        LIMIT 1
+      `,
+      [patchnote.id, user.username, user.type]
+    );
+    if (seen.rows.length) {
+      return res.json({ ok: true, patchnote: null });
+    }
+    return res.json({
+      ok: true,
+      patchnote: {
+        id: patchnote.id,
+        version: patchnote.version,
+        body: patchnote.body
+      }
+    });
+  } catch (error) {
+    console.error('Failed to load patchnote', error);
+    return res.status(500).json({ ok: false, error: 'patchnote_error' });
+  }
+});
+
+app.post('/api/patchnotes/ack', requireAuth, async (req, res) => {
+  const user = getPatchnoteUser(req);
+  if (!user) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+  const patchnoteId = Number.parseInt(req.body?.patchnoteId, 10);
+  if (!Number.isFinite(patchnoteId)) {
+    return res.status(400).json({ ok: false, error: 'invalid_patchnote' });
+  }
+  try {
+    await pool.query(
+      `
+        INSERT INTO patchnote_views (patchnote_id, username, user_type)
+        VALUES ($1, $2, $3)
+        ON CONFLICT DO NOTHING
+      `,
+      [patchnoteId, user.username, user.type]
+    );
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error('Failed to ack patchnote', error);
+    return res.status(500).json({ ok: false, error: 'patchnote_error' });
+  }
+});
+
+app.get('/api/patchnotes', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT id, version, body, created_at
+        FROM patchnotes
+        ORDER BY created_at DESC, id DESC
+      `
+    );
+    return res.json({
+      ok: true,
+      patchnotes: result.rows.map((row) => ({
+        id: row.id,
+        version: row.version,
+        body: row.body,
+        createdAt: row.created_at
+      }))
+    });
+  } catch (error) {
+    console.error('Failed to load patchnotes list', error);
+    return res.status(500).json({ ok: false, error: 'patchnote_error' });
+  }
+});
+
+app.get('/api/suggestions', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+        SELECT id, title, body, created_by, created_at
+        FROM suggestions
+        ORDER BY created_at DESC
+      `
+    );
+    const suggestions = (result.rows || []).map((row) => ({
+      id: row.id,
+      title: row.title || '',
+      body: row.body || '',
+      createdBy: row.created_by || '',
+      createdAt: row.created_at
+    }));
+    return res.json({ ok: true, suggestions });
+  } catch (error) {
+    console.error('Failed to load suggestions', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.post('/api/suggestions', requireAuth, async (req, res) => {
+  const title = cleanString(req.body?.title, 120);
+  const bodyRaw = typeof req.body?.body === 'string' ? req.body.body : '';
+  const body = bodyRaw.trim();
+  if (!title || !body) {
+    return res.status(400).json({ ok: false, error: 'invalid_payload' });
+  }
+  if (body.length > 5000) {
+    return res.status(400).json({ ok: false, error: 'payload_too_large' });
+  }
+  const createdBy = req.session?.user?.username || '';
+  try {
+    const insertResult = await pool.query(
+      `
+        INSERT INTO suggestions (title, body, created_by)
+        VALUES ($1, $2, $3)
+        RETURNING id, created_at
+      `,
+      [title, body, createdBy]
+    );
+    const row = insertResult.rows && insertResult.rows[0] ? insertResult.rows[0] : null;
+    const pageLabel = cleanString(req.body?.page, 64) || '';
+    setImmediate(() => {
+      sendSuggestionEmail({
+        title,
+        body,
+        createdBy,
+        pageLabel
+      }).catch(() => null);
+    });
+    return res.json({
+      ok: true,
+      suggestion: {
+        id: row?.id,
+        title,
+        body,
+        createdBy,
+        createdAt: row?.created_at
+      },
+      mailQueued: true
+    });
+  } catch (error) {
+    console.error('Failed to create suggestion', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
 });
 
 app.get('/api/logs', requireAuth, async (req, res) => {
@@ -2501,6 +4349,18 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
   const category = normalizeCategory(
     pickFirst(body, ['category', 'type', 'formFactor', 'chassis', 'chassisType'])
   );
+  const tagIdRaw = pickFirst(body, [
+    'tagId',
+    'tag_id',
+    'prodTagId',
+    'productionTagId',
+    'batchId',
+    'lotId'
+  ]);
+  const tag = cleanString(
+    pickFirst(body, ['tag', 'prodTag', 'productionTag', 'production', 'batch', 'lot', 'prod']),
+    64
+  );
   const model = cleanString(pickFirst(body, ['model', 'computerModel', 'product', 'productName']), 64);
   const vendor = cleanString(pickFirst(body, ['vendor', 'manufacturer', 'make']), 64);
   const technician = cleanString(
@@ -2612,11 +4472,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     });
   }
 
-  const machineKey = serialNumber
-    ? `sn:${serialNumber}`
-    : macAddress
-      ? `mac:${macAddress}`
-      : `host:${hostname.toLowerCase()}`;
+  const machineKey = buildMachineKey(serialNumber, macAddress, hostname);
 
   const now = new Date().toISOString();
   const reportIdRaw = pickFirstFromSources([body, body.diag], [
@@ -2640,65 +4496,11 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
   const payload = skipPayload ? null : safeJsonStringify(body, 64 * 1024);
   const ipAddress = getClientIp(req);
 
-  const reportValues = [
-    reportId,
-    machineKey,
-    hostname,
-    macAddress,
-    macAddresses ? JSON.stringify(macAddresses) : null,
-    serialNumber,
-    category,
-    model,
-    vendor,
-    technician,
-    osVersion,
-    ramMb,
-    ramSlotsTotal,
-    ramSlotsFree,
-    batteryHealth,
-    cameraStatus,
-    usbStatus,
-    keyboardStatus,
-    padStatus,
-    badgeReaderStatus,
-    now,
-    now,
-    mergedComponents ? JSON.stringify(mergedComponents) : null,
-    payload,
-    ipAddress
-  ];
-
-  const values = [
-    machineKey,
-    hostname,
-    macAddress,
-    macAddresses ? JSON.stringify(macAddresses) : null,
-    serialNumber,
-    category,
-    model,
-    vendor,
-    technician,
-    osVersion,
-    ramMb,
-    ramSlotsTotal,
-    ramSlotsFree,
-    batteryHealth,
-    cameraStatus,
-    usbStatus,
-    keyboardStatus,
-    padStatus,
-    badgeReaderStatus,
-    now,
-    now,
-    mergedComponents ? JSON.stringify(mergedComponents) : null,
-    payload,
-    ipAddress
-  ];
-
   let client;
   try {
     client = await pool.connect();
     await client.query('BEGIN');
+    const resolvedTag = await resolveTagForIngest(client, tagIdRaw, tag);
     await setAuditContext(
       client,
       buildAuditContext(req, {
@@ -2706,6 +4508,64 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
         actorType: technician ? 'technician' : 'ingest'
       })
     );
+    const reportValues = [
+      reportId,
+      machineKey,
+      hostname,
+      macAddress,
+      macAddresses ? JSON.stringify(macAddresses) : null,
+      serialNumber,
+      category,
+      resolvedTag.name || DEFAULT_REPORT_TAG,
+      resolvedTag.id || null,
+      model,
+      vendor,
+      technician,
+      osVersion,
+      ramMb,
+      ramSlotsTotal,
+      ramSlotsFree,
+      batteryHealth,
+      cameraStatus,
+      usbStatus,
+      keyboardStatus,
+      padStatus,
+      badgeReaderStatus,
+      now,
+      now,
+      mergedComponents ? JSON.stringify(mergedComponents) : null,
+      payload,
+      ipAddress
+    ];
+
+    const values = [
+      machineKey,
+      hostname,
+      macAddress,
+      macAddresses ? JSON.stringify(macAddresses) : null,
+      serialNumber,
+      category,
+      resolvedTag.name || DEFAULT_REPORT_TAG,
+      resolvedTag.id || null,
+      model,
+      vendor,
+      technician,
+      osVersion,
+      ramMb,
+      ramSlotsTotal,
+      ramSlotsFree,
+      batteryHealth,
+      cameraStatus,
+      usbStatus,
+      keyboardStatus,
+      padStatus,
+      badgeReaderStatus,
+      now,
+      now,
+      mergedComponents ? JSON.stringify(mergedComponents) : null,
+      payload,
+      ipAddress
+    ];
     const reportResult = await client.query(upsertReportQuery, reportValues);
     const result = await client.query(upsertMachineQuery, values);
     await client.query('COMMIT');
@@ -2734,9 +4594,165 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
   }
 });
 
-app.get('/api/machines', requireAuth, async (req, res) => {
+app.get('/api/reports', requireAuth, async (req, res) => {
+  const limitRaw = Number.parseInt(req.query.limit || '', 10);
+  const offsetRaw = Number.parseInt(req.query.offset || '', 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0
+    ? Math.min(limitRaw, REPORT_PAGE_LIMIT_MAX)
+    : REPORT_PAGE_LIMIT_DEFAULT;
+  const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
+  const includeTotal = req.query.includeTotal === '1' || req.query.includeTotal === 'true';
+  let activeTagId = null;
+  const hasTagFilter = Boolean(req.query.tags || req.query.tagIds);
+  if (hasTagFilter) {
+    try {
+      const activeTag = await getActiveTag(pool);
+      activeTagId = activeTag ? activeTag.id : null;
+    } catch (error) {
+      activeTagId = null;
+    }
+  }
+  const { clauses, values } = buildReportFilters(req.query, {
+    includeCategory: true,
+    activeTagId
+  });
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const useLatest = shouldUseLatest(req.query);
+
   try {
-    const result = await pool.query(listReportsQuery);
+    let total = null;
+    if (includeTotal) {
+      if (useLatest) {
+        const countResult = await pool.query(
+          `
+            SELECT COUNT(DISTINCT machine_key) AS total
+            FROM reports
+            ${where}
+          `,
+          values
+        );
+        total = Number.parseInt(countResult.rows?.[0]?.total || '0', 10);
+      } else {
+        const countResult = await pool.query(
+          `
+            SELECT COUNT(*) AS total
+            FROM reports
+            ${where}
+          `,
+          values
+        );
+        total = Number.parseInt(countResult.rows?.[0]?.total || '0', 10);
+      }
+    }
+    const result = useLatest
+      ? await pool.query(
+        `
+          WITH latest AS (
+            SELECT DISTINCT ON (reports.machine_key)
+              reports.id,
+              reports.machine_key,
+              reports.hostname,
+              reports.mac_address,
+              reports.mac_addresses,
+              reports.serial_number,
+              reports.category,
+              reports.tag,
+              reports.tag_id,
+              reports.model,
+              reports.vendor,
+              reports.technician,
+              reports.os_version,
+              reports.ram_mb,
+              reports.ram_slots_total,
+              reports.ram_slots_free,
+              reports.battery_health,
+              reports.camera_status,
+              reports.usb_status,
+              reports.keyboard_status,
+              reports.pad_status,
+              reports.badge_reader_status,
+              reports.last_seen,
+              reports.last_ip,
+              reports.components,
+              reports.comment
+            FROM reports
+            ${where}
+            ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+          )
+          SELECT
+            latest.id,
+            latest.machine_key,
+            latest.hostname,
+            latest.mac_address,
+            latest.mac_addresses,
+            latest.serial_number,
+            latest.category,
+            latest.tag,
+            latest.tag_id,
+            COALESCE(tags.name, latest.tag) AS tag_name,
+            latest.model,
+            latest.vendor,
+            latest.technician,
+            latest.os_version,
+            latest.ram_mb,
+            latest.ram_slots_total,
+            latest.ram_slots_free,
+            latest.battery_health,
+            latest.camera_status,
+            latest.usb_status,
+            latest.keyboard_status,
+            latest.pad_status,
+            latest.badge_reader_status,
+            latest.last_seen,
+            latest.last_ip,
+            latest.components,
+            latest.comment
+          FROM latest
+          LEFT JOIN tags ON tags.id = latest.tag_id
+          ORDER BY latest.last_seen DESC
+          LIMIT $${values.length + 1} OFFSET $${values.length + 2}
+        `,
+        [...values, limit, offset]
+      )
+      : await pool.query(
+        `
+          SELECT
+            reports.id,
+            reports.machine_key,
+            reports.hostname,
+            reports.mac_address,
+            reports.mac_addresses,
+            reports.serial_number,
+            reports.category,
+            reports.tag,
+            reports.tag_id,
+            COALESCE(tags.name, reports.tag) AS tag_name,
+            reports.model,
+            reports.vendor,
+            reports.technician,
+            reports.os_version,
+            reports.ram_mb,
+            reports.ram_slots_total,
+            reports.ram_slots_free,
+            reports.battery_health,
+            reports.camera_status,
+            reports.usb_status,
+            reports.keyboard_status,
+            reports.pad_status,
+            reports.badge_reader_status,
+            reports.last_seen,
+            reports.last_ip,
+            reports.components,
+            reports.comment
+          FROM reports
+          LEFT JOIN tags ON tags.id = reports.tag_id
+          ${where}
+          ORDER BY reports.last_seen DESC
+          LIMIT $${values.length + 1} OFFSET $${values.length + 2}
+        `,
+        [...values, limit, offset]
+      );
+
     const machines = result.rows.map((row) => {
       let components = null;
       try {
@@ -2744,7 +4760,6 @@ app.get('/api/machines', requireAuth, async (req, res) => {
       } catch (error) {
         components = null;
       }
-
       return {
         id: row.id,
         machineKey: row.machine_key,
@@ -2753,6 +4768,9 @@ app.get('/api/machines', requireAuth, async (req, res) => {
         macAddresses: normalizeMacList(row.mac_addresses),
         serialNumber: row.serial_number,
         category: row.category,
+        tag: row.tag || null,
+        tagId: row.tag_id || null,
+        tagName: row.tag_name || row.tag || null,
         model: row.model,
         vendor: row.vendor,
         technician: row.technician,
@@ -2773,7 +4791,204 @@ app.get('/api/machines', requireAuth, async (req, res) => {
       };
     });
 
-    res.json({ machines });
+    return res.json({
+      ok: true,
+      machines,
+      limit,
+      offset,
+      hasMore: machines.length === limit,
+      total
+    });
+  } catch (error) {
+    console.error('Failed to list reports', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.get('/api/stats', requireAuth, async (req, res) => {
+  let activeTagId = null;
+  const hasTagFilter = Boolean(req.query.tags || req.query.tagIds);
+  if (hasTagFilter) {
+    try {
+      const activeTag = await getActiveTag(pool);
+      activeTagId = activeTag ? activeTag.id : null;
+    } catch (error) {
+      activeTagId = null;
+    }
+  }
+  const { clauses, values } = buildReportFilters(req.query, {
+    includeCategory: false,
+    activeTagId
+  });
+  const queryWithoutTech = { ...req.query };
+  delete queryWithoutTech.tech;
+  const { clauses: techClauses, values: techValues } = buildReportFilters(queryWithoutTech, {
+    includeCategory: false,
+    activeTagId
+  });
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const techWhere = techClauses.length ? `WHERE ${techClauses.join(' AND ')}` : '';
+  const useLatest = shouldUseLatest(req.query);
+
+  try {
+    const result = useLatest
+      ? await pool.query(
+        `
+          WITH latest AS (
+            SELECT DISTINCT ON (reports.machine_key)
+              reports.machine_key,
+              reports.category,
+              reports.technician,
+              reports.last_seen
+            FROM reports
+            ${where}
+            ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+          )
+          SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE category = 'laptop') AS laptop,
+            COUNT(*) FILTER (WHERE category = 'desktop') AS desktop,
+            COUNT(*) FILTER (WHERE category = 'unknown') AS unknown
+          FROM latest
+        `,
+        values
+      )
+      : await pool.query(
+        `
+          SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE category = 'laptop') AS laptop,
+            COUNT(*) FILTER (WHERE category = 'desktop') AS desktop,
+            COUNT(*) FILTER (WHERE category = 'unknown') AS unknown
+          FROM reports
+          ${where}
+        `,
+        values
+      );
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    const techResult = useLatest
+      ? await pool.query(
+        `
+          WITH latest AS (
+            SELECT DISTINCT ON (reports.machine_key)
+              reports.machine_key,
+              reports.technician,
+              reports.last_seen
+            FROM reports
+            ${techWhere}
+            ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+          )
+          SELECT DISTINCT technician
+          FROM latest
+          WHERE technician IS NOT NULL AND technician <> ''
+          ORDER BY technician
+        `,
+        techValues
+      )
+      : await pool.query(
+        `
+          SELECT DISTINCT technician
+          FROM (
+            SELECT technician
+            FROM reports
+            ${techWhere}
+          ) techs
+          WHERE technician IS NOT NULL AND technician <> ''
+          ORDER BY technician
+        `,
+        techValues
+      );
+    const techs = (techResult.rows || [])
+      .map((item) => item.technician)
+      .filter(Boolean);
+    return res.json({
+      ok: true,
+      total: Number.parseInt(row?.total || '0', 10),
+      laptop: Number.parseInt(row?.laptop || '0', 10),
+      desktop: Number.parseInt(row?.desktop || '0', 10),
+      unknown: Number.parseInt(row?.unknown || '0', 10),
+      techs
+    });
+  } catch (error) {
+    console.error('Failed to fetch stats', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.get('/api/machines', requireAuth, async (req, res) => {
+  const metaOnly = req.query.meta === '1';
+  const legacyFlag = req.query.legacy;
+  let permissions = null;
+  try {
+    const user = await refreshLdapPermissions(req);
+    permissions = {
+      canDeleteReport: canDeleteReports(user),
+      canEditTags: canEditTags(user)
+    };
+  } catch (error) {
+    permissions = null;
+  }
+  try {
+    if (metaOnly) {
+      const includeActive = legacyFlag == null;
+      const tags = await listTagsWithCounts(pool, { legacyFlag, includeActive });
+      const activeTag = tags.find((tag) => tag.is_active) || null;
+      return res.json({
+        ok: true,
+        machines: [],
+        permissions,
+        tags,
+        activeTagId: activeTag ? activeTag.id : null
+      });
+    }
+    const result = await pool.query(listReportsQuery);
+    const tags = await listTagsWithCounts(pool);
+    const activeTag = tags.find((tag) => tag.is_active) || null;
+    const machines = result.rows.map((row) => {
+      let components = null;
+      try {
+        components = row.components ? JSON.parse(row.components) : null;
+      } catch (error) {
+        components = null;
+      }
+
+      return {
+        id: row.id,
+        machineKey: row.machine_key,
+        hostname: row.hostname,
+        macAddress: row.mac_address,
+        macAddresses: normalizeMacList(row.mac_addresses),
+        serialNumber: row.serial_number,
+        category: row.category,
+        tag: row.tag || null,
+        tagId: row.tag_id || null,
+        tagName: row.tag_name || row.tag || null,
+        model: row.model,
+        vendor: row.vendor,
+        technician: row.technician,
+        osVersion: row.os_version,
+        ramMb: row.ram_mb,
+        ramSlotsTotal: row.ram_slots_total,
+        ramSlotsFree: row.ram_slots_free,
+        batteryHealth: row.battery_health,
+        cameraStatus: row.camera_status,
+        usbStatus: row.usb_status,
+        keyboardStatus: row.keyboard_status,
+        padStatus: row.pad_status,
+        badgeReaderStatus: row.badge_reader_status,
+        lastSeen: row.last_seen,
+        lastIp: row.last_ip,
+        comment: row.comment,
+        components
+      };
+    });
+
+    res.json({
+      machines,
+      permissions,
+      tags,
+      activeTagId: activeTag ? activeTag.id : null
+    });
   } catch (error) {
     console.error('Failed to list machines', error);
     return res.status(500).json({ ok: false, error: 'db_error' });
@@ -2800,12 +5015,23 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
   }
 
   let components = null;
+  let machineComponents = null;
   let payload = null;
+  let machinePayload = null;
+  let relatedReports = [];
 
   try {
     components = row.components ? JSON.parse(row.components) : null;
   } catch (error) {
     components = null;
+  }
+  try {
+    machineComponents = row.machine_components ? JSON.parse(row.machine_components) : null;
+  } catch (error) {
+    machineComponents = null;
+  }
+  if (!components && machineComponents) {
+    components = machineComponents;
   }
 
   try {
@@ -2813,15 +5039,102 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
   } catch (error) {
     payload = null;
   }
+  try {
+    machinePayload = row.machine_payload ? JSON.parse(row.machine_payload) : null;
+  } catch (error) {
+    machinePayload = null;
+  }
+  payload = mergeHardwarePayload(payload, machinePayload);
+
+  const relatedSerial = normalizeSerial(row.serial_number);
+  let relatedMac = normalizeMac(row.mac_address);
+  if (!relatedMac) {
+    const macList = normalizeMacList(row.mac_addresses);
+    if (Array.isArray(macList) && macList.length) {
+      relatedMac = macList[0];
+    }
+  }
+  if (relatedSerial && relatedMac) {
+    try {
+      const reportResult = await pool.query(
+        `
+          SELECT id, last_seen, created_at
+          FROM reports
+          WHERE serial_number = $1
+            AND (
+              mac_address = $2
+              OR mac_addresses ILIKE $3
+            )
+          ORDER BY last_seen DESC
+          LIMIT 10
+        `,
+        [relatedSerial, relatedMac, `%${relatedMac}%`]
+      );
+      relatedReports = reportResult.rows.map((item) => ({
+        id: item.id,
+        lastSeen: item.last_seen,
+        createdAt: item.created_at
+      }));
+    } catch (error) {
+      relatedReports = [];
+    }
+  } else if (row.machine_key) {
+    try {
+      const reportResult = await pool.query(
+        `
+          SELECT id, last_seen, created_at
+          FROM reports
+          WHERE machine_key = $1
+          ORDER BY last_seen DESC
+          LIMIT 10
+        `,
+        [row.machine_key]
+      );
+      relatedReports = reportResult.rows.map((item) => ({
+        id: item.id,
+        lastSeen: item.last_seen,
+        createdAt: item.created_at
+      }));
+    } catch (error) {
+      relatedReports = [];
+    }
+  }
+
+  let canSeeStorageLink = false;
+  try {
+    const user = await refreshLdapPermissions(req);
+    canSeeStorageLink = canDeleteReports(user);
+  } catch (error) {
+    canSeeStorageLink = Boolean(req.session?.user && canDeleteReports(req.session.user));
+  }
+
+  const rawDestination =
+    payload && payload.rawArtifacts && payload.rawArtifacts.destination
+      ? payload.rawArtifacts.destination
+      : null;
+  const alcyoneUrl = canSeeStorageLink
+    ? buildAlcyoneConsoleUrl({
+        reportId: row.id,
+        tagName: row.tag || row.machine_tag || DEFAULT_REPORT_TAG,
+        serialNumber: row.serial_number,
+        macAddress: row.mac_address,
+        machineKey: row.machine_key,
+        rawDestination
+      })
+    : '';
 
   res.json({
     machine: {
       id: row.id,
+      machineKey: row.machine_key,
       hostname: row.hostname,
       macAddress: row.mac_address,
       macAddresses: normalizeMacList(row.mac_addresses),
       serialNumber: row.serial_number,
       category: row.category,
+      tag: row.tag || row.machine_tag || null,
+      tagId: row.tag_id || row.machine_tag_id || null,
+      tagName: row.report_tag_name || row.tag || row.machine_tag || null,
       model: row.model,
       vendor: row.vendor,
       technician: row.technician,
@@ -2835,13 +5148,17 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       keyboardStatus: row.keyboard_status,
       padStatus: row.pad_status,
       badgeReaderStatus: row.badge_reader_status,
-      lastSeen: row.last_seen,
-      createdAt: row.created_at,
+      lastSeen: row.machine_last_seen || row.report_last_seen,
+      createdAt: row.machine_created_at || row.report_created_at,
+      reportLastSeen: row.report_last_seen,
+      reportCreatedAt: row.report_created_at,
       lastIp: row.last_ip,
       comment: row.comment,
       commentedAt: row.commented_at,
       components,
-      payload
+      payload,
+      relatedReports,
+      alcyoneUrl: alcyoneUrl || null
     }
   });
 });
@@ -2908,6 +5225,579 @@ app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
   }
 });
 
+app.put('/api/machines/:id/usb', requireAuth, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const rawStatus = typeof req.body?.status === 'string' ? req.body.status.trim().toLowerCase() : '';
+  if (!VALID_USB_STATUSES.has(rawStatus)) {
+    return res.status(400).json({ ok: false, error: 'invalid_status' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const result = await client.query('SELECT components, machine_key FROM reports WHERE id = $1', [id]);
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    let components = {};
+    try {
+      components = row.components ? JSON.parse(row.components) : {};
+    } catch (error) {
+      components = {};
+    }
+    components.usb = rawStatus;
+
+    await client.query('UPDATE reports SET usb_status = $1, components = $2 WHERE id = $3', [
+      rawStatus,
+      JSON.stringify(components),
+      id
+    ]);
+    if (row.machine_key) {
+      await client.query('UPDATE machines SET usb_status = $1, components = $2 WHERE machine_key = $3', [
+        rawStatus,
+        JSON.stringify(components),
+        row.machine_key
+      ]);
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true, status: rawStatus, components });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback usb status update', rollbackError);
+      }
+    }
+    console.error('Failed to update usb status', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.put('/api/reports/:id/component', requireAuth, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const rawKey = typeof req.body?.key === 'string' ? req.body.key.trim() : '';
+  if (!VALID_COMPONENT_KEYS.has(rawKey)) {
+    return res.status(400).json({ ok: false, error: 'invalid_component' });
+  }
+
+  const rawStatus = typeof req.body?.status === 'string' ? req.body.status.trim().toLowerCase() : '';
+  const allowedStatuses = getAllowedComponentStatuses(rawKey);
+  if (!allowedStatuses.has(rawStatus)) {
+    return res.status(400).json({ ok: false, error: 'invalid_status' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const result = await client.query('SELECT components, machine_key FROM reports WHERE id = $1', [id]);
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    let components = {};
+    try {
+      components = row.components ? JSON.parse(row.components) : {};
+    } catch (error) {
+      components = {};
+    }
+    components[rawKey] = rawStatus;
+
+    const column = COMPONENT_STATUS_COLUMNS[rawKey];
+    if (column) {
+      await client.query(
+        `UPDATE reports SET ${column} = $1, components = $2 WHERE id = $3`,
+        [rawStatus, JSON.stringify(components), id]
+      );
+      if (row.machine_key) {
+        await client.query(
+          `UPDATE machines SET ${column} = $1, components = $2 WHERE machine_key = $3`,
+          [rawStatus, JSON.stringify(components), row.machine_key]
+        );
+      }
+    } else {
+      await client.query('UPDATE reports SET components = $1 WHERE id = $2', [
+        JSON.stringify(components),
+        id
+      ]);
+      if (row.machine_key) {
+        await client.query('UPDATE machines SET components = $1 WHERE machine_key = $2', [
+          JSON.stringify(components),
+          row.machine_key
+        ]);
+      }
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, key: rawKey, status: rawStatus, components });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback component update', rollbackError);
+      }
+    }
+    console.error('Failed to update component status', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.put('/api/reports/:id/category', requireAuth, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const rawValue = typeof req.body?.category === 'string' ? req.body.category.trim() : '';
+  const category = normalizeCategory(rawValue);
+  if (!['unknown', 'laptop', 'desktop'].includes(category)) {
+    return res.status(400).json({ ok: false, error: 'invalid_category' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const result = await client.query('SELECT machine_key FROM reports WHERE id = $1', [id]);
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    await client.query('UPDATE reports SET category = $1 WHERE id = $2', [category, id]);
+    if (row.machine_key) {
+      await client.query('UPDATE machines SET category = $1 WHERE machine_key = $2', [
+        category,
+        row.machine_key
+      ]);
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, category });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback category update', rollbackError);
+      }
+    }
+    console.error('Failed to update category', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const result = await client.query('SELECT * FROM reports WHERE id = $1', [id]);
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    const now = new Date().toISOString();
+    const reportId = generateUuid();
+    const zeroStatus = 'not_tested';
+    const components = {
+      diskReadTest: zeroStatus,
+      diskWriteTest: zeroStatus,
+      ramTest: zeroStatus,
+      cpuTest: zeroStatus,
+      gpuTest: zeroStatus,
+      networkPing: zeroStatus,
+      fsCheck: zeroStatus,
+      gpu: zeroStatus,
+      usb: zeroStatus,
+      keyboard: zeroStatus,
+      camera: zeroStatus,
+      pad: zeroStatus,
+      badgeReader: zeroStatus,
+      biosBattery: zeroStatus,
+      biosLanguage: zeroStatus,
+      biosPassword: zeroStatus
+    };
+    const tests = {
+      diskRead: zeroStatus,
+      diskWrite: zeroStatus,
+      ramTest: zeroStatus,
+      cpuTest: zeroStatus,
+      gpuTest: zeroStatus,
+      networkPing: zeroStatus,
+      networkPingTarget: '1.1.1.1',
+      fsCheck: zeroStatus
+    };
+
+    let macAddresses = null;
+    if (row.mac_addresses) {
+      try {
+        const parsed = JSON.parse(row.mac_addresses);
+        if (Array.isArray(parsed)) {
+          macAddresses = parsed;
+        }
+      } catch (error) {
+        macAddresses = null;
+      }
+    }
+
+    const payload = safeJsonStringify(
+      {
+        reportId,
+        hostname: row.hostname || null,
+        macAddress: row.mac_address || null,
+        macAddresses: macAddresses || undefined,
+        serialNumber: row.serial_number || null,
+        category: row.category || null,
+        technician: row.technician || null,
+        vendor: row.vendor || null,
+        model: row.model || null,
+        osVersion: row.os_version || null,
+        diag: {
+          type: 'manual',
+          diagnosticsPerformed: 0,
+          appVersion: 'report-zero'
+        },
+        tests
+      },
+      64 * 1024
+    );
+
+    const resolvedTag = await resolveTagForIngest(client, row.tag_id, row.tag);
+    const reportValues = [
+      reportId,
+      row.machine_key,
+      row.hostname,
+      row.mac_address,
+      row.mac_addresses,
+      row.serial_number,
+      row.category || 'unknown',
+      resolvedTag.name || DEFAULT_REPORT_TAG,
+      resolvedTag.id || null,
+      row.model,
+      row.vendor,
+      row.technician,
+      row.os_version,
+      row.ram_mb,
+      row.ram_slots_total,
+      row.ram_slots_free,
+      row.battery_health,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      now,
+      now,
+      JSON.stringify(components),
+      payload,
+      row.last_ip
+    ];
+
+    await client.query(upsertReportQuery, reportValues);
+    if (row.machine_key) {
+      const machineValues = [
+        row.machine_key,
+        row.hostname,
+        row.mac_address,
+        row.mac_addresses,
+        row.serial_number,
+        row.category || 'unknown',
+        resolvedTag.name || DEFAULT_REPORT_TAG,
+        resolvedTag.id || null,
+        row.model,
+        row.vendor,
+        row.technician,
+        row.os_version,
+        row.ram_mb,
+        row.ram_slots_total,
+        row.ram_slots_free,
+        row.battery_health,
+        zeroStatus,
+        zeroStatus,
+        zeroStatus,
+        zeroStatus,
+        zeroStatus,
+        now,
+        row.created_at || now,
+        JSON.stringify(components),
+        payload,
+        row.last_ip
+      ];
+      await client.query(upsertMachineQuery, machineValues);
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, reportId });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback report zero', rollbackError);
+      }
+    }
+    console.error('Failed to create report zero', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ ok: false, error: 'invalid_payload' });
+  }
+
+  const hostname = cleanString(body.hostname, 64);
+  let macAddress = normalizeMac(body.macAddress);
+  const serialNumber = normalizeSerial(body.serialNumber);
+  const category = normalizeCategory(body.category);
+  const tagIdRaw = body.tagId || body.tag_id || null;
+  const tag = cleanString(body.tag, 64);
+  const model = cleanString(body.model, 64);
+  const vendor = cleanString(body.vendor, 64);
+  const technician = cleanString(body.technician, 64);
+  const osVersion = cleanString(body.osVersion, 64);
+  let macAddresses = normalizeMacList(body.macAddresses);
+
+  if (macAddress && (!macAddresses || !macAddresses.includes(macAddress))) {
+    macAddresses = [macAddress, ...(macAddresses || [])];
+  }
+  if (!macAddress && macAddresses && macAddresses.length > 0) {
+    macAddress = macAddresses[0];
+  }
+
+  if (!hostname && !macAddress && !serialNumber) {
+    return res.status(400).json({
+      ok: false,
+      error: 'missing_identifier',
+      message: 'Provide at least hostname, macAddress, or serialNumber.'
+    });
+  }
+
+  const machineKey = buildMachineKey(serialNumber, macAddress, hostname);
+
+  const now = new Date().toISOString();
+  const reportId = generateUuid();
+  const zeroStatus = 'not_tested';
+  const components = {
+    diskReadTest: zeroStatus,
+    diskWriteTest: zeroStatus,
+    ramTest: zeroStatus,
+    cpuTest: zeroStatus,
+    gpuTest: zeroStatus,
+    networkPing: zeroStatus,
+    fsCheck: zeroStatus,
+    gpu: zeroStatus,
+    usb: zeroStatus,
+    keyboard: zeroStatus,
+    camera: zeroStatus,
+    pad: zeroStatus,
+    badgeReader: zeroStatus,
+    biosBattery: zeroStatus,
+    biosLanguage: zeroStatus,
+    biosPassword: zeroStatus
+  };
+  const tests = {
+    diskRead: zeroStatus,
+    diskWrite: zeroStatus,
+    ramTest: zeroStatus,
+    cpuTest: zeroStatus,
+    gpuTest: zeroStatus,
+    networkPing: zeroStatus,
+    networkPingTarget: '1.1.1.1',
+    fsCheck: zeroStatus
+  };
+
+  const payload = safeJsonStringify(
+    {
+      reportId,
+      hostname: hostname || null,
+      macAddress: macAddress || null,
+      macAddresses: macAddresses || undefined,
+      serialNumber: serialNumber || null,
+      category: category || null,
+      technician: technician || null,
+      vendor: vendor || null,
+      model: model || null,
+      osVersion: osVersion || null,
+      diag: {
+        type: 'manual',
+        diagnosticsPerformed: 0,
+        appVersion: 'report-zero'
+      },
+      tests
+    },
+    64 * 1024
+  );
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const resolvedTag = await resolveTagForIngest(client, tagIdRaw, tag);
+    const reportValues = [
+      reportId,
+      machineKey,
+      hostname,
+      macAddress,
+      macAddresses ? JSON.stringify(macAddresses) : null,
+      serialNumber,
+      category || 'unknown',
+      resolvedTag.name || DEFAULT_REPORT_TAG,
+      resolvedTag.id || null,
+      model,
+      vendor,
+      technician,
+      osVersion,
+      null,
+      null,
+      null,
+      null,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      now,
+      now,
+      JSON.stringify(components),
+      payload,
+      getClientIp(req)
+    ];
+
+    const machineValues = [
+      machineKey,
+      hostname,
+      macAddress,
+      macAddresses ? JSON.stringify(macAddresses) : null,
+      serialNumber,
+      category || 'unknown',
+      resolvedTag.name || DEFAULT_REPORT_TAG,
+      resolvedTag.id || null,
+      model,
+      vendor,
+      technician,
+      osVersion,
+      null,
+      null,
+      null,
+      null,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      zeroStatus,
+      now,
+      now,
+      JSON.stringify(components),
+      payload,
+      getClientIp(req)
+    ];
+    await client.query(upsertReportQuery, reportValues);
+    await client.query(upsertMachineQuery, machineValues);
+    await client.query('COMMIT');
+    return res.json({ ok: true, reportId, machineKey });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback report zero', rollbackError);
+      }
+    }
+    console.error('Failed to create report zero', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.delete('/api/reports/:id', requireAuth, requireReportDelete, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const result = await client.query('DELETE FROM reports WHERE id = $1 RETURNING machine_key', [
+      id
+    ]);
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true, machineKey: row.machine_key || null });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback report delete', rollbackError);
+      }
+    }
+    console.error('Failed to delete report', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
 app.put('/api/machines/:id/comment', requireAuth, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
@@ -2957,6 +5847,140 @@ app.put('/api/machines/:id/comment', requireAuth, async (req, res) => {
   }
 });
 
+app.put('/api/tags/rename', requireTagEdit, async (req, res) => {
+  const tagIdRaw = req.body?.tagId || req.body?.tag_id || null;
+  const oldTagRaw = cleanString(req.body?.oldTag, 64);
+  const newTagRaw = cleanString(req.body?.newTag || req.body?.newName, 64);
+  const newTag = newTagRaw ? newTagRaw.trim() : '';
+
+  if (!newTag) {
+    return res.status(400).json({ ok: false, error: 'invalid_tag' });
+  }
+  if (!tagIdRaw && !oldTagRaw) {
+    return res.status(400).json({ ok: false, error: 'missing_tag_id' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    let tagRow = null;
+    if (tagIdRaw) {
+      const tagId = normalizeUuid(tagIdRaw);
+      if (!tagId) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'invalid_tag_id' });
+      }
+      const tagResult = await client.query(
+        'SELECT id, name, is_active FROM tags WHERE id = $1 FOR UPDATE',
+        [tagId]
+      );
+      tagRow = tagResult.rows && tagResult.rows[0] ? tagResult.rows[0] : null;
+    } else if (oldTagRaw) {
+      const tagResult = await client.query(
+        'SELECT id, name, is_active FROM tags WHERE LOWER(name) = LOWER($1) LIMIT 1 FOR UPDATE',
+        [oldTagRaw]
+      );
+      tagRow = tagResult.rows && tagResult.rows[0] ? tagResult.rows[0] : null;
+    }
+
+    if (!tagRow) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    const conflict = await client.query(
+      'SELECT id FROM tags WHERE LOWER(name) = LOWER($1) AND id <> $2 LIMIT 1',
+      [newTag, tagRow.id]
+    );
+    if (conflict.rows && conflict.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'tag_conflict' });
+    }
+
+    await client.query('UPDATE tags SET name = $2, updated_at = NOW() WHERE id = $1', [
+      tagRow.id,
+      newTag
+    ]);
+    const reportResult = await client.query(
+      'UPDATE reports SET tag = $2 WHERE tag_id = $1',
+      [tagRow.id, newTag]
+    );
+    const machineResult = await client.query(
+      'UPDATE machines SET tag = $2 WHERE tag_id = $1',
+      [tagRow.id, newTag]
+    );
+
+    let activeTag = null;
+    if (tagRow.is_active) {
+      await client.query('UPDATE tags SET is_active = false WHERE id = $1', [tagRow.id]);
+      const existingActive = await client.query(
+        'SELECT id, name FROM tags WHERE LOWER(name) = LOWER($1) LIMIT 1 FOR UPDATE',
+        [DEFAULT_REPORT_TAG]
+      );
+      if (existingActive.rows && existingActive.rows[0]) {
+        await client.query('UPDATE tags SET is_active = true, updated_at = NOW() WHERE id = $1', [
+          existingActive.rows[0].id
+        ]);
+        activeTag = {
+          id: existingActive.rows[0].id,
+          name: existingActive.rows[0].name,
+          is_active: true
+        };
+      } else {
+        const newActiveId = generateUuid();
+        await client.query(
+          `
+            INSERT INTO tags (id, name, is_active, created_at, updated_at)
+            VALUES ($1, $2, true, NOW(), NOW())
+          `,
+          [newActiveId, DEFAULT_REPORT_TAG]
+        );
+        activeTag = { id: newActiveId, name: DEFAULT_REPORT_TAG, is_active: true };
+      }
+    }
+    await client.query('COMMIT');
+
+    const shouldRenameStorage =
+      tagRow.is_active &&
+      OBJECT_STORAGE_RENAME_ON_TAG &&
+      newTag &&
+      newTag.toLowerCase() !== DEFAULT_REPORT_TAG.toLowerCase();
+    let storageRename = null;
+    if (shouldRenameStorage) {
+      const targetPrefix = normalizeObjectStorageSegment(newTag);
+      if (targetPrefix && normalizeObjectStorageSegment(OBJECT_STORAGE_PREFIX) !== targetPrefix) {
+        storageRename = await renameObjectStoragePrefix(OBJECT_STORAGE_PREFIX, targetPrefix);
+      } else {
+        storageRename = { ok: false, error: 'invalid_target', source: OBJECT_STORAGE_PREFIX };
+      }
+    }
+    return res.json({
+      ok: true,
+      tag: { id: tagRow.id, name: newTag },
+      updatedReports: reportResult.rowCount || 0,
+      updatedMachines: machineResult.rowCount || 0,
+      activeTag,
+      storageRename
+    });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback tag rename', rollbackError);
+      }
+    }
+    console.error('Failed to rename tag', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
 app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
@@ -2977,17 +6001,34 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
   }
 
   let components = null;
+  let machineComponents = null;
   let payload = null;
+  let machinePayload = null;
   try {
     components = row.components ? JSON.parse(row.components) : null;
   } catch (error) {
     components = null;
   }
   try {
+    machineComponents = row.machine_components ? JSON.parse(row.machine_components) : null;
+  } catch (error) {
+    machineComponents = null;
+  }
+  if (!components && machineComponents) {
+    components = machineComponents;
+  }
+
+  try {
     payload = row.payload ? JSON.parse(row.payload) : null;
   } catch (error) {
     payload = null;
   }
+  try {
+    machinePayload = row.machine_payload ? JSON.parse(row.machine_payload) : null;
+  } catch (error) {
+    machinePayload = null;
+  }
+  payload = mergeHardwarePayload(payload, machinePayload);
 
   const macAddresses = normalizeMacList(row.mac_addresses);
   const macList = Array.isArray(macAddresses) ? macAddresses.filter(Boolean) : [];
@@ -3012,8 +6053,8 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     macList: macList.length ? macList.join(', ') : '--',
     osVersion: row.os_version || '--',
     lastIp: row.last_ip || '--',
-    lastSeen: formatDateTime(row.last_seen),
-    createdAt: formatDateTime(row.created_at),
+    lastSeen: formatDateTime(row.machine_last_seen || row.report_last_seen),
+    createdAt: formatDateTime(row.machine_created_at || row.report_created_at),
     technician: row.technician || '--',
     ramTotal: formatRam(row.ram_mb),
     ramSlots: formatSlots(row.ram_slots_free, row.ram_slots_total),
@@ -3029,6 +6070,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     padStatus: row.pad_status,
     badgeReaderStatus: row.badge_reader_status,
     diagnostics: buildDiagnosticsRows(payload),
+    inventoryRows: buildInventoryRows(payload),
     components: buildComponentRows(components),
     summary: summarizeComponents(components),
     generatedAt: formatDateTime(new Date())
