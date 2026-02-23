@@ -1325,6 +1325,7 @@ const COMPONENT_LABELS = {
   cpuStress: 'CPU (stress)',
   gpuStress: 'GPU (stress)',
   networkPing: 'Ping',
+  wifiStandard: 'Wi-Fi (norme)',
   fsCheck: 'Check disque',
   gpu: 'GPU',
   usb: 'Ports USB',
@@ -1345,6 +1346,7 @@ const COMPONENT_ORDER = [
   'cpuStress',
   'gpuStress',
   'networkPing',
+  'wifiStandard',
   'fsCheck',
   'gpu',
   'usb',
@@ -3001,6 +3003,7 @@ function buildDerivedComponents(body, sources) {
     addStatus('gpuStress', tests.gpuStress);
     addStatus('networkTest', tests.network);
     addStatus('networkPing', tests.networkPing);
+    addStatus('wifiStandard', tests.wifiStandard);
     addStatus('fsCheck', tests.fsCheck);
     addStatus('memDiag', tests.memDiag);
   }
@@ -3419,6 +3422,7 @@ function buildDiagnosticsRows(payload) {
   addRow('CPU (stress)', tests.cpuStress, null);
   addRow('GPU (stress)', tests.gpuStress, null);
   addRow('Ping', tests.networkPing, tests.networkPingTarget || null);
+  addRow('Wi-Fi (norme)', tests.wifiStandard, tests.wifiStandardValue || null);
   addRow('Check disque', tests.fsCheck, null);
 
   return rows;

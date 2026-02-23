@@ -325,6 +325,7 @@ function Get-TestLabel {
     'gpuStress' { return 'GPU (stress)' }
     'network' { return 'Reseau (iperf)' }
     'networkPing' { return 'Ping' }
+    'wifiStandard' { return 'Wi-Fi (norme)' }
     'fsCheck' { return 'Check disque' }
     'memDiag' { return 'Diag memoire' }
     'cameraStatus' { return 'Camera' }
@@ -363,6 +364,7 @@ function Get-NonOkTests {
     'gpuStress',
     'network',
     'networkPing',
+    'wifiStandard',
     'fsCheck',
     'memDiag',
     'cameraStatus',
@@ -3474,6 +3476,87 @@ function Test-NetworkPing {
   }
 }
 
+function Get-WifiStandardAssessment {
+  param(
+    [int]$TimeoutSec = 12
+  )
+
+  $netshCmd = Get-Command netsh -ErrorAction SilentlyContinue
+  if (-not $netshCmd) {
+    return @{ status = 'not_tested'; standard = $null; detail = 'netsh_missing' }
+  }
+
+  $result = Invoke-ExternalCommand -Path $netshCmd.Source -Arguments @('wlan', 'show', 'interfaces') -TimeoutSec $TimeoutSec -Name 'Wi-Fi standard'
+  if ($result.status -eq 'timeout') {
+    return @{ status = 'timeout'; standard = $null; detail = 'netsh_timeout' }
+  }
+  if ($result.status -ne 'ok' -and $result.status -ne 'nok') {
+    return @{ status = 'not_tested'; standard = $null; detail = 'netsh_unavailable' }
+  }
+
+  $output = if ($result.output) { [string]$result.output } else { '' }
+  if ([string]::IsNullOrWhiteSpace($output)) {
+    return @{ status = 'not_tested'; standard = $null; detail = 'empty_output' }
+  }
+
+  $lower = $output.ToLowerInvariant()
+  $matches = [regex]::Matches($lower, '802\.11(?:be|ax|ac|n|g|a|b)')
+  $standards = @()
+  foreach ($match in $matches) {
+    if ($match -and $match.Value) {
+      $standards += $match.Value
+    }
+  }
+
+  if (-not $standards -or $standards.Count -eq 0) {
+    if (
+      $lower.Contains('there is no wireless interface on the system') -or
+      $lower.Contains('aucune interface sans fil') -or
+      $lower.Contains('wireless autoconfig service') -or
+      $lower.Contains('service de configuration automatique sans fil')
+    ) {
+      return @{ status = 'not_tested'; standard = $null; detail = 'no_wifi_interface' }
+    }
+    return @{ status = 'not_tested'; standard = $null; detail = 'standard_not_found' }
+  }
+
+  $rank = @{
+    '802.11be' = 7
+    '802.11ax' = 6
+    '802.11ac' = 5
+    '802.11n' = 4
+    '802.11g' = 3
+    '802.11a' = 2
+    '802.11b' = 1
+  }
+
+  $selected = $null
+  $selectedRank = -1
+  foreach ($standard in $standards) {
+    if (-not $rank.ContainsKey($standard)) {
+      continue
+    }
+    $candidateRank = [int]$rank[$standard]
+    if ($candidateRank -gt $selectedRank) {
+      $selected = $standard
+      $selectedRank = $candidateRank
+    }
+  }
+
+  if (-not $selected) {
+    return @{ status = 'not_tested'; standard = $null; detail = 'standard_not_found' }
+  }
+
+  if (@('802.11be', '802.11ax', '802.11ac', '802.11n') -contains $selected) {
+    return @{ status = 'ok'; standard = $selected; detail = 'supported' }
+  }
+  if (@('802.11g', '802.11a', '802.11b') -contains $selected) {
+    return @{ status = 'nok'; standard = $selected; detail = 'obsolete' }
+  }
+
+  return @{ status = 'not_tested'; standard = $selected; detail = 'unclassified' }
+}
+
 function Get-IperfMbps {
   param(
     [object]$Json,
@@ -4121,6 +4204,10 @@ $memDiagStatus = $null
 
 $networkPingTargetValue = if ($NetworkPingTarget) { $NetworkPingTarget } else { Get-DefaultGateway }
 $networkPingResult = Test-NetworkPing -Target $networkPingTargetValue -Count $NetworkPingCount
+$wifiStandardResult = Get-WifiStandardAssessment -TimeoutSec ([math]::Max(10, $TimeoutSec))
+if ($wifiStandardResult) {
+  Write-Log ("Wi-Fi standard check: status={0} standard={1} detail={2}" -f $wifiStandardResult.status, $wifiStandardResult.standard, $wifiStandardResult.detail)
+}
 $iperfResult = $null
 
 $fsCheckModeValue = $FsCheckMode
@@ -4260,6 +4347,10 @@ if ($iperfResult) {
 }
 if ($fsCheckResult) { $tests.fsCheck = $fsCheckResult.status }
 if ($memDiagStatus) { $tests.memDiag = $memDiagStatus }
+if ($wifiStandardResult -and $wifiStandardResult.status) {
+  $tests.wifiStandard = $wifiStandardResult.status
+  if ($wifiStandardResult.standard) { $tests.wifiStandardValue = $wifiStandardResult.standard }
+}
 
 $refreshWinsat = $false
 if (-not $winsatStore -or $formalAttempted) { $refreshWinsat = $true }
@@ -4554,6 +4645,7 @@ if ($tests.cpuStress) { $components.cpuStress = $tests.cpuStress }
 if ($tests.gpuStress) { $components.gpuStress = $tests.gpuStress }
 if ($tests.network) { $components.networkTest = $tests.network }
 if ($tests.networkPing) { $components.networkPing = $tests.networkPing }
+if ($tests.wifiStandard) { $components.wifiStandard = $tests.wifiStandard }
 if ($tests.fsCheck) { $components.fsCheck = $tests.fsCheck }
 if ($tests.memDiag) { $components.memDiag = $tests.memDiag }
 if ($gpuStatus) { $components.gpu = $gpuStatus }

@@ -158,6 +158,7 @@ const componentLabels = {
   cpuStress: 'CPU (stress)',
   gpuStress: 'GPU (stress)',
   networkPing: 'Ping',
+  wifiStandard: 'Wi-Fi (norme)',
   fsCheck: 'Check disque',
   gpu: 'GPU',
   usb: 'Ports USB',
@@ -179,6 +180,7 @@ const componentOrder = [
   'cpuStress',
   'gpuStress',
   'networkPing',
+  'wifiStandard',
   'fsCheck',
   'gpu',
   'usb',
@@ -3082,6 +3084,9 @@ function buildDiagnosticsHtml(detail) {
     }
     if (tests.networkPing || tests.networkPingTarget) {
       addRow('Ping', tests.networkPing, tests.networkPingTarget || null, 'networkPing');
+    }
+    if (tests.wifiStandard || tests.wifiStandardValue) {
+      addRow('Wi-Fi (norme)', tests.wifiStandard, tests.wifiStandardValue || null, 'wifiStandard');
     }
     if (tests.fsCheck) {
       addRow('Check disque', tests.fsCheck, null, 'fsCheck');
