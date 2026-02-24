@@ -64,5 +64,30 @@ services:
       - postgres
     restart: unless-stopped
 
+  grafana:
+    image: grafana/grafana-oss:10.4.5
+    ports:
+      - "3002:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_DISABLE_LOGIN_FORM: "${GRAFANA_DISABLE_LOGIN_FORM:-true}"
+      GF_USERS_DEFAULT_THEME: "light"
+      MDT_GRAFANA_DB_HOST: "postgres:5432"
+      MDT_GRAFANA_DB_NAME: "mdt"
+      MDT_GRAFANA_DB_USER: "mdt"
+      MDT_GRAFANA_DB_PASSWORD: "mdt"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
 volumes:
   mdt-db:
+  grafana-data:

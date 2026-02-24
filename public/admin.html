@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Configuration LDAP</title>
+    <title>Administration MDT</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -11,122 +11,198 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/styles.css?v=20250107a" />
+    <link rel="stylesheet" href="/styles.css?v=20260223j" />
   </head>
-  <body>
+  <body class="dashboard-page admin-page">
     <div class="aura" aria-hidden="true"></div>
-    <main class="app">
-      <header class="admin-hero">
-        <div class="admin-hero-copy">
+    <main class="app app-shell">
+      <aside class="left-sidebar" aria-label="Navigation administration">
+        <div class="sidebar-head">
           <p class="hero-kicker">MDT Secure</p>
-          <h1>Configuration LDAP</h1>
-          <p class="hero-sub">
-            Gere l'authentification LDAP sans modifier les variables d'environnement.
+          <h1 class="sidebar-title">Panneau admin</h1>
+          <p class="sidebar-sub">
+            Configuration LDAP et pilotage des lots depuis un espace unique.
           </p>
         </div>
-        <div class="admin-hero-actions">
-          <a class="admin-secondary" href="/">Retour au tableau</a>
-          <a class="admin-secondary" href="/journal">Journal</a>
-          <a class="logout-btn" href="/logout">Deconnexion</a>
-        </div>
-      </header>
-
-      <section class="admin-panel">
-        <div class="admin-card">
-          <div class="admin-header">
-            <div>
-              <p class="admin-kicker">Administration</p>
-              <h2>Connexion LDAP</h2>
-              <p class="admin-sub">
-                Configure l'authentification LDAP depuis l'interface web.
-              </p>
-            </div>
-            <div class="admin-meta">
-              <span class="admin-status" id="ldap-status" data-status="unknown">LDAP inconnu</span>
-              <span class="admin-source" id="ldap-source"></span>
-            </div>
+        <nav class="sidebar-nav" aria-label="Sections administration">
+          <a class="sidebar-nav-btn" href="#section-admin-head">Vue generale</a>
+          <a class="sidebar-nav-btn is-active" href="#section-ldap">Connexion LDAP</a>
+          <a class="sidebar-nav-btn" href="#section-lots">Gestion des lots</a>
+        </nav>
+        <div class="sidebar-links" aria-label="Navigation pages">
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Navigation</p>
+            <a class="admin-link" href="/">Tableau de bord</a>
+            <a class="admin-link" href="/lots">Lots</a>
+            <a class="admin-link" href="/metrics">Metrics</a>
+            <a class="admin-link" href="/legacy-imports">Imports</a>
           </div>
-          <form class="admin-form" id="ldap-form">
-            <div class="admin-grid">
-              <label class="admin-field admin-toggle">
-                <span>Activer LDAP</span>
-                <input type="checkbox" id="ldap-enabled" />
-              </label>
-              <label class="admin-field">
-                <span>LDAP URL</span>
-                <input
-                  type="text"
-                  id="ldap-url"
-                  placeholder="ldap://ad.local:389"
-                  autocomplete="off"
-                />
-              </label>
-              <label class="admin-field">
-                <span>Base de recherche</span>
-                <input
-                  type="text"
-                  id="ldap-search-base"
-                  placeholder="dc=example,dc=local"
-                  autocomplete="off"
-                />
-              </label>
-              <label class="admin-field">
-                <span>Bind DN (optionnel)</span>
-                <input
-                  type="text"
-                  id="ldap-bind-dn"
-                  placeholder="cn=bind,dc=example,dc=local"
-                  autocomplete="off"
-                />
-              </label>
-              <label class="admin-field">
-                <span>Mot de passe bind</span>
-                <input
-                  type="password"
-                  id="ldap-bind-password"
-                  placeholder="Laisser vide pour conserver"
-                  autocomplete="new-password"
-                />
-              </label>
-              <label class="admin-check">
-                <input type="checkbox" id="ldap-clear-password" />
-                <span>Effacer le mot de passe enregistre</span>
-              </label>
-              <p class="admin-hint" id="ldap-password-hint"></p>
-              <label class="admin-field">
-                <span>Filtre de recherche</span>
-                <input
-                  type="text"
-                  id="ldap-search-filter"
-                  placeholder="(sAMAccountName={{username}})"
-                  autocomplete="off"
-                />
-              </label>
-              <label class="admin-field">
-                <span>Attributs retournes</span>
-                <input
-                  type="text"
-                  id="ldap-search-attributes"
-                  placeholder="dn,cn,mail"
-                  autocomplete="off"
-                />
-              </label>
-              <label class="admin-check">
-                <input type="checkbox" id="ldap-tls-reject" />
-                <span>Verifier le certificat TLS</span>
-              </label>
-            </div>
-            <div class="admin-actions">
-              <button type="submit" class="admin-primary" id="ldap-save">Enregistrer</button>
-              <button type="button" class="admin-secondary" id="ldap-reload">Recharger</button>
-            </div>
-            <div class="admin-feedback" id="ldap-feedback" role="status"></div>
-            <p class="admin-note">Les changements prennent effet immediatement.</p>
-          </form>
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Suivi</p>
+            <a class="admin-link" href="/patchnotes">Patchnotes</a>
+            <a class="admin-link journal-link" href="/journal">Journal</a>
+          </div>
+          <div class="sidebar-link-group sidebar-link-group--session">
+            <p class="sidebar-link-title">Session</p>
+            <a class="logout-btn" href="/logout">Deconnexion</a>
+          </div>
+          <span class="dev-badge" aria-hidden="true">DEV</span>
         </div>
+        <p class="sidebar-note">
+          Cette barre reste visible sur toutes les pages principales pour garder la navigation cohérente.
+        </p>
+      </aside>
+
+      <section class="workspace">
+        <header class="admin-hero" id="section-admin-head">
+          <div class="admin-hero-copy">
+            <p class="hero-kicker">Configuration</p>
+            <h1>Configuration et production</h1>
+            <p class="hero-sub">
+              Gere l'authentification LDAP et la production en lots dans une interface moderne.
+            </p>
+          </div>
+          <div class="admin-hero-actions">
+            <a class="admin-secondary" href="/">Retour au tableau</a>
+            <a class="admin-secondary" href="/journal">Journal</a>
+          </div>
+        </header>
+
+        <section class="admin-panel">
+          <div class="admin-card" id="section-ldap">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Administration</p>
+                <h2>Connexion LDAP</h2>
+                <p class="admin-sub">
+                  Configure l'authentification LDAP depuis l'interface web.
+                </p>
+              </div>
+              <div class="admin-meta">
+                <span class="admin-status" id="ldap-status" data-status="unknown">LDAP inconnu</span>
+                <span class="admin-source" id="ldap-source"></span>
+              </div>
+            </div>
+            <form class="admin-form" id="ldap-form">
+              <div class="admin-grid">
+                <label class="admin-field admin-toggle">
+                  <span>Activer LDAP</span>
+                  <input type="checkbox" id="ldap-enabled" />
+                </label>
+                <label class="admin-field">
+                  <span>LDAP URL</span>
+                  <input
+                    type="text"
+                    id="ldap-url"
+                    placeholder="ldap://ad.local:389"
+                    autocomplete="off"
+                  />
+                </label>
+                <label class="admin-field">
+                  <span>Base de recherche</span>
+                  <input
+                    type="text"
+                    id="ldap-search-base"
+                    placeholder="dc=example,dc=local"
+                    autocomplete="off"
+                  />
+                </label>
+                <label class="admin-field">
+                  <span>Bind DN (optionnel)</span>
+                  <input
+                    type="text"
+                    id="ldap-bind-dn"
+                    placeholder="cn=bind,dc=example,dc=local"
+                    autocomplete="off"
+                  />
+                </label>
+                <label class="admin-field">
+                  <span>Mot de passe bind</span>
+                  <input
+                    type="password"
+                    id="ldap-bind-password"
+                    placeholder="Laisser vide pour conserver"
+                    autocomplete="new-password"
+                  />
+                </label>
+                <label class="admin-check">
+                  <input type="checkbox" id="ldap-clear-password" />
+                  <span>Effacer le mot de passe enregistre</span>
+                </label>
+                <p class="admin-hint" id="ldap-password-hint"></p>
+                <label class="admin-field">
+                  <span>Filtre de recherche</span>
+                  <input
+                    type="text"
+                    id="ldap-search-filter"
+                    placeholder="(sAMAccountName={{username}})"
+                    autocomplete="off"
+                  />
+                </label>
+                <label class="admin-field">
+                  <span>Attributs retournes</span>
+                  <input
+                    type="text"
+                    id="ldap-search-attributes"
+                    placeholder="dn,cn,mail"
+                    autocomplete="off"
+                  />
+                </label>
+                <label class="admin-check">
+                  <input type="checkbox" id="ldap-tls-reject" />
+                  <span>Verifier le certificat TLS</span>
+                </label>
+              </div>
+              <div class="admin-actions">
+                <button type="submit" class="admin-primary" id="ldap-save">Enregistrer</button>
+                <button type="button" class="admin-secondary" id="ldap-reload">Recharger</button>
+              </div>
+              <div class="admin-feedback" id="ldap-feedback" role="status"></div>
+              <p class="admin-note">Les changements prennent effet immediatement.</p>
+            </form>
+          </div>
+
+          <div class="admin-card" id="section-lots">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Production</p>
+                <h2>Gestion des lots</h2>
+                <p class="admin-sub">
+                  Cree les lots, ajuste la priorite, active la pause et assigne des techniciens.
+                </p>
+              </div>
+            </div>
+            <form class="admin-form" id="lot-create-form">
+              <div class="admin-grid">
+                <label class="admin-field">
+                  <span>Fournisseur</span>
+                  <input type="text" id="lot-supplier" autocomplete="off" maxlength="96" required />
+                </label>
+                <label class="admin-field">
+                  <span>Numero de lot</span>
+                  <input type="text" id="lot-number" autocomplete="off" maxlength="96" required />
+                </label>
+                <label class="admin-field">
+                  <span>Nombre de pieces</span>
+                  <input type="number" id="lot-target-count" min="1" step="1" required />
+                </label>
+                <label class="admin-field">
+                  <span>Priorite (1 = plus urgent)</span>
+                  <input type="number" id="lot-priority" min="1" step="1" value="100" />
+                </label>
+              </div>
+              <div class="admin-actions">
+                <button type="submit" class="admin-primary" id="lot-create-submit">Creer le lot</button>
+                <button type="button" class="admin-secondary" id="lot-reload">Recharger</button>
+              </div>
+              <div class="admin-feedback" id="lot-feedback" role="status"></div>
+            </form>
+            <div class="lot-list" id="lot-list"></div>
+          </div>
+        </section>
       </section>
     </main>
 
-    <script src="/admin.js" defer></script>
+    <script src="/admin.js?v=20260223c" defer></script>
   </body>
 </html>

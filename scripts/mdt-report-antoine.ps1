@@ -57,6 +57,8 @@ param(
   [string]$ObjectStorageAccessKey = $env:MDT_OBJECT_STORAGE_ACCESS_KEY,
   [string]$ObjectStorageSecretKey = $env:MDT_OBJECT_STORAGE_SECRET_KEY,
   [string]$ObjectStoragePrefix = $env:MDT_OBJECT_STORAGE_PREFIX,
+  [string]$ReportTag = $env:MDT_REPORT_TAG,
+  [string]$ReportTagId = $env:MDT_REPORT_TAG_ID,
   [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
   [switch]$SkipRawUpload
 )
@@ -76,7 +78,7 @@ if (-not $LogPath) {
   $LogPath = Join-Path $PSScriptRoot 'mdt-report.log'
 }
 
-if (-not $Technician) { $Technician = 'Rémi' }
+if (-not $Technician) { $Technician = 'Antoine' }
 if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
   $SkipRawUpload = $true
 }
@@ -325,7 +327,6 @@ function Get-TestLabel {
     'gpuStress' { return 'GPU (stress)' }
     'network' { return 'Reseau (iperf)' }
     'networkPing' { return 'Ping' }
-    'wifiStandard' { return 'Wi-Fi (norme)' }
     'fsCheck' { return 'Check disque' }
     'memDiag' { return 'Diag memoire' }
     'cameraStatus' { return 'Camera' }
@@ -364,7 +365,6 @@ function Get-NonOkTests {
     'gpuStress',
     'network',
     'networkPing',
-    'wifiStandard',
     'fsCheck',
     'memDiag',
     'cameraStatus',
@@ -3455,6 +3455,148 @@ function Get-DefaultGateway {
   return $null
 }
 
+function Get-WifiStandardCode {
+  param([object]$Value)
+
+  if ($null -eq $Value) { return $null }
+  $raw = [string]$Value
+  if (-not $raw) { return $null }
+  $cleaned = $raw.ToLowerInvariant()
+
+  $matches = [regex]::Matches($cleaned, '(?i)(?:802[\.\-\s]*11|11)\s*(be|ax|ac|n|g|a|b)\b')
+  if ($matches.Count -gt 0) {
+    $suffix = $matches[0].Groups[1].Value.ToLowerInvariant()
+    if ($suffix) { return "802.11$suffix" }
+  }
+
+  if ($cleaned -match '\bwi-?fi\s*7\b') { return '802.11be' }
+  if ($cleaned -match '\bwi-?fi\s*6(?:e)?\b') { return '802.11ax' }
+  if ($cleaned -match '\bwi-?fi\s*5\b') { return '802.11ac' }
+  if ($cleaned -match '\bwi-?fi\s*4\b') { return '802.11n' }
+  if ($cleaned -match '\bwi-?fi\s*3\b') { return '802.11g' }
+  if ($cleaned -match '\bwi-?fi\s*2\b') { return '802.11a' }
+  if ($cleaned -match '\bwi-?fi\s*1\b') { return '802.11b' }
+  return $null
+}
+
+function Get-WifiStandardRank {
+  param([string]$Standard)
+
+  switch ($Standard) {
+    '802.11be' { return 7 }
+    '802.11ax' { return 6 }
+    '802.11ac' { return 5 }
+    '802.11n' { return 4 }
+    '802.11g' { return 3 }
+    '802.11a' { return 2 }
+    '802.11b' { return 1 }
+    default { return 0 }
+  }
+}
+
+function Get-WifiStandardStatus {
+  $result = [ordered]@{
+    status = 'not_tested'
+    standard = $null
+    standards = @()
+    source = 'netsh'
+  }
+
+  $netsh = Get-Command netsh -ErrorAction SilentlyContinue
+  if (-not $netsh) {
+    $result.status = 'absent'
+    $result.source = 'command_missing'
+    return $result
+  }
+
+  $output = $null
+  try {
+    $output = (& $netsh.Source wlan show interfaces 2>&1 | Out-String).Trim()
+  } catch {
+    Write-Log "Wi-Fi detection failed: $($_.Exception.Message)" 'WARN'
+    return $result
+  }
+  if (-not $output) {
+    $result.source = 'empty_output'
+    return $result
+  }
+
+  $candidates = @()
+  $linePatterns = @(
+    '(?im)^\s*(?:radio\s*type|type\s+de\s+radio)\s*:\s*(?<value>.+)$',
+    '(?im)^\s*(?:radio\s*types?\s*supported|types?\s+de\s+radio\s+pris\s+en\s+charge)\s*:\s*(?<value>.+)$'
+  )
+  foreach ($pattern in $linePatterns) {
+    $matches = [regex]::Matches($output, $pattern)
+    foreach ($match in $matches) {
+      $lineValue = $match.Groups['value'].Value
+      if (-not $lineValue) { continue }
+      $standardMatches = [regex]::Matches($lineValue, '(?i)(?:802[\.\-\s]*11|11)\s*(be|ax|ac|n|g|a|b)\b')
+      foreach ($standardMatch in $standardMatches) {
+        $candidate = "802.11$($standardMatch.Groups[1].Value.ToLowerInvariant())"
+        if ($candidate -and ($candidates -notcontains $candidate)) {
+          $candidates += $candidate
+        }
+      }
+      $singleCandidate = Get-WifiStandardCode -Value $lineValue
+      if ($singleCandidate -and ($candidates -notcontains $singleCandidate)) {
+        $candidates += $singleCandidate
+      }
+    }
+  }
+
+  if (-not $candidates -or $candidates.Count -eq 0) {
+    $allMatches = [regex]::Matches($output, '(?i)(?:802[\.\-\s]*11|11)\s*(be|ax|ac|n|g|a|b)\b')
+    foreach ($standardMatch in $allMatches) {
+      $candidate = "802.11$($standardMatch.Groups[1].Value.ToLowerInvariant())"
+      if ($candidate -and ($candidates -notcontains $candidate)) {
+        $candidates += $candidate
+      }
+    }
+    $fallback = Get-WifiStandardCode -Value $output
+    if ($fallback -and ($candidates -notcontains $fallback)) {
+      $candidates += $fallback
+    }
+  }
+
+  if (-not $candidates -or $candidates.Count -eq 0) {
+    $normalizedOutput = $output.ToLowerInvariant()
+    if (
+      $normalizedOutput -match 'no wireless interface' -or
+      $normalizedOutput -match 'there is no wireless interface' -or
+      $normalizedOutput -match 'aucune interface sans fil' -or
+      $normalizedOutput -match 'aucune interface reseau sans fil'
+    ) {
+      $result.status = 'nok'
+    }
+    return $result
+  }
+
+  $bestStandard = $null
+  $bestRank = 0
+  foreach ($candidate in $candidates) {
+    $rank = Get-WifiStandardRank -Standard $candidate
+    if ($rank -gt $bestRank) {
+      $bestRank = $rank
+      $bestStandard = $candidate
+    }
+  }
+  if (-not $bestStandard) {
+    $bestStandard = $candidates[0]
+  }
+
+  $result.standards = $candidates
+  $result.standard = $bestStandard
+  if ($bestStandard -in @('802.11be', '802.11ax', '802.11ac', '802.11n')) {
+    $result.status = 'ok'
+  } elseif ($bestStandard -in @('802.11g', '802.11a', '802.11b')) {
+    $result.status = 'nok'
+  } else {
+    $result.status = 'not_tested'
+  }
+  return $result
+}
+
 function Test-NetworkPing {
   param(
     [string]$Target,
@@ -3474,87 +3616,6 @@ function Test-NetworkPing {
     Write-Log "Ping failed: $($_.Exception.Message)" 'WARN'
     return @{ status = 'nok'; target = $Target }
   }
-}
-
-function Get-WifiStandardAssessment {
-  param(
-    [int]$TimeoutSec = 12
-  )
-
-  $netshCmd = Get-Command netsh -ErrorAction SilentlyContinue
-  if (-not $netshCmd) {
-    return @{ status = 'not_tested'; standard = $null; detail = 'netsh_missing' }
-  }
-
-  $result = Invoke-ExternalCommand -Path $netshCmd.Source -Arguments @('wlan', 'show', 'interfaces') -TimeoutSec $TimeoutSec -Name 'Wi-Fi standard'
-  if ($result.status -eq 'timeout') {
-    return @{ status = 'timeout'; standard = $null; detail = 'netsh_timeout' }
-  }
-  if ($result.status -ne 'ok' -and $result.status -ne 'nok') {
-    return @{ status = 'not_tested'; standard = $null; detail = 'netsh_unavailable' }
-  }
-
-  $output = if ($result.output) { [string]$result.output } else { '' }
-  if ([string]::IsNullOrWhiteSpace($output)) {
-    return @{ status = 'not_tested'; standard = $null; detail = 'empty_output' }
-  }
-
-  $lower = $output.ToLowerInvariant()
-  $matches = [regex]::Matches($lower, '802\.11(?:be|ax|ac|n|g|a|b)')
-  $standards = @()
-  foreach ($match in $matches) {
-    if ($match -and $match.Value) {
-      $standards += $match.Value
-    }
-  }
-
-  if (-not $standards -or $standards.Count -eq 0) {
-    if (
-      $lower.Contains('there is no wireless interface on the system') -or
-      $lower.Contains('aucune interface sans fil') -or
-      $lower.Contains('wireless autoconfig service') -or
-      $lower.Contains('service de configuration automatique sans fil')
-    ) {
-      return @{ status = 'not_tested'; standard = $null; detail = 'no_wifi_interface' }
-    }
-    return @{ status = 'not_tested'; standard = $null; detail = 'standard_not_found' }
-  }
-
-  $rank = @{
-    '802.11be' = 7
-    '802.11ax' = 6
-    '802.11ac' = 5
-    '802.11n' = 4
-    '802.11g' = 3
-    '802.11a' = 2
-    '802.11b' = 1
-  }
-
-  $selected = $null
-  $selectedRank = -1
-  foreach ($standard in $standards) {
-    if (-not $rank.ContainsKey($standard)) {
-      continue
-    }
-    $candidateRank = [int]$rank[$standard]
-    if ($candidateRank -gt $selectedRank) {
-      $selected = $standard
-      $selectedRank = $candidateRank
-    }
-  }
-
-  if (-not $selected) {
-    return @{ status = 'not_tested'; standard = $null; detail = 'standard_not_found' }
-  }
-
-  if (@('802.11be', '802.11ax', '802.11ac', '802.11n') -contains $selected) {
-    return @{ status = 'ok'; standard = $selected; detail = 'supported' }
-  }
-  if (@('802.11g', '802.11a', '802.11b') -contains $selected) {
-    return @{ status = 'nok'; standard = $selected; detail = 'obsolete' }
-  }
-
-  return @{ status = 'not_tested'; standard = $selected; detail = 'unclassified' }
 }
 
 function Get-IperfMbps {
@@ -4074,6 +4135,9 @@ $usbStatus = $null
 $keyboardStatus = $null
 $padStatus = $null
 $badgeStatus = $null
+$wifiStandardInfo = $null
+$wifiStandardStatus = 'not_tested'
+$wifiStandardValue = $null
 $cameraTestStatus = $null
 $cameraTestOutputDir = $null
 
@@ -4148,6 +4212,15 @@ if ($skipPeripheralTests) {
   $badgeStatus = Get-StatusFromDevices $badgeDevices
 }
 
+$wifiStandardInfo = Get-WifiStandardStatus
+if ($wifiStandardInfo -and $wifiStandardInfo.status) {
+  $wifiStandardStatus = $wifiStandardInfo.status
+}
+if ($wifiStandardInfo -and $wifiStandardInfo.standard) {
+  $wifiStandardValue = $wifiStandardInfo.standard
+}
+Write-Log ("Wi-Fi standard status={0} standard={1}" -f $wifiStandardStatus, $wifiStandardValue)
+
 $diskSmart = $null
 $diskInventory = Get-DiskInventory
 $physicalMediaInventory = Get-PhysicalMediaInventory
@@ -4204,10 +4277,6 @@ $memDiagStatus = $null
 
 $networkPingTargetValue = if ($NetworkPingTarget) { $NetworkPingTarget } else { Get-DefaultGateway }
 $networkPingResult = Test-NetworkPing -Target $networkPingTargetValue -Count $NetworkPingCount
-$wifiStandardResult = Get-WifiStandardAssessment -TimeoutSec ([math]::Max(10, $TimeoutSec))
-if ($wifiStandardResult) {
-  Write-Log ("Wi-Fi standard check: status={0} standard={1} detail={2}" -f $wifiStandardResult.status, $wifiStandardResult.standard, $wifiStandardResult.detail)
-}
 $iperfResult = $null
 
 $fsCheckModeValue = $FsCheckMode
@@ -4347,10 +4416,6 @@ if ($iperfResult) {
 }
 if ($fsCheckResult) { $tests.fsCheck = $fsCheckResult.status }
 if ($memDiagStatus) { $tests.memDiag = $memDiagStatus }
-if ($wifiStandardResult -and $wifiStandardResult.status) {
-  $tests.wifiStandard = $wifiStandardResult.status
-  if ($wifiStandardResult.standard) { $tests.wifiStandardValue = $wifiStandardResult.standard }
-}
 
 $refreshWinsat = $false
 if (-not $winsatStore -or $formalAttempted) { $refreshWinsat = $true }
@@ -4526,6 +4591,7 @@ if ($artifactRunDir) {
   if ($keyboardStatus) { $componentStatuses.keyboardStatus = $keyboardStatus }
   if ($padStatus) { $componentStatuses.padStatus = $padStatus }
   if ($badgeStatus) { $componentStatuses.badgeReaderStatus = $badgeStatus }
+  if ($wifiStandardStatus) { $componentStatuses.wifiStandard = $wifiStandardStatus }
   if ($gpuStatus) { $componentStatuses.gpuStatus = $gpuStatus }
   if ($thermalInfo -and $thermalInfo.status) { $componentStatuses.thermalStatus = $thermalInfo.status }
 
@@ -4561,6 +4627,15 @@ if ($usbStatus) { $payload.usbStatus = $usbStatus }
 if ($keyboardStatus) { $payload.keyboardStatus = $keyboardStatus }
 if ($padStatus) { $payload.padStatus = $padStatus }
 if ($badgeStatus) { $payload.badgeReaderStatus = $badgeStatus }
+if ($wifiStandardStatus) { $payload.wifiStandardStatus = $wifiStandardStatus }
+if ($wifiStandardValue) { $payload.wifiStandard = $wifiStandardValue }
+if ($wifiStandardStatus) {
+  $payload.wifi = [ordered]@{
+    status = $wifiStandardStatus
+    standard = $wifiStandardValue
+    standards = if ($wifiStandardInfo -and $wifiStandardInfo.standards) { @($wifiStandardInfo.standards) } else { @() }
+  }
+}
 if ($diskInventory) {
   $diskList = @($diskInventory)
   if ($diskList.Count -gt 0) { $payload.disks = $diskList }
@@ -4635,6 +4710,7 @@ if ($usbStatus) { $components.usb = $usbStatus }
 if ($keyboardStatus) { $components.keyboard = $keyboardStatus }
 if ($padStatus) { $components.pad = $padStatus }
 if ($badgeStatus) { $components.badgeReader = $badgeStatus }
+if ($wifiStandardStatus) { $components.wifiStandard = $wifiStandardStatus }
 if ($diskSmart) { $components.diskSmart = $diskSmart }
 if ($tests.diskRead) { $components.diskReadTest = $tests.diskRead }
 if ($tests.diskWrite) { $components.diskWriteTest = $tests.diskWrite }
@@ -4645,7 +4721,6 @@ if ($tests.cpuStress) { $components.cpuStress = $tests.cpuStress }
 if ($tests.gpuStress) { $components.gpuStress = $tests.gpuStress }
 if ($tests.network) { $components.networkTest = $tests.network }
 if ($tests.networkPing) { $components.networkPing = $tests.networkPing }
-if ($tests.wifiStandard) { $components.wifiStandard = $tests.wifiStandard }
 if ($tests.fsCheck) { $components.fsCheck = $tests.fsCheck }
 if ($tests.memDiag) { $components.memDiag = $tests.memDiag }
 if ($gpuStatus) { $components.gpu = $gpuStatus }

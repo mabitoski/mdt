@@ -105,6 +105,11 @@ const AUDIT_LOG_LIMIT_DEFAULT = Number.parseInt(process.env.AUDIT_LOG_LIMIT || '
 const AUDIT_LOG_LIMIT_MAX = Number.parseInt(process.env.AUDIT_LOG_LIMIT_MAX || '500', 10);
 const REPORT_PAGE_LIMIT_DEFAULT = Number.parseInt(process.env.REPORT_PAGE_LIMIT || '60', 10);
 const REPORT_PAGE_LIMIT_MAX = Number.parseInt(process.env.REPORT_PAGE_LIMIT_MAX || '200', 10);
+const LOT_TARGET_COUNT_MIN = 1;
+const LOT_TARGET_COUNT_MAX = Number.parseInt(process.env.LOT_TARGET_COUNT_MAX || '50000', 10);
+const LOT_PRIORITY_DEFAULT = Number.parseInt(process.env.LOT_PRIORITY_DEFAULT || '100', 10);
+const LOT_PRIORITY_MIN = 1;
+const LOT_PRIORITY_MAX = Number.parseInt(process.env.LOT_PRIORITY_MAX || '9999', 10);
 
 if (!Number.isFinite(PORT)) {
   throw new Error('PORT must be a number');
@@ -398,6 +403,197 @@ async function listTagsWithCounts(client, { legacyFlag = null, includeActive = t
   return Array.isArray(result.rows) ? result.rows : [];
 }
 
+async function getLotById(client, lotId, { forUpdate = false } = {}) {
+  const normalized = normalizeUuid(lotId);
+  if (!normalized) {
+    return null;
+  }
+  const lockClause = forUpdate ? ' FOR UPDATE' : '';
+  const result = await client.query(
+    `
+      SELECT
+        id,
+        supplier,
+        lot_number,
+        target_count,
+        produced_count,
+        priority,
+        is_paused,
+        created_by,
+        created_at,
+        updated_at
+      FROM lots
+      WHERE id = $1
+      ${lockClause}
+      LIMIT 1
+    `,
+    [normalized]
+  );
+  return result.rows && result.rows[0] ? result.rows[0] : null;
+}
+
+async function listLotsWithAssignments(client) {
+  const result = await client.query(`
+    SELECT
+      lots.id,
+      lots.supplier,
+      lots.lot_number,
+      lots.target_count,
+      lots.produced_count,
+      lots.priority,
+      lots.is_paused,
+      lots.created_by,
+      lots.created_at,
+      lots.updated_at,
+      COALESCE(
+        json_agg(
+          json_build_object(
+            'technicianKey', lot_assignments.technician_key,
+            'technician', lot_assignments.technician_name
+          )
+          ORDER BY lot_assignments.technician_name
+        ) FILTER (WHERE lot_assignments.technician_key IS NOT NULL),
+        '[]'::json
+      ) AS assignments
+    FROM lots
+    LEFT JOIN lot_assignments ON lot_assignments.lot_id = lots.id
+    GROUP BY lots.id
+    ORDER BY lots.is_paused ASC, (lots.produced_count >= lots.target_count) ASC, lots.priority ASC, lots.created_at ASC
+  `);
+  return Array.isArray(result.rows) ? result.rows : [];
+}
+
+async function findAssignedLotForTechnician(client, technician) {
+  const techKey = normalizeTechKey(technician);
+  if (!techKey) {
+    return null;
+  }
+  const result = await client.query(
+    `
+      SELECT
+        lots.id,
+        lots.supplier,
+        lots.lot_number,
+        lots.target_count,
+        lots.produced_count,
+        lots.priority,
+        lots.is_paused,
+        lots.created_by,
+        lots.created_at,
+        lots.updated_at
+      FROM lots
+      INNER JOIN lot_assignments ON lot_assignments.lot_id = lots.id
+      WHERE lot_assignments.technician_key = $1
+        AND lots.is_paused = false
+        AND lots.produced_count < lots.target_count
+      ORDER BY lots.priority ASC, lots.updated_at ASC, lots.created_at ASC
+      LIMIT 1
+    `,
+    [techKey]
+  );
+  return result.rows && result.rows[0] ? result.rows[0] : null;
+}
+
+async function findPrioritizedLot(client) {
+  const result = await client.query(`
+    SELECT
+      id,
+      supplier,
+      lot_number,
+      target_count,
+      produced_count,
+      priority,
+      is_paused,
+      created_by,
+      created_at,
+      updated_at
+    FROM lots
+    WHERE is_paused = false
+      AND produced_count < target_count
+    ORDER BY priority ASC, updated_at ASC, created_at ASC
+    LIMIT 1
+  `);
+  return result.rows && result.rows[0] ? result.rows[0] : null;
+}
+
+async function resolveLotForIngest(client, { explicitLotId = null, technician = null } = {}) {
+  const explicit = explicitLotId ? await getLotById(client, explicitLotId) : null;
+  if (explicit) {
+    return { lot: explicit, mode: 'manual' };
+  }
+  const assigned = await findAssignedLotForTechnician(client, technician);
+  if (assigned) {
+    return { lot: assigned, mode: 'assigned' };
+  }
+  const prioritized = await findPrioritizedLot(client);
+  if (prioritized) {
+    return { lot: prioritized, mode: 'priority' };
+  }
+  return { lot: null, mode: 'none' };
+}
+
+async function registerLotProgress(
+  client,
+  {
+    lot = null,
+    machineKey = null,
+    reportId = null,
+    technician = null,
+    source = 'ingest',
+    isDoubleCheck = false,
+    shouldCount = true
+  } = {}
+) {
+  if (!lot || !lot.id || !machineKey || !shouldCount || isDoubleCheck) {
+    return { counted: false, lot: lot || null };
+  }
+  const insertResult = await client.query(
+    `
+      INSERT INTO lot_progress (
+        lot_id,
+        machine_key,
+        report_id,
+        technician,
+        source,
+        is_double_check,
+        counted_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      ON CONFLICT (lot_id, machine_key) DO NOTHING
+      RETURNING lot_id
+    `,
+    [lot.id, machineKey, normalizeUuid(reportId), technician || null, source || 'ingest', false]
+  );
+  if (!insertResult.rowCount) {
+    return { counted: false, lot };
+  }
+
+  const updateResult = await client.query(
+    `
+      UPDATE lots
+      SET produced_count = produced_count + 1,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING
+        id,
+        supplier,
+        lot_number,
+        target_count,
+        produced_count,
+        priority,
+        is_paused,
+        created_by,
+        created_at,
+        updated_at
+    `,
+    [lot.id]
+  );
+  return {
+    counted: true,
+    lot: updateResult.rows && updateResult.rows[0] ? updateResult.rows[0] : lot
+  };
+}
+
 async function backfillReportsFromMachines() {
   try {
     const reportCount = await pool.query('SELECT COUNT(*) AS count FROM reports');
@@ -416,6 +612,7 @@ async function backfillReportsFromMachines() {
         category,
         tag,
         tag_id,
+        lot_id,
         model,
         vendor,
         technician,
@@ -459,6 +656,7 @@ async function backfillReportsFromMachines() {
               category,
               tag,
               tag_id,
+              lot_id,
               model,
               vendor,
               technician,
@@ -480,7 +678,7 @@ async function backfillReportsFromMachines() {
             ) VALUES (
               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-            $21, $22, $23, $24, $25, $26, $27
+            $21, $22, $23, $24, $25, $26, $27, $28
           )
         `,
         [
@@ -493,6 +691,7 @@ async function backfillReportsFromMachines() {
           row.category,
           row.tag,
           row.tag_id,
+          row.lot_id,
           row.model,
           row.vendor,
           row.technician,
@@ -656,6 +855,7 @@ async function initDb() {
       category TEXT NOT NULL DEFAULT 'unknown',
       tag TEXT,
       tag_id UUID,
+      lot_id UUID,
       model TEXT,
       vendor TEXT,
       technician TEXT,
@@ -688,6 +888,7 @@ async function initDb() {
       category TEXT NOT NULL DEFAULT 'unknown',
       tag TEXT,
       tag_id UUID,
+      lot_id UUID,
       model TEXT,
       vendor TEXT,
       technician TEXT,
@@ -714,8 +915,10 @@ async function initDb() {
   // Backfill columns for older schemas that predate tags.
   await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS tag TEXT;`);
   await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS tag_id UUID;`);
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS lot_id UUID;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag TEXT;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag_id UUID;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS lot_id UUID;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tags (
@@ -724,6 +927,46 @@ async function initDb() {
       is_active BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS lots (
+      id UUID PRIMARY KEY,
+      supplier TEXT NOT NULL,
+      lot_number TEXT NOT NULL,
+      target_count INTEGER NOT NULL,
+      produced_count INTEGER NOT NULL DEFAULT 0,
+      priority INTEGER NOT NULL DEFAULT ${LOT_PRIORITY_DEFAULT},
+      is_paused BOOLEAN NOT NULL DEFAULT false,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS lot_assignments (
+      id BIGSERIAL PRIMARY KEY,
+      lot_id UUID NOT NULL REFERENCES lots(id) ON DELETE CASCADE,
+      technician_key TEXT NOT NULL,
+      technician_name TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(lot_id, technician_key)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS lot_progress (
+      id BIGSERIAL PRIMARY KEY,
+      lot_id UUID NOT NULL REFERENCES lots(id) ON DELETE CASCADE,
+      machine_key TEXT NOT NULL,
+      report_id UUID,
+      technician TEXT,
+      source TEXT,
+      is_double_check BOOLEAN NOT NULL DEFAULT false,
+      counted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(lot_id, machine_key)
     );
   `);
 
@@ -771,6 +1014,24 @@ async function initDb() {
     );
   `);
 
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION safe_jsonb(input_text TEXT)
+    RETURNS JSONB
+    LANGUAGE plpgsql
+    IMMUTABLE
+    AS $$
+    BEGIN
+      IF input_text IS NULL OR btrim(input_text) = '' THEN
+        RETURN '{}'::jsonb;
+      END IF;
+      RETURN input_text::jsonb;
+    EXCEPTION
+      WHEN others THEN
+        RETURN '{}'::jsonb;
+    END;
+    $$;
+  `);
+
   const columns = [
     ['ram_mb', 'INTEGER'],
     ['ram_slots_total', 'INTEGER'],
@@ -785,6 +1046,7 @@ async function initDb() {
     ['technician', 'TEXT'],
     ['tag', 'TEXT'],
     ['tag_id', 'UUID'],
+    ['lot_id', 'UUID'],
     ['last_ip', 'TEXT'],
     ['components', 'TEXT'],
     ['payload', 'TEXT'],
@@ -805,6 +1067,7 @@ async function initDb() {
     ['category', "TEXT NOT NULL DEFAULT 'unknown'"],
     ['tag', 'TEXT'],
     ['tag_id', 'UUID'],
+    ['lot_id', 'UUID'],
     ['model', 'TEXT'],
     ['vendor', 'TEXT'],
     ['technician', 'TEXT'],
@@ -851,15 +1114,32 @@ async function initDb() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_category ON machines(category)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_tag ON machines(tag)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_tag_id ON machines(tag_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_lot_id ON machines(lot_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_machine_key ON reports(machine_key)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_category ON reports(category)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_tag ON reports(tag)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_tag_id ON reports(tag_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_lot_id ON reports(lot_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_last_seen ON reports(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_technician ON reports(technician)');
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_reports_machine_key_last_seen_id ON reports(machine_key, last_seen DESC, id DESC)'
+  );
+  await pool.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_lots_supplier_number_unique ON lots (LOWER(supplier), LOWER(lot_number))'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_lots_priority_active ON lots (is_paused, priority, created_at)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_lot_assignments_tech_key ON lot_assignments (technician_key)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_lot_progress_lot_counted ON lot_progress (lot_id, counted_at DESC)'
+  );
+  await pool.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_progress_unique_lot_machine ON lot_progress (lot_id, machine_key)'
   );
   await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_unique ON tags (LOWER(name))');
   await pool.query(
@@ -872,6 +1152,23 @@ async function initDb() {
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_patchnote_views_user ON patchnote_views(username, user_type)'
   );
+
+  // Keep counters resilient even if old data existed before the lot feature.
+  await pool.query(`
+    UPDATE lots
+    SET produced_count = COALESCE(progress.count, 0)
+    FROM (
+      SELECT lot_id, COUNT(*)::integer AS count
+      FROM lot_progress
+      GROUP BY lot_id
+    ) progress
+    WHERE progress.lot_id = lots.id
+  `);
+  await pool.query(`
+    UPDATE lots
+    SET produced_count = 0
+    WHERE id NOT IN (SELECT DISTINCT lot_id FROM lot_progress)
+  `);
 
   if (AUDIT_LOG_ENABLED) {
     await pool.query(`
@@ -1021,100 +1318,7 @@ const upsertMachineQuery = `
     category,
     tag,
     tag_id,
-    model,
-    vendor,
-    technician,
-    os_version,
-    ram_mb,
-    ram_slots_total,
-    ram_slots_free,
-    battery_health,
-    camera_status,
-    usb_status,
-    keyboard_status,
-    pad_status,
-    badge_reader_status,
-    last_seen,
-    created_at,
-    components,
-    payload,
-    last_ip
-  ) VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6,
-    $7,
-    $8,
-    $9,
-    $10,
-    $11,
-    $12,
-    $13,
-    $14,
-    $15,
-    $16,
-    $17,
-    $18,
-    $19,
-    $20,
-    $21,
-    $22,
-    $23,
-    $24,
-    $25,
-    $26
-  )
-  ON CONFLICT(machine_key) DO UPDATE SET
-    hostname = COALESCE(excluded.hostname, machines.hostname),
-    mac_address = COALESCE(excluded.mac_address, machines.mac_address),
-    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
-    serial_number = COALESCE(excluded.serial_number, machines.serial_number),
-    category = CASE
-      WHEN excluded.category != 'unknown' THEN excluded.category
-      ELSE machines.category
-    END,
-    tag = COALESCE(excluded.tag, machines.tag),
-    tag_id = COALESCE(excluded.tag_id, machines.tag_id),
-    model = COALESCE(excluded.model, machines.model),
-    vendor = COALESCE(excluded.vendor, machines.vendor),
-    technician = COALESCE(excluded.technician, machines.technician),
-    os_version = COALESCE(excluded.os_version, machines.os_version),
-    ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
-    ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
-    ram_slots_free = COALESCE(excluded.ram_slots_free, machines.ram_slots_free),
-    battery_health = COALESCE(excluded.battery_health, machines.battery_health),
-    camera_status = COALESCE(excluded.camera_status, machines.camera_status),
-    usb_status = COALESCE(excluded.usb_status, machines.usb_status),
-    keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
-    pad_status = COALESCE(excluded.pad_status, machines.pad_status),
-    badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
-    last_seen = excluded.last_seen,
-    components = CASE
-      WHEN excluded.components IS NULL THEN machines.components
-      ELSE (
-        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
-        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
-      )::text
-    END,
-    payload = COALESCE(excluded.payload, machines.payload),
-    last_ip = excluded.last_ip
-  RETURNING id
-`;
-
-const upsertReportQuery = `
-  INSERT INTO reports (
-    id,
-    machine_key,
-    hostname,
-    mac_address,
-    mac_addresses,
-    serial_number,
-    category,
-    tag,
-    tag_id,
+    lot_id,
     model,
     vendor,
     technician,
@@ -1162,6 +1366,104 @@ const upsertReportQuery = `
     $26,
     $27
   )
+  ON CONFLICT(machine_key) DO UPDATE SET
+    hostname = COALESCE(excluded.hostname, machines.hostname),
+    mac_address = COALESCE(excluded.mac_address, machines.mac_address),
+    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
+    serial_number = COALESCE(excluded.serial_number, machines.serial_number),
+    category = CASE
+      WHEN excluded.category != 'unknown' THEN excluded.category
+      ELSE machines.category
+    END,
+    tag = COALESCE(excluded.tag, machines.tag),
+    tag_id = COALESCE(excluded.tag_id, machines.tag_id),
+    lot_id = COALESCE(excluded.lot_id, machines.lot_id),
+    model = COALESCE(excluded.model, machines.model),
+    vendor = COALESCE(excluded.vendor, machines.vendor),
+    technician = COALESCE(excluded.technician, machines.technician),
+    os_version = COALESCE(excluded.os_version, machines.os_version),
+    ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
+    ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
+    ram_slots_free = COALESCE(excluded.ram_slots_free, machines.ram_slots_free),
+    battery_health = COALESCE(excluded.battery_health, machines.battery_health),
+    camera_status = COALESCE(excluded.camera_status, machines.camera_status),
+    usb_status = COALESCE(excluded.usb_status, machines.usb_status),
+    keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
+    pad_status = COALESCE(excluded.pad_status, machines.pad_status),
+    badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
+    last_seen = excluded.last_seen,
+    components = CASE
+      WHEN excluded.components IS NULL THEN machines.components
+      ELSE (
+        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
+        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
+      )::text
+    END,
+    payload = COALESCE(excluded.payload, machines.payload),
+    last_ip = excluded.last_ip
+  RETURNING id
+`;
+
+const upsertReportQuery = `
+  INSERT INTO reports (
+    id,
+    machine_key,
+    hostname,
+    mac_address,
+    mac_addresses,
+    serial_number,
+    category,
+    tag,
+    tag_id,
+    lot_id,
+    model,
+    vendor,
+    technician,
+    os_version,
+    ram_mb,
+    ram_slots_total,
+    ram_slots_free,
+    battery_health,
+    camera_status,
+    usb_status,
+    keyboard_status,
+    pad_status,
+    badge_reader_status,
+    last_seen,
+    created_at,
+    components,
+    payload,
+    last_ip
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12,
+    $13,
+    $14,
+    $15,
+    $16,
+    $17,
+    $18,
+    $19,
+    $20,
+    $21,
+    $22,
+    $23,
+    $24,
+    $25,
+    $26,
+    $27,
+    $28
+  )
   ON CONFLICT(id) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, reports.hostname),
     mac_address = COALESCE(excluded.mac_address, reports.mac_address),
@@ -1173,6 +1475,7 @@ const upsertReportQuery = `
     END,
     tag = COALESCE(excluded.tag, reports.tag),
     tag_id = COALESCE(excluded.tag_id, reports.tag_id),
+    lot_id = COALESCE(excluded.lot_id, reports.lot_id),
     model = COALESCE(excluded.model, reports.model),
     vendor = COALESCE(excluded.vendor, reports.vendor),
     technician = COALESCE(excluded.technician, reports.technician),
@@ -1210,7 +1513,13 @@ const listReportsQuery = `
     category,
     tag,
     tag_id,
+    reports.lot_id,
     COALESCE(tags.name, reports.tag) AS tag_name,
+    lots.supplier AS lot_supplier,
+    lots.lot_number AS lot_number,
+    lots.target_count AS lot_target_count,
+    lots.produced_count AS lot_produced_count,
+    lots.is_paused AS lot_is_paused,
     model,
     vendor,
     technician,
@@ -1230,6 +1539,7 @@ const listReportsQuery = `
     comment
   FROM reports
   LEFT JOIN tags ON tags.id = reports.tag_id
+  LEFT JOIN lots ON lots.id = reports.lot_id
   ORDER BY reports.last_seen DESC
 `;
 
@@ -1244,7 +1554,13 @@ const getReportByIdQuery = `
     reports.category,
     reports.tag,
     reports.tag_id,
+    reports.lot_id AS report_lot_id,
     COALESCE(tags.name, reports.tag) AS report_tag_name,
+    report_lot.supplier AS report_lot_supplier,
+    report_lot.lot_number AS report_lot_number,
+    report_lot.target_count AS report_lot_target_count,
+    report_lot.produced_count AS report_lot_produced_count,
+    report_lot.is_paused AS report_lot_is_paused,
     reports.model,
     reports.vendor,
     reports.technician,
@@ -1269,11 +1585,19 @@ const getReportByIdQuery = `
     machines.created_at AS machine_created_at,
     machines.tag AS machine_tag,
     machines.tag_id AS machine_tag_id,
+    machines.lot_id AS machine_lot_id,
+    machine_lot.supplier AS machine_lot_supplier,
+    machine_lot.lot_number AS machine_lot_number,
+    machine_lot.target_count AS machine_lot_target_count,
+    machine_lot.produced_count AS machine_lot_produced_count,
+    machine_lot.is_paused AS machine_lot_is_paused,
     machines.payload AS machine_payload,
     machines.components AS machine_components
   FROM reports
   LEFT JOIN machines ON machines.machine_key = reports.machine_key
   LEFT JOIN tags ON tags.id = reports.tag_id
+  LEFT JOIN lots report_lot ON report_lot.id = reports.lot_id
+  LEFT JOIN lots machine_lot ON machine_lot.id = machines.lot_id
   WHERE reports.id = $1
 `;
 
@@ -1325,7 +1649,6 @@ const COMPONENT_LABELS = {
   cpuStress: 'CPU (stress)',
   gpuStress: 'GPU (stress)',
   networkPing: 'Ping',
-  wifiStandard: 'Wi-Fi (norme)',
   fsCheck: 'Check disque',
   gpu: 'GPU',
   usb: 'Ports USB',
@@ -1335,7 +1658,8 @@ const COMPONENT_LABELS = {
   badgeReader: 'Lecteur badge',
   biosBattery: 'Pile BIOS',
   biosLanguage: 'Langue BIOS',
-  biosPassword: 'Mot de passe BIOS'
+  biosPassword: 'Mot de passe BIOS',
+  wifiStandard: 'Norme Wi-Fi'
 };
 const COMPONENT_ORDER = [
   'diskReadTest',
@@ -1346,7 +1670,6 @@ const COMPONENT_ORDER = [
   'cpuStress',
   'gpuStress',
   'networkPing',
-  'wifiStandard',
   'fsCheck',
   'gpu',
   'usb',
@@ -1356,7 +1679,8 @@ const COMPONENT_ORDER = [
   'badgeReader',
   'biosBattery',
   'biosLanguage',
-  'biosPassword'
+  'biosPassword',
+  'wifiStandard'
 ];
 const HIDDEN_COMPONENTS = new Set(['diskSmart', 'networkTest', 'memDiag', 'thermal']);
 const VALID_PAD_STATUSES = new Set(['ok', 'nok']);
@@ -1376,7 +1700,8 @@ const COMPONENT_STATUS_COLUMNS = {
 const MANUAL_COMPONENT_DEFAULTS = {
   biosBattery: 'not_tested',
   biosLanguage: 'not_tested',
-  biosPassword: 'not_tested'
+  biosPassword: 'not_tested',
+  wifiStandard: 'not_tested'
 };
 
 function getAllowedComponentStatuses(key) {
@@ -1625,6 +1950,23 @@ function requireTagEdit(req, res, next) {
     .catch(() => res.status(403).json({ ok: false, error: 'forbidden' }));
 }
 
+function requireTagEditPage(req, res, next) {
+  if (!req.session || !req.session.user) {
+    return res.redirect('/login');
+  }
+  if (canEditTags(req.session.user)) {
+    return next();
+  }
+  refreshLdapPermissions(req)
+    .then((user) => {
+      if (!canEditTags(user)) {
+        return res.redirect('/');
+      }
+      return next();
+    })
+    .catch(() => res.redirect('/'));
+}
+
 function cleanString(value, maxLength) {
   if (typeof value !== 'string') {
     return null;
@@ -1705,6 +2047,198 @@ function parseTagIds(raw) {
   return ids;
 }
 
+function parseBooleanFlag(value, fallback = false) {
+  if (value == null) {
+    return fallback;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+  const lowered = String(value).trim().toLowerCase();
+  if (!lowered) {
+    return fallback;
+  }
+  if (['1', 'true', 'yes', 'on', 'y'].includes(lowered)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off', 'n'].includes(lowered)) {
+    return false;
+  }
+  return fallback;
+}
+
+function normalizeLotSupplier(value) {
+  return cleanString(value, 96);
+}
+
+function normalizeLotNumber(value) {
+  return cleanString(value, 96);
+}
+
+function normalizeLotTargetCount(value) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  if (parsed < LOT_TARGET_COUNT_MIN || parsed > LOT_TARGET_COUNT_MAX) {
+    return null;
+  }
+  return parsed;
+}
+
+function normalizeLotPriority(value, fallback = LOT_PRIORITY_DEFAULT) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isFinite(parsed)) {
+    return Math.min(Math.max(fallback, LOT_PRIORITY_MIN), LOT_PRIORITY_MAX);
+  }
+  return Math.min(Math.max(parsed, LOT_PRIORITY_MIN), LOT_PRIORITY_MAX);
+}
+
+function buildLotLabel(supplier, lotNumber) {
+  const supplierText = cleanString(supplier, 96) || 'Sans fournisseur';
+  const lotText = cleanString(lotNumber, 96) || 'Sans numero';
+  return `${supplierText} - lot ${lotText}`;
+}
+
+function normalizeLotFromRow(row) {
+  if (!row) {
+    return null;
+  }
+  const supplier = row.supplier || row.lot_supplier || row.report_lot_supplier || row.machine_lot_supplier;
+  const lotNumber =
+    row.lot_number || row.report_lot_number || row.machine_lot_number;
+  if (!row.lot_id && !row.report_lot_id && !row.machine_lot_id && !supplier && !lotNumber) {
+    return null;
+  }
+  const lotId = normalizeUuid(row.lot_id || row.report_lot_id || row.machine_lot_id);
+  const targetCountRaw =
+    row.target_count != null
+      ? row.target_count
+      : row.lot_target_count != null
+        ? row.lot_target_count
+        : row.report_lot_target_count != null
+          ? row.report_lot_target_count
+          : row.machine_lot_target_count;
+  const producedCountRaw =
+    row.produced_count != null
+      ? row.produced_count
+      : row.lot_produced_count != null
+        ? row.lot_produced_count
+        : row.report_lot_produced_count != null
+          ? row.report_lot_produced_count
+          : row.machine_lot_produced_count;
+  const targetCount = Number.parseInt(targetCountRaw || '0', 10) || 0;
+  const producedCount = Number.parseInt(producedCountRaw || '0', 10) || 0;
+  const remainingCount = Math.max(targetCount - producedCount, 0);
+  const progressPercent = targetCount > 0 ? Math.min(100, Math.round((producedCount * 1000) / targetCount) / 10) : 0;
+  return {
+    id: lotId || null,
+    supplier: supplier || null,
+    lotNumber: lotNumber || null,
+    label: buildLotLabel(supplier, lotNumber),
+    targetCount,
+    producedCount,
+    remainingCount,
+    progressPercent,
+    priority: Number.parseInt(row.priority || '0', 10) || LOT_PRIORITY_DEFAULT,
+    isPaused: parseBooleanFlag(row.is_paused != null ? row.is_paused : row.lot_is_paused, false)
+  };
+}
+
+function normalizeLotAssignments(raw) {
+  if (!raw) {
+    return [];
+  }
+  let list = raw;
+  if (typeof raw === 'string') {
+    try {
+      list = JSON.parse(raw);
+    } catch (error) {
+      list = [];
+    }
+  }
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  const dedupe = new Map();
+  list.forEach((item) => {
+    if (!item || typeof item !== 'object') {
+      return;
+    }
+    const key = normalizeTechKey(item.technicianKey || item.technician || item.key);
+    const technician = cleanString(item.technician || item.technicianName || item.label, 64);
+    if (!key || !technician) {
+      return;
+    }
+    if (!dedupe.has(key)) {
+      dedupe.set(key, { technicianKey: key, technician });
+    }
+  });
+  return Array.from(dedupe.values()).sort((a, b) => a.technician.localeCompare(b.technician, 'fr'));
+}
+
+function mapLotRowForResponse(row) {
+  if (!row) {
+    return null;
+  }
+  const lot = normalizeLotFromRow({ ...row, lot_id: row.id || row.lot_id });
+  if (!lot) {
+    return null;
+  }
+  return {
+    ...lot,
+    createdBy: row.created_by || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null,
+    assignments: normalizeLotAssignments(row.assignments)
+  };
+}
+
+function detectDoubleCheck(raw) {
+  if (raw == null) {
+    return false;
+  }
+  if (typeof raw === 'boolean') {
+    return raw;
+  }
+  if (typeof raw === 'number') {
+    return raw !== 0;
+  }
+  const lowered = String(raw).trim().toLowerCase();
+  if (!lowered) {
+    return false;
+  }
+  if (['double_check', 'double-check', 'doublecheck', 'double check'].includes(lowered)) {
+    return true;
+  }
+  if (['1', 'true', 'yes', 'on'].includes(lowered)) {
+    return true;
+  }
+  return lowered.includes('double') && lowered.includes('check');
+}
+
+function isDoubleCheckPayload(body) {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+  const sources = [body, body.diag, body.legacy, body.payload];
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') {
+      continue;
+    }
+    if (detectDoubleCheck(source.doubleCheck || source.double_check || source.isDoubleCheck)) {
+      return true;
+    }
+    if (detectDoubleCheck(source.role || source.mode || source.type)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function getDateRange(dateFilter) {
   const now = new Date();
   if (dateFilter === 'today') {
@@ -1770,9 +2304,9 @@ function buildReportFilters(query, { includeCategory = true, activeTagId = null 
 
   const commentFilter = query.comment;
   if (commentFilter === 'with') {
-    clauses.push(`comment IS NOT NULL AND comment <> ''`);
+    clauses.push(`(comment IS NOT NULL AND comment <> '')`);
   } else if (commentFilter === 'without') {
-    clauses.push(`comment IS NULL OR comment = ''`);
+    clauses.push(`(comment IS NULL OR comment = '')`);
   }
 
   const component = cleanString(query.component, 64);
@@ -2798,6 +3332,68 @@ function normalizeBiosPasswordStatus(value) {
   return fallback === 'ok' || fallback === 'nok' || fallback === 'not_tested' ? fallback : null;
 }
 
+function normalizeWifiStandardStatus(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'ok' : 'nok';
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return 'ok';
+    }
+    if (value === 0) {
+      return 'nok';
+    }
+  }
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+  const cleaned = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (
+    cleaned.includes('not tested') ||
+    cleaned.includes('not_tested') ||
+    cleaned.includes('non teste') ||
+    cleaned.includes('non testee') ||
+    cleaned.includes('pas teste') ||
+    cleaned.includes('not run')
+  ) {
+    return 'not_tested';
+  }
+
+  const modernSuffixes = new Set(['be', 'ax', 'ac', 'n']);
+  const legacySuffixes = new Set(['g', 'a', 'b']);
+  const standards = Array.from(cleaned.matchAll(/(?:802(?:[.\s-])?)?11\s*(be|ax|ac|n|g|a|b)\b/gi)).map(
+    (match) => match[1].toLowerCase()
+  );
+  if (standards.some((suffix) => modernSuffixes.has(suffix))) {
+    return 'ok';
+  }
+  if (standards.some((suffix) => legacySuffixes.has(suffix))) {
+    return 'nok';
+  }
+
+  if (/\bwi-?fi\s*(7|6e?|5|4)\b/.test(cleaned)) {
+    return 'ok';
+  }
+  if (/\bwi-?fi\s*(3|2|1)\b/.test(cleaned)) {
+    return 'nok';
+  }
+  if (
+    cleaned.includes('no wireless interface') ||
+    cleaned.includes('there is no wireless interface') ||
+    cleaned.includes('aucune interface sans fil') ||
+    cleaned.includes('aucune interface reseau sans fil')
+  ) {
+    return 'nok';
+  }
+
+  const fallback = normalizeStatus(cleaned);
+  return fallback === 'ok' || fallback === 'nok' || fallback === 'not_tested' ? fallback : null;
+}
+
 function normalizeBatteryHealth(value) {
   if (value == null) {
     return null;
@@ -2918,6 +3514,10 @@ function sanitizeComponents(value) {
       sanitized[cleanKey] = normalizeBiosPasswordStatus(cleanValue) || 'not_tested';
       continue;
     }
+    if (cleanKey === 'wifiStandard') {
+      sanitized[cleanKey] = normalizeWifiStandardStatus(cleanValue) || 'not_tested';
+      continue;
+    }
     sanitized[cleanKey] = cleanValue;
   }
   return Object.keys(sanitized).length > 0 ? withManualComponentDefaults(sanitized) : null;
@@ -2989,6 +3589,21 @@ function buildDerivedComponents(body, sources) {
     ]),
     normalizeBiosPasswordStatus
   );
+  addValue(
+    'wifiStandard',
+    pickFirstFromSources(sources, [
+      'wifiStandard',
+      'wifiStandardStatus',
+      'wifi_standard',
+      'wirelessStandard',
+      'wlanStandard',
+      'radioType',
+      'radio_type',
+      'typeRadio',
+      'type_radio'
+    ]),
+    normalizeWifiStandardStatus
+  );
   addStatus('diskSmart', pickFirstFromSources(sources, ['diskSmart', 'smartDisk', 'smart']));
 
   const tests =
@@ -3003,7 +3618,6 @@ function buildDerivedComponents(body, sources) {
     addStatus('gpuStress', tests.gpuStress);
     addStatus('networkTest', tests.network);
     addStatus('networkPing', tests.networkPing);
-    addStatus('wifiStandard', tests.wifiStandard);
     addStatus('fsCheck', tests.fsCheck);
     addStatus('memDiag', tests.memDiag);
   }
@@ -3151,7 +3765,11 @@ function summarizeComponents(components) {
       return;
     }
     const statusKey =
-      componentKey === 'biosPassword' ? normalizeBiosPasswordStatus(value) : normalizeStatusKey(value);
+      componentKey === 'biosPassword'
+        ? normalizeBiosPasswordStatus(value)
+        : componentKey === 'wifiStandard'
+          ? normalizeWifiStandardStatus(value)
+          : normalizeStatusKey(value);
     if (!statusKey) {
       return;
     }
@@ -3422,7 +4040,6 @@ function buildDiagnosticsRows(payload) {
   addRow('CPU (stress)', tests.cpuStress, null);
   addRow('GPU (stress)', tests.gpuStress, null);
   addRow('Ping', tests.networkPing, tests.networkPingTarget || null);
-  addRow('Wi-Fi (norme)', tests.wifiStandard, tests.wifiStandardValue || null);
   addRow('Check disque', tests.fsCheck, null);
 
   return rows;
@@ -3546,6 +4163,17 @@ function resolveComponentStatusDisplay(key, value) {
     return { statusKey: 'not_tested', statusLabel: STATUS_LABELS.not_tested };
   }
 
+  if (key === 'wifiStandard') {
+    const normalized = normalizeWifiStandardStatus(value);
+    if (normalized) {
+      return {
+        statusKey: normalized,
+        statusLabel: STATUS_LABELS[normalized] || STATUS_LABELS.unknown
+      };
+    }
+    return { statusKey: 'not_tested', statusLabel: STATUS_LABELS.not_tested };
+  }
+
   const normalized = normalizeStatusKey(value) || 'unknown';
   return { statusKey: normalized, statusLabel: STATUS_LABELS[normalized] || STATUS_LABELS.unknown };
 }
@@ -3641,38 +4269,186 @@ function drawStatusRows(doc, rows) {
   });
 }
 
+function truncatePdfText(value, maxLength = 64) {
+  const text = safeString(value, '--');
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, value));
+}
+
+function drawPdfCard(doc, x, y, width, height, title, options = {}) {
+  const radius = Number.isFinite(options.radius) ? options.radius : 12;
+  const background = options.background || '#FFFFFF';
+  const border = options.border || '#D7E3F0';
+  const titleColor = options.titleColor || '#5D7289';
+  const titleSize = Number.isFinite(options.titleSize) ? options.titleSize : 7;
+  const paddingX = Number.isFinite(options.paddingX) ? options.paddingX : 14;
+  const titleOffsetY = Number.isFinite(options.titleOffsetY) ? options.titleOffsetY : 12;
+  const bodyTopOffset = Number.isFinite(options.bodyTopOffset) ? options.bodyTopOffset : 27;
+  const bodyBottomInset = Number.isFinite(options.bodyBottomInset) ? options.bodyBottomInset : 10;
+
+  doc.save();
+  doc.roundedRect(x, y, width, height, radius).fillAndStroke(background, border);
+  doc
+    .fillColor(titleColor)
+    .font('Helvetica-Bold')
+    .fontSize(titleSize)
+    .text(String(title || '').toUpperCase(), x + paddingX, y + titleOffsetY, { lineBreak: false });
+  doc.restore();
+  return {
+    x: x + paddingX,
+    y: y + bodyTopOffset,
+    width: Math.max(8, width - paddingX * 2),
+    height: Math.max(8, height - bodyTopOffset - bodyBottomInset)
+  };
+}
+
+function drawCompactKeyValueCard(doc, x, y, width, height, title, rows, columns = 1, options = {}) {
+  const body = drawPdfCard(doc, x, y, width, height, title, options.card || {});
+  const entries = Array.isArray(rows) ? rows.filter((row) => row && row.label) : [];
+  const labelColor = options.labelColor || '#667A90';
+  const valueColor = options.valueColor || '#1A2A3A';
+  if (!entries.length) {
+    doc.font('Helvetica').fontSize(8).fillColor('#7A8590').text('Aucune donnee.', body.x, body.y + 2, {
+      width: body.width
+    });
+    return;
+  }
+
+  if (columns <= 1) {
+    const rowHeight = Math.max(7.3, body.height / entries.length);
+    const labelFontSize = clampNumber(rowHeight * 0.42, 5.8, 7.8);
+    const valueFontSize = clampNumber(rowHeight * 0.54, 6.4, 9.4);
+    const labelWidth = clampNumber(body.width * 0.3, 74, 126);
+    const valueWidth = Math.max(20, body.width - labelWidth - 4);
+    const valueMaxLength = Math.max(12, Math.floor((valueWidth / Math.max(valueFontSize - 1.2, 4)) * 1.55));
+    entries.forEach((row, index) => {
+      const lineY = body.y + index * rowHeight;
+      const label = truncatePdfText(row.label, 26).toUpperCase();
+      const value = truncatePdfText(row.value, valueMaxLength);
+      doc.font('Helvetica-Bold').fontSize(labelFontSize).fillColor(labelColor).text(label, body.x, lineY + 1.5, {
+        width: labelWidth,
+        lineBreak: false
+      });
+      doc.font('Helvetica').fontSize(valueFontSize).fillColor(valueColor).text(value, body.x + labelWidth, lineY, {
+        width: valueWidth,
+        lineBreak: false
+      });
+    });
+    return;
+  }
+
+  const gridColumns = Math.max(1, Math.floor(columns));
+  const maxRowsPerColumn = Math.max(1, Math.ceil(entries.length / gridColumns));
+  const rowHeight = Math.max(7.6, body.height / maxRowsPerColumn);
+  const colWidth = body.width / gridColumns;
+  const labelFontSize = clampNumber(rowHeight * 0.34, 5.4, 7);
+  const valueFontSize = clampNumber(rowHeight * 0.44, 6, 8.2);
+  const labelMaxLength = Math.max(12, Math.floor((colWidth - 8) / Math.max(labelFontSize - 1, 4)));
+  const valueMaxLength = Math.max(12, Math.floor((colWidth - 8) / Math.max(valueFontSize - 1.2, 4) * 1.35));
+
+  entries.forEach((row, index) => {
+    const col = Math.floor(index / maxRowsPerColumn);
+    const rowIndex = index % maxRowsPerColumn;
+    const cellX = body.x + col * colWidth;
+    const cellY = body.y + rowIndex * rowHeight;
+    doc.font('Helvetica-Bold').fontSize(labelFontSize).fillColor(labelColor).text(truncatePdfText(row.label, labelMaxLength).toUpperCase(), cellX, cellY + 0.6, {
+      width: colWidth - 8,
+      lineBreak: false
+    });
+    doc.font('Helvetica').fontSize(valueFontSize).fillColor(valueColor).text(truncatePdfText(row.value, valueMaxLength), cellX, cellY + rowHeight * 0.46, {
+      width: colWidth - 8,
+      lineBreak: false
+    });
+  });
+}
+
+function drawCompactStatusCard(doc, x, y, width, height, title, rows, options = {}) {
+  const body = drawPdfCard(doc, x, y, width, height, title, options.card || {});
+  const entries = Array.isArray(rows) ? rows.filter((row) => row && row.label) : [];
+  const textColor = options.textColor || '#1A2A3A';
+  if (!entries.length) {
+    doc.font('Helvetica').fontSize(8).fillColor('#7A8590').text('Aucune donnee.', body.x, body.y + 2, {
+      width: body.width
+    });
+    return;
+  }
+
+  const rowHeight = Math.max(7.8, body.height / entries.length);
+  const labelFontSize = clampNumber(rowHeight * 0.5, 6.4, 8.8);
+  const pillFontSize = clampNumber(rowHeight * 0.44, 6.1, 8.2);
+  const labelWidth = body.width * (rowHeight < 11 ? 0.55 : 0.62);
+  const labelMaxLength = Math.max(12, Math.floor((labelWidth / Math.max(labelFontSize - 1.2, 4)) * 1.45));
+  entries.forEach((row, index) => {
+    const lineY = body.y + index * rowHeight;
+    const { statusKey, statusLabel } = resolveComponentStatusDisplay(row.key, row.status);
+    const extra = row.extra ? ` ${truncatePdfText(row.extra, 16)}` : '';
+    let pillText = truncatePdfText(`${statusLabel}${extra}`.trim(), 24);
+    doc.font('Helvetica').fontSize(labelFontSize).fillColor(textColor).text(truncatePdfText(row.label, labelMaxLength), body.x, lineY + 1.4, {
+      width: labelWidth
+    });
+    doc.font('Helvetica').fontSize(pillFontSize);
+    let pillWidth = doc.widthOfString(pillText) + 12;
+    if (pillWidth > body.width * 0.44) {
+      pillText = truncatePdfText(pillText, 14);
+      pillWidth = doc.widthOfString(pillText) + 12;
+    }
+    const pillX = body.x + body.width - pillWidth;
+    drawPill(doc, pillX, lineY + 1, pillText, STATUS_STYLES[statusKey] || STATUS_STYLES.unknown, pillFontSize);
+  });
+}
+
 function drawReportPdf(doc, data) {
   const margin = doc.page.margins.left;
   const width = doc.page.width - margin - doc.page.margins.right;
+  const pageBottom = doc.page.height - doc.page.margins.bottom;
+  const pageWidth = doc.page.width;
+  const pageHeight = doc.page.height;
 
-  doc.rect(0, 0, doc.page.width, 72).fill('#1D211F');
-  doc.fillColor('#FFFFFF');
-  doc.fontSize(9).text('MDT Live Ops', margin, 16);
-  doc.fontSize(18).text(data.title, margin, 30, { width });
-  doc.fontSize(10).text(data.subtitle, margin, 52, { width });
-  doc.fontSize(9).text(`Genere: ${data.generatedAt}`, margin, 16, { width, align: 'right' });
+  doc.rect(0, 0, pageWidth, pageHeight).fill('#EEF3FA');
 
-  doc.fillColor('#1D211F');
-  doc.y = 86;
-
-  let x = margin;
-  x += drawPill(doc, x, doc.y, CATEGORY_LABELS[data.category] || CATEGORY_LABELS.unknown, {
-    background: '#E7F2EA',
-    color: '#1B4C38'
+  const headerY = 18;
+  const headerHeight = 94;
+  doc.save();
+  doc.roundedRect(margin, headerY, width, headerHeight, 15).fillAndStroke('#11233E', '#1B3A61');
+  doc.roundedRect(margin + width - 150, headerY + 10, 136, 25, 13).fill('#1D67F5');
+  doc.fillColor('#D4E7FF').font('Helvetica-Bold').fontSize(8).text('OPS CONSOLE', margin + 16, headerY + 13, {
+    lineBreak: false
   });
-  x += 8;
-  if (data.summary.total > 0) {
-    x += drawPill(doc, x, doc.y, `OK ${data.summary.ok}`, STATUS_STYLES.ok);
-    x += 6;
-    x += drawPill(doc, x, doc.y, `NOK ${data.summary.nok}`, STATUS_STYLES.nok);
-    x += 6;
-    x += drawPill(doc, x, doc.y, `NT ${data.summary.other}`, STATUS_STYLES.unknown);
-  }
+  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(19).text(truncatePdfText(data.title, 56), margin + 16, headerY + 33, {
+    width: width * 0.72
+  });
+  doc.fillColor('#C2D5EC').font('Helvetica').fontSize(9.2).text(truncatePdfText(data.subtitle, 88), margin + 16, headerY + 61, {
+    width: width * 0.72
+  });
+  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(8).text('Rapport machine', margin + width - 144, headerY + 17, {
+    width: 124,
+    align: 'center'
+  });
+  doc.fillColor('#BED3EC').font('Helvetica').fontSize(8).text(`Genere: ${truncatePdfText(data.generatedAt, 32)}`, margin + width - 148, headerY + 45, {
+    width: 132,
+    align: 'right'
+  });
+  doc.restore();
 
-  doc.moveDown(1.4);
+  const statusLabel = (value) => STATUS_LABELS[normalizeStatusKey(value) || 'unknown'];
+  const componentStatus = (key) => {
+    const source = Array.isArray(data.components) ? data.components.find((row) => row && row.key === key) : null;
+    if (!source) {
+      return '--';
+    }
+    return resolveComponentStatusDisplay(key, source.status).statusLabel;
+  };
 
-  drawSectionTitle(doc, 'Identifiants');
-  drawKeyValueGrid(doc, [
+  const identRows = [
     { label: 'Serial', value: data.serialNumber },
     { label: 'MAC', value: data.macPrimary },
     { label: 'MACs', value: data.macList },
@@ -3680,10 +4456,8 @@ function drawReportPdf(doc, data) {
     { label: 'IP', value: data.lastIp },
     { label: 'Dernier passage', value: data.lastSeen },
     { label: 'Premier passage', value: data.createdAt }
-  ]);
-
-  drawSectionTitle(doc, 'Materiel clef');
-  drawKeyValueGrid(doc, [
+  ];
+  const hardwareRows = [
     { label: 'Categorie', value: CATEGORY_LABELS[data.category] || CATEGORY_LABELS.unknown },
     { label: 'Technicien', value: data.technician },
     { label: 'RAM totale', value: data.ramTotal },
@@ -3694,33 +4468,134 @@ function drawReportPdf(doc, data) {
     { label: 'Stockage total', value: data.storageTotal },
     { label: 'Disque principal', value: data.storagePrimary },
     { label: 'Batterie', value: data.batteryHealth },
-    { label: 'Camera', value: STATUS_LABELS[normalizeStatusKey(data.cameraStatus) || 'unknown'] },
-    { label: 'USB', value: STATUS_LABELS[normalizeStatusKey(data.usbStatus) || 'unknown'] },
-    { label: 'Clavier', value: STATUS_LABELS[normalizeStatusKey(data.keyboardStatus) || 'unknown'] },
-    { label: 'Pave tactile', value: STATUS_LABELS[normalizeStatusKey(data.padStatus) || 'unknown'] },
-    { label: 'Lecteur badge', value: STATUS_LABELS[normalizeStatusKey(data.badgeReaderStatus) || 'unknown'] }
-  ], 2);
+    { label: 'Camera', value: statusLabel(data.cameraStatus) },
+    { label: 'USB', value: statusLabel(data.usbStatus) },
+    { label: 'Clavier', value: statusLabel(data.keyboardStatus) },
+    { label: 'Pave tactile', value: statusLabel(data.padStatus) },
+    { label: 'Lecteur badge', value: statusLabel(data.badgeReaderStatus) },
+    { label: 'Norme Wi-Fi', value: componentStatus('wifiStandard') },
+    { label: 'Langue BIOS', value: componentStatus('biosLanguage') },
+    { label: 'MDP BIOS', value: componentStatus('biosPassword') }
+  ];
 
-  if (data.inventoryRows && data.inventoryRows.length) {
-    drawSectionTitle(doc, 'Identifiants materiel');
-    drawKeyValueGrid(doc, data.inventoryRows, 1);
+  const topY = headerY + headerHeight + 10;
+  let pillX = margin;
+  const summaryStyle = {
+    background: '#E8F1FF',
+    color: '#1D3C66'
+  };
+  pillX += drawPill(doc, pillX, topY, `Categorie: ${CATEGORY_LABELS[data.category] || CATEGORY_LABELS.unknown}`, summaryStyle, 8.5);
+  pillX += 8;
+  pillX += drawPill(doc, pillX, topY, `Tech: ${truncatePdfText(data.technician, 18)}`, {
+    background: '#F0F4FA',
+    color: '#2A405E'
+  }, 8.5);
+  pillX += 8;
+  pillX += drawPill(doc, pillX, topY, `OK ${data.summary.ok || 0}`, {
+    background: '#DFF5EA',
+    color: '#1D6442'
+  });
+  pillX += 8;
+  pillX += drawPill(doc, pillX, topY, `NOK ${data.summary.nok || 0}`, {
+    background: '#FFE3DE',
+    color: '#9D2A1E'
+  }, 8.5);
+  pillX += 8;
+  drawPill(doc, pillX, topY, `NT ${data.summary.other || 0}`, {
+    background: '#EAEFF4',
+    color: '#526173'
+  }, 8.5);
+
+  const contentTop = topY + 24;
+  const contentBottom = pageBottom - 18;
+  const contentHeight = Math.max(80, contentBottom - contentTop);
+  const columnGap = 12;
+  const leftWidth = Math.floor(width * 0.56);
+  const rightWidth = width - leftWidth - columnGap;
+  const leftX = margin;
+  const rightX = leftX + leftWidth + columnGap;
+  const cardGap = 10;
+
+  const leftIdHeight = Math.max(112, Math.floor(contentHeight * 0.24));
+  let leftHardwareHeight = Math.max(210, Math.floor(contentHeight * 0.42));
+  let leftInventoryHeight = contentHeight - leftIdHeight - leftHardwareHeight - cardGap * 2;
+  if (leftInventoryHeight < 80) {
+    const deficit = 80 - leftInventoryHeight;
+    leftHardwareHeight = Math.max(180, leftHardwareHeight - deficit);
+    leftInventoryHeight = contentHeight - leftIdHeight - leftHardwareHeight - cardGap * 2;
   }
 
-  drawSectionTitle(doc, 'Diagnostics');
-  if (data.diagnostics.length) {
-    drawStatusRows(doc, data.diagnostics);
-  } else {
-    doc.fontSize(10).fillColor('#6B6F6C').text('Aucun test disponible.');
-    doc.moveDown(0.6);
-  }
+  const rightDiagHeight = Math.floor((contentHeight - cardGap) / 2);
+  const rightCompHeight = contentHeight - cardGap - rightDiagHeight;
 
-  ensureNewPage(doc);
-  drawSectionTitle(doc, 'Etat des composants');
-  if (data.components.length) {
-    drawStatusRows(doc, data.components);
-  } else {
-    doc.fontSize(10).fillColor('#6B6F6C').text('Aucun statut de composant.');
-  }
+  const keyCardStyle = {
+    card: {
+      background: '#FFFFFF',
+      border: '#CEDCED',
+      titleColor: '#5A718D'
+    },
+    labelColor: '#6A7F96',
+    valueColor: '#10243A'
+  };
+  const statusCardStyle = {
+    card: {
+      background: '#FFFFFF',
+      border: '#CEDCED',
+      titleColor: '#5A718D'
+    },
+    textColor: '#10243A'
+  };
+
+  drawCompactKeyValueCard(doc, leftX, contentTop, leftWidth, leftIdHeight, 'Identifiants', identRows, 1, keyCardStyle);
+  drawCompactKeyValueCard(
+    doc,
+    leftX,
+    contentTop + leftIdHeight + cardGap,
+    leftWidth,
+    leftHardwareHeight,
+    'Materiel clef',
+    hardwareRows,
+    2,
+    keyCardStyle
+  );
+  drawCompactKeyValueCard(
+    doc,
+    leftX,
+    contentTop + leftIdHeight + leftHardwareHeight + cardGap * 2,
+    leftWidth,
+    Math.max(80, leftInventoryHeight),
+    'Identifiants materiel',
+    data.inventoryRows || [],
+    1,
+    keyCardStyle
+  );
+
+  drawCompactStatusCard(
+    doc,
+    rightX,
+    contentTop,
+    rightWidth,
+    rightDiagHeight,
+    'Diagnostics',
+    data.diagnostics || [],
+    statusCardStyle
+  );
+  drawCompactStatusCard(
+    doc,
+    rightX,
+    contentTop + rightDiagHeight + cardGap,
+    rightWidth,
+    rightCompHeight,
+    'Etat des composants',
+    data.components || [],
+    statusCardStyle
+  );
+
+  doc.font('Helvetica').fontSize(7).fillColor('#6F8096').text('Rapport atelier - page unique', margin, pageBottom - 10, {
+    width,
+    align: 'right',
+    lineBreak: false
+  });
 }
 app.get('/', requireAuth, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
@@ -3736,6 +4611,14 @@ app.get('/admin', requireAuth, requireAdminPage, (req, res) => {
 
 app.get('/admin.html', requireAuth, requireAdminPage, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'admin.html'));
+});
+
+app.get('/lots', requireAuth, requireTagEditPage, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'lots.html'));
+});
+
+app.get('/lots.html', requireAuth, requireTagEditPage, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'lots.html'));
 });
 
 app.get('/journal', requireAuth, (req, res) => {
@@ -3846,6 +4729,14 @@ app.get('/legacy-imports', requireAuth, (req, res) => {
 
 app.get('/legacy-imports.html', requireAuth, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'legacy-imports.html'));
+});
+
+app.get('/metrics', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'metrics.html'));
+});
+
+app.get('/metrics.html', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'metrics.html'));
 });
 
 app.use(express.static(PUBLIC_DIR, { extensions: ['html'], index: false }));
@@ -4361,6 +5252,14 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     'batchId',
     'lotId'
   ]);
+  const lotIdRaw = pickFirst(body, [
+    'lotId',
+    'lot_id',
+    'batchId',
+    'batch_id',
+    'productionLotId',
+    'production_lot_id'
+  ]);
   const tag = cleanString(
     pickFirst(body, ['tag', 'prodTag', 'productionTag', 'production', 'batch', 'lot', 'prod']),
     64
@@ -4375,7 +5274,21 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
   const components = sanitizeComponents(
     pickFirst(body, ['components', 'componentStatus', 'composants', 'etatComposants'])
   );
-  const sources = [body, body.components, body.hardware];
+  const bodyComponents =
+    body && body.components && typeof body.components === 'object' && !Array.isArray(body.components)
+      ? body.components
+      : null;
+  const bodyHardware =
+    body && body.hardware && typeof body.hardware === 'object' && !Array.isArray(body.hardware)
+      ? body.hardware
+      : null;
+  const bodyWifi =
+    body && body.wifi && typeof body.wifi === 'object' && !Array.isArray(body.wifi) ? body.wifi : null;
+  const bodyNetwork =
+    body && body.network && typeof body.network === 'object' && !Array.isArray(body.network)
+      ? body.network
+      : null;
+  const sources = [body, bodyComponents, bodyHardware, bodyWifi, bodyNetwork];
   const derivedComponents = buildDerivedComponents(body, sources);
   const mergedComponents = mergeComponentSets(derivedComponents, components);
   let macAddresses = normalizeMacList(
@@ -4488,6 +5401,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     'run_id'
   ]);
   const reportId = normalizeUuid(reportIdRaw) || generateUuid();
+  const isDoubleCheck = isDoubleCheckPayload(body);
   const payloadMode = cleanString(
     pickFirst(body, ['payloadMode', 'payload_mode', 'updateMode', 'ingestMode']),
     16
@@ -4505,6 +5419,18 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     const resolvedTag = await resolveTagForIngest(client, tagIdRaw, tag);
+    const lotResolution = await resolveLotForIngest(client, {
+      explicitLotId: lotIdRaw,
+      technician
+    });
+    const resolvedLot = lotResolution.lot;
+    const resolvedLotId = resolvedLot && resolvedLot.id ? resolvedLot.id : null;
+    const shouldCountLot = Boolean(
+      resolvedLotId &&
+      machineKey &&
+      !isDoubleCheck &&
+      !parseBooleanFlag(resolvedLot ? resolvedLot.is_paused : false, false)
+    );
     await setAuditContext(
       client,
       buildAuditContext(req, {
@@ -4522,6 +5448,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       category,
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
+      resolvedLotId,
       model,
       vendor,
       technician,
@@ -4551,6 +5478,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       category,
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
+      resolvedLotId,
       model,
       vendor,
       technician,
@@ -4572,6 +5500,15 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     ];
     const reportResult = await client.query(upsertReportQuery, reportValues);
     const result = await client.query(upsertMachineQuery, values);
+    const lotProgress = await registerLotProgress(client, {
+      lot: resolvedLot,
+      machineKey,
+      reportId,
+      technician,
+      source: 'ingest',
+      isDoubleCheck,
+      shouldCount: shouldCountLot
+    });
     await client.query('COMMIT');
     const reportRow = reportResult.rows && reportResult.rows[0] ? reportResult.rows[0] : null;
     const reportIdValue = reportRow && reportRow.id ? reportRow.id : reportId;
@@ -4579,7 +5516,9 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       ok: true,
       id: reportIdValue,
       reportId: reportIdValue,
-      machineKey
+      machineKey,
+      lot: normalizeLotFromRow(lotProgress && lotProgress.lot ? lotProgress.lot : resolvedLot),
+      lotCounted: Boolean(lotProgress && lotProgress.counted)
     });
   } catch (error) {
     if (client) {
@@ -4662,6 +5601,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
               reports.category,
               reports.tag,
               reports.tag_id,
+              reports.lot_id,
               reports.model,
               reports.vendor,
               reports.technician,
@@ -4693,7 +5633,13 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             latest.category,
             latest.tag,
             latest.tag_id,
+            latest.lot_id,
             COALESCE(tags.name, latest.tag) AS tag_name,
+            lots.supplier AS lot_supplier,
+            lots.lot_number AS lot_number,
+            lots.target_count AS lot_target_count,
+            lots.produced_count AS lot_produced_count,
+            lots.is_paused AS lot_is_paused,
             latest.model,
             latest.vendor,
             latest.technician,
@@ -4713,6 +5659,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             latest.comment
           FROM latest
           LEFT JOIN tags ON tags.id = latest.tag_id
+          LEFT JOIN lots ON lots.id = latest.lot_id
           ORDER BY latest.last_seen DESC
           LIMIT $${values.length + 1} OFFSET $${values.length + 2}
         `,
@@ -4730,7 +5677,13 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             reports.category,
             reports.tag,
             reports.tag_id,
+            reports.lot_id,
             COALESCE(tags.name, reports.tag) AS tag_name,
+            lots.supplier AS lot_supplier,
+            lots.lot_number AS lot_number,
+            lots.target_count AS lot_target_count,
+            lots.produced_count AS lot_produced_count,
+            lots.is_paused AS lot_is_paused,
             reports.model,
             reports.vendor,
             reports.technician,
@@ -4750,6 +5703,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             reports.comment
           FROM reports
           LEFT JOIN tags ON tags.id = reports.tag_id
+          LEFT JOIN lots ON lots.id = reports.lot_id
           ${where}
           ORDER BY reports.last_seen DESC
           LIMIT $${values.length + 1} OFFSET $${values.length + 2}
@@ -4775,6 +5729,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
         tag: row.tag || null,
         tagId: row.tag_id || null,
         tagName: row.tag_name || row.tag || null,
+        lot: normalizeLotFromRow(row),
         model: row.model,
         vendor: row.vendor,
         technician: row.technician,
@@ -4936,17 +5891,29 @@ app.get('/api/machines', requireAuth, async (req, res) => {
     if (metaOnly) {
       const includeActive = legacyFlag == null;
       const tags = await listTagsWithCounts(pool, { legacyFlag, includeActive });
+      const lotRows = await listLotsWithAssignments(pool);
+      const lots = lotRows.map((row) => mapLotRowForResponse(row)).filter(Boolean);
+      const activeLot = lots.find(
+        (lot) => lot && !lot.isPaused && Number.isFinite(lot.targetCount) && lot.producedCount < lot.targetCount
+      ) || null;
       const activeTag = tags.find((tag) => tag.is_active) || null;
       return res.json({
         ok: true,
         machines: [],
         permissions,
         tags,
-        activeTagId: activeTag ? activeTag.id : null
+        activeTagId: activeTag ? activeTag.id : null,
+        lots,
+        activeLotId: activeLot ? activeLot.id : null
       });
     }
     const result = await pool.query(listReportsQuery);
     const tags = await listTagsWithCounts(pool);
+    const lotRows = await listLotsWithAssignments(pool);
+    const lots = lotRows.map((row) => mapLotRowForResponse(row)).filter(Boolean);
+    const activeLot = lots.find(
+      (lot) => lot && !lot.isPaused && Number.isFinite(lot.targetCount) && lot.producedCount < lot.targetCount
+    ) || null;
     const activeTag = tags.find((tag) => tag.is_active) || null;
     const machines = result.rows.map((row) => {
       let components = null;
@@ -4967,6 +5934,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
         tag: row.tag || null,
         tagId: row.tag_id || null,
         tagName: row.tag_name || row.tag || null,
+        lot: normalizeLotFromRow(row),
         model: row.model,
         vendor: row.vendor,
         technician: row.technician,
@@ -4991,11 +5959,310 @@ app.get('/api/machines', requireAuth, async (req, res) => {
       machines,
       permissions,
       tags,
-      activeTagId: activeTag ? activeTag.id : null
+      activeTagId: activeTag ? activeTag.id : null,
+      lots,
+      activeLotId: activeLot ? activeLot.id : null
     });
   } catch (error) {
     console.error('Failed to list machines', error);
     return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.get('/api/lots', requireAuth, async (req, res) => {
+  try {
+    const lotRows = await listLotsWithAssignments(pool);
+    const lots = lotRows.map((row) => mapLotRowForResponse(row)).filter(Boolean);
+    const activeLot = lots.find(
+      (lot) => lot && !lot.isPaused && Number.isFinite(lot.targetCount) && lot.producedCount < lot.targetCount
+    ) || null;
+    return res.json({
+      ok: true,
+      lots,
+      activeLotId: activeLot ? activeLot.id : null
+    });
+  } catch (error) {
+    console.error('Failed to list lots', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.post('/api/lots', requireTagEdit, async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const supplier = normalizeLotSupplier(body.supplier);
+  const lotNumber = normalizeLotNumber(body.lotNumber || body.lot || body.number);
+  const targetCount = normalizeLotTargetCount(body.targetCount || body.pieceCount || body.count);
+  const priority = normalizeLotPriority(body.priority, LOT_PRIORITY_DEFAULT);
+
+  if (!supplier || !lotNumber || !targetCount) {
+    return res.status(400).json({ ok: false, error: 'invalid_payload' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const id = generateUuid();
+    const insertResult = await client.query(
+      `
+        INSERT INTO lots (
+          id,
+          supplier,
+          lot_number,
+          target_count,
+          produced_count,
+          priority,
+          is_paused,
+          created_by,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, 0, $5, false, $6, NOW(), NOW())
+        RETURNING
+          id,
+          supplier,
+          lot_number,
+          target_count,
+          produced_count,
+          priority,
+          is_paused,
+          created_by,
+          created_at,
+          updated_at
+      `,
+      [id, supplier, lotNumber, targetCount, priority, req.session?.user?.username || null]
+    );
+    await client.query('COMMIT');
+    const lot = mapLotRowForResponse(insertResult.rows && insertResult.rows[0] ? insertResult.rows[0] : null);
+    return res.status(201).json({ ok: true, lot });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback lot create', rollbackError);
+      }
+    }
+    if (error && error.code === '23505') {
+      return res.status(409).json({ ok: false, error: 'lot_exists' });
+    }
+    console.error('Failed to create lot', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.put('/api/lots/:id', requireTagEdit, async (req, res) => {
+  const lotId = normalizeUuid(req.params.id);
+  if (!lotId) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const existing = await getLotById(client, lotId, { forUpdate: true });
+    if (!existing) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    let supplier = existing.supplier;
+    if (Object.prototype.hasOwnProperty.call(body, 'supplier')) {
+      supplier = normalizeLotSupplier(body.supplier);
+      if (!supplier) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'invalid_supplier' });
+      }
+    }
+
+    let lotNumber = existing.lot_number;
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'lotNumber') ||
+      Object.prototype.hasOwnProperty.call(body, 'lot')
+    ) {
+      lotNumber = normalizeLotNumber(body.lotNumber || body.lot);
+      if (!lotNumber) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'invalid_lot_number' });
+      }
+    }
+
+    let targetCount = Number.parseInt(existing.target_count || '0', 10) || 0;
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'targetCount') ||
+      Object.prototype.hasOwnProperty.call(body, 'pieceCount') ||
+      Object.prototype.hasOwnProperty.call(body, 'count')
+    ) {
+      targetCount = normalizeLotTargetCount(body.targetCount || body.pieceCount || body.count);
+      if (!targetCount) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ ok: false, error: 'invalid_target_count' });
+      }
+    }
+
+    const priority = Object.prototype.hasOwnProperty.call(body, 'priority')
+      ? normalizeLotPriority(body.priority, existing.priority)
+      : Number.parseInt(existing.priority || '0', 10) || LOT_PRIORITY_DEFAULT;
+    const isPaused = Object.prototype.hasOwnProperty.call(body, 'isPaused')
+      ? parseBooleanFlag(body.isPaused, false)
+      : Object.prototype.hasOwnProperty.call(body, 'paused')
+        ? parseBooleanFlag(body.paused, false)
+        : parseBooleanFlag(existing.is_paused, false);
+
+    const updateResult = await client.query(
+      `
+        UPDATE lots
+        SET supplier = $2,
+            lot_number = $3,
+            target_count = $4,
+            priority = $5,
+            is_paused = $6,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING
+          id,
+          supplier,
+          lot_number,
+          target_count,
+          produced_count,
+          priority,
+          is_paused,
+          created_by,
+          created_at,
+          updated_at
+      `,
+      [lotId, supplier, lotNumber, targetCount, priority, isPaused]
+    );
+    await client.query('COMMIT');
+    const lot = mapLotRowForResponse(updateResult.rows && updateResult.rows[0] ? updateResult.rows[0] : null);
+    return res.json({ ok: true, lot });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback lot update', rollbackError);
+      }
+    }
+    if (error && error.code === '23505') {
+      return res.status(409).json({ ok: false, error: 'lot_exists' });
+    }
+    console.error('Failed to update lot', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.post('/api/lots/:id/assignments', requireTagEdit, async (req, res) => {
+  const lotId = normalizeUuid(req.params.id);
+  if (!lotId) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const technician = cleanString(body.technician || body.username || body.user, 64);
+  const technicianKey = normalizeTechKey(technician);
+
+  if (!technician || !technicianKey) {
+    return res.status(400).json({ ok: false, error: 'invalid_technician' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const lot = await getLotById(client, lotId, { forUpdate: true });
+    if (!lot) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    await client.query(
+      `
+        INSERT INTO lot_assignments (lot_id, technician_key, technician_name, created_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (lot_id, technician_key) DO UPDATE
+        SET technician_name = EXCLUDED.technician_name
+      `,
+      [lotId, technicianKey, technician]
+    );
+
+    const rows = await listLotsWithAssignments(client);
+    await client.query('COMMIT');
+    const updated = rows.map((row) => mapLotRowForResponse(row)).find((item) => item && item.id === lotId) || null;
+    return res.json({ ok: true, lot: updated });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback lot assignment add', rollbackError);
+      }
+    }
+    console.error('Failed to assign technician to lot', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.delete('/api/lots/:id/assignments/:techKey', requireTagEdit, async (req, res) => {
+  const lotId = normalizeUuid(req.params.id);
+  const technicianKey = normalizeTechKey(req.params.techKey || '');
+  if (!lotId || !technicianKey) {
+    return res.status(400).json({ ok: false, error: 'invalid_params' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const lot = await getLotById(client, lotId, { forUpdate: true });
+    if (!lot) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+    await client.query(
+      `
+        DELETE FROM lot_assignments
+        WHERE lot_id = $1
+          AND technician_key = $2
+      `,
+      [lotId, technicianKey]
+    );
+    const rows = await listLotsWithAssignments(client);
+    await client.query('COMMIT');
+    const updated = rows.map((row) => mapLotRowForResponse(row)).find((item) => item && item.id === lotId) || null;
+    return res.json({ ok: true, lot: updated });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback lot assignment delete', rollbackError);
+      }
+    }
+    console.error('Failed to delete lot assignment', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 });
 
@@ -5126,6 +6393,20 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
         rawDestination
       })
     : '';
+  const lot = normalizeLotFromRow({
+    report_lot_id: row.report_lot_id,
+    report_lot_supplier: row.report_lot_supplier,
+    report_lot_number: row.report_lot_number,
+    report_lot_target_count: row.report_lot_target_count,
+    report_lot_produced_count: row.report_lot_produced_count,
+    report_lot_is_paused: row.report_lot_is_paused,
+    machine_lot_id: row.machine_lot_id,
+    machine_lot_supplier: row.machine_lot_supplier,
+    machine_lot_number: row.machine_lot_number,
+    machine_lot_target_count: row.machine_lot_target_count,
+    machine_lot_produced_count: row.machine_lot_produced_count,
+    machine_lot_is_paused: row.machine_lot_is_paused
+  });
 
   res.json({
     machine: {
@@ -5139,6 +6420,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       tag: row.tag || row.machine_tag || null,
       tagId: row.tag_id || row.machine_tag_id || null,
       tagName: row.report_tag_name || row.tag || row.machine_tag || null,
+      lot,
       model: row.model,
       vendor: row.vendor,
       technician: row.technician,
@@ -5428,6 +6710,7 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
   if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
   }
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
 
   let client;
   try {
@@ -5444,6 +6727,8 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
     const now = new Date().toISOString();
     const reportId = generateUuid();
     const zeroStatus = 'not_tested';
+    const explicitLotId = normalizeUuid(body.lotId || body.lot_id || body.batchId || body.batch_id);
+    const isDoubleCheck = true;
     const components = {
       diskReadTest: zeroStatus,
       diskWriteTest: zeroStatus,
@@ -5460,7 +6745,8 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
       badgeReader: zeroStatus,
       biosBattery: zeroStatus,
       biosLanguage: zeroStatus,
-      biosPassword: zeroStatus
+      biosPassword: zeroStatus,
+      wifiStandard: zeroStatus
     };
     const tests = {
       diskRead: zeroStatus,
@@ -5498,7 +6784,7 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
         model: row.model || null,
         osVersion: row.os_version || null,
         diag: {
-          type: 'manual',
+          type: 'double_check',
           diagnosticsPerformed: 0,
           appVersion: 'report-zero'
         },
@@ -5508,6 +6794,12 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
     );
 
     const resolvedTag = await resolveTagForIngest(client, row.tag_id, row.tag);
+    const lotResolution = await resolveLotForIngest(client, {
+      explicitLotId: explicitLotId || row.lot_id || null,
+      technician: row.technician || null
+    });
+    const resolvedLot = lotResolution.lot;
+    const resolvedLotId = resolvedLot && resolvedLot.id ? resolvedLot.id : null;
     const reportValues = [
       reportId,
       row.machine_key,
@@ -5518,6 +6810,7 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
       row.category || 'unknown',
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
+      resolvedLotId,
       row.model,
       row.vendor,
       row.technician,
@@ -5549,6 +6842,7 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
         row.category || 'unknown',
         resolvedTag.name || DEFAULT_REPORT_TAG,
         resolvedTag.id || null,
+        resolvedLotId,
         row.model,
         row.vendor,
         row.technician,
@@ -5571,8 +6865,23 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
       await client.query(upsertMachineQuery, machineValues);
     }
 
+    const lotProgress = await registerLotProgress(client, {
+      lot: resolvedLot,
+      machineKey: row.machine_key,
+      reportId,
+      technician: row.technician,
+      source: 'report-zero-copy',
+      isDoubleCheck,
+      shouldCount: false
+    });
+
     await client.query('COMMIT');
-    return res.json({ ok: true, reportId });
+    return res.json({
+      ok: true,
+      reportId,
+      lot: normalizeLotFromRow(lotProgress && lotProgress.lot ? lotProgress.lot : resolvedLot),
+      lotCounted: false
+    });
   } catch (error) {
     if (client) {
       try {
@@ -5601,11 +6910,13 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
   const serialNumber = normalizeSerial(body.serialNumber);
   const category = normalizeCategory(body.category);
   const tagIdRaw = body.tagId || body.tag_id || null;
+  const lotIdRaw = body.lotId || body.lot_id || body.batchId || body.batch_id || null;
   const tag = cleanString(body.tag, 64);
   const model = cleanString(body.model, 64);
   const vendor = cleanString(body.vendor, 64);
   const technician = cleanString(body.technician, 64);
   const osVersion = cleanString(body.osVersion, 64);
+  const isDoubleCheck = isDoubleCheckPayload(body);
   let macAddresses = normalizeMacList(body.macAddresses);
 
   if (macAddress && (!macAddresses || !macAddresses.includes(macAddress))) {
@@ -5644,7 +6955,8 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
     badgeReader: zeroStatus,
     biosBattery: zeroStatus,
     biosLanguage: zeroStatus,
-    biosPassword: zeroStatus
+    biosPassword: zeroStatus,
+    wifiStandard: zeroStatus
   };
   const tests = {
     diskRead: zeroStatus,
@@ -5670,7 +6982,7 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
       model: model || null,
       osVersion: osVersion || null,
       diag: {
-        type: 'manual',
+        type: isDoubleCheck ? 'double_check' : 'manual',
         diagnosticsPerformed: 0,
         appVersion: 'report-zero'
       },
@@ -5685,6 +6997,18 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
     await client.query('BEGIN');
     await setAuditContext(client, buildAuditContext(req));
     const resolvedTag = await resolveTagForIngest(client, tagIdRaw, tag);
+    const lotResolution = await resolveLotForIngest(client, {
+      explicitLotId: lotIdRaw,
+      technician
+    });
+    const resolvedLot = lotResolution.lot;
+    const resolvedLotId = resolvedLot && resolvedLot.id ? resolvedLot.id : null;
+    const shouldCountLot = Boolean(
+      resolvedLotId &&
+      machineKey &&
+      !isDoubleCheck &&
+      !parseBooleanFlag(resolvedLot ? resolvedLot.is_paused : false, false)
+    );
     const reportValues = [
       reportId,
       machineKey,
@@ -5695,6 +7019,7 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
       category || 'unknown',
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
+      resolvedLotId,
       model,
       vendor,
       technician,
@@ -5724,6 +7049,7 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
       category || 'unknown',
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
+      resolvedLotId,
       model,
       vendor,
       technician,
@@ -5745,8 +7071,23 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
     ];
     await client.query(upsertReportQuery, reportValues);
     await client.query(upsertMachineQuery, machineValues);
+    const lotProgress = await registerLotProgress(client, {
+      lot: resolvedLot,
+      machineKey,
+      reportId,
+      technician,
+      source: 'report-zero',
+      isDoubleCheck,
+      shouldCount: shouldCountLot
+    });
     await client.query('COMMIT');
-    return res.json({ ok: true, reportId, machineKey });
+    return res.json({
+      ok: true,
+      reportId,
+      machineKey,
+      lot: normalizeLotFromRow(lotProgress && lotProgress.lot ? lotProgress.lot : resolvedLot),
+      lotCounted: Boolean(lotProgress && lotProgress.counted)
+    });
   } catch (error) {
     if (client) {
       try {
@@ -6080,14 +7421,14 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     generatedAt: formatDateTime(new Date())
   };
 
-  const filename = `mdt-report-${sanitizeFilename(title)}.pdf`;
+  const filename = `rapport-atelier-${sanitizeFilename(title)}.pdf`;
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Cache-Control', 'no-store');
 
   const doc = new PDFDocument({ size: 'A4', margin: 40 });
-  doc.info.Title = `Rapport MDT - ${title}`;
-  doc.info.Author = 'MDT Web';
+  doc.info.Title = `Rapport atelier - ${title}`;
+  doc.info.Author = 'Atelier Ops';
   doc.on('error', (error) => {
     console.error('PDF generation error', error);
   });

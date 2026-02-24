@@ -15,31 +15,56 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/styles.css?v=20260129g" />
+    <link rel="stylesheet" href="/styles.css?v=20260223j" />
   </head>
-  <body>
+  <body class="dashboard-page">
     <div class="aura" aria-hidden="true"></div>
-    <main class="app">
-      <header class="hero">
-        <div class="hero-actions">
-          <span class="dev-badge" aria-hidden="true">DEV</span>
-          <a class="admin-link" href="/legacy-imports">Imports</a>
-          <a class="admin-link" href="/patchnotes">Patchnotes</a>
-          <button class="admin-link suggestion-btn" type="button" id="suggestion-btn">
-            Suggestion
-          </button>
-          <a class="admin-link journal-link" href="/journal">Journal</a>
-          <a class="logout-btn" href="/logout">Deconnexion</a>
-        </div>
-        <div class="hero-copy">
+    <main class="app app-shell">
+      <aside class="left-sidebar" aria-label="Navigation principale">
+        <div class="sidebar-head">
           <p class="hero-kicker">MDT Live Ops</p>
-          <h1>Suivi instantane du parc MDT.</h1>
-          <p class="hero-sub">
-            Les scripts MDT envoient leurs donnees directement a l'API et l'interface expose l'etat
-            des composants, les identifiants clefs et la categorie de chaque poste.
+          <h1 class="sidebar-title">Console atelier</h1>
+          <p class="sidebar-sub">
+            Vue operationnelle pour piloter les postes, les statuts et la production par lots.
           </p>
         </div>
-        <div class="hero-stats">
+        <nav class="sidebar-nav" aria-label="Navigation rapide">
+          <button class="sidebar-nav-btn is-active" type="button" data-scroll-target="section-dashboard">
+            Vue generale
+          </button>
+          <button class="sidebar-nav-btn" type="button" data-scroll-target="section-filters">
+            Filtres
+          </button>
+          <button class="sidebar-nav-btn" type="button" data-scroll-target="section-board">
+            Production
+          </button>
+          <button class="sidebar-nav-btn" type="button" data-scroll-target="lot-overview-card">
+            Lot actif
+          </button>
+        </nav>
+        <div class="sidebar-links" aria-label="Pages externes">
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Navigation</p>
+            <a class="admin-link" id="admin-link" href="/admin" target="_self" hidden>Admin</a>
+            <a class="admin-link" id="lots-link" href="/lots" target="_self" hidden>Lots</a>
+            <a class="admin-link" href="/metrics" target="_self">Metrics</a>
+            <a class="admin-link" href="/legacy-imports" target="_self">Imports</a>
+          </div>
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Suivi</p>
+            <a class="admin-link" href="/patchnotes" target="_self">Patchnotes</a>
+            <button class="admin-link suggestion-btn" type="button" id="suggestion-btn">
+              Suggestion
+            </button>
+            <a class="admin-link journal-link" href="/journal" target="_self">Journal</a>
+          </div>
+          <div class="sidebar-link-group sidebar-link-group--session">
+            <p class="sidebar-link-title">Session</p>
+            <a class="logout-btn" href="/logout" target="_self">Deconnexion</a>
+          </div>
+          <span class="dev-badge" aria-hidden="true">DEV</span>
+        </div>
+        <section class="sidebar-stats" aria-label="Statistiques">
           <div
             class="stat-card is-clickable"
             id="stat-total-card"
@@ -66,93 +91,166 @@
             <span class="stat-label">Inconnus</span>
             <span class="stat-value" id="stat-unknown">0</span>
           </div>
-        </div>
-      </header>
-
-      <section class="controls">
-        <div class="filters" role="group" aria-label="Filtres rapides">
-          <div class="filter-group tech-filters" id="tech-filters" role="group" aria-label="Filtrer par technicien">
+          <div class="stat-card lot-stat" id="stat-lot-card">
+            <span class="stat-label">Lot prioritaire</span>
+            <span class="stat-value" id="stat-lot-progress">--</span>
+            <span class="stat-sub" id="stat-lot-name">Aucun lot actif</span>
           </div>
-        </div>
-        <div class="search-wrap is-collapsed" id="search-wrap">
-          <button class="search-toggle" type="button" aria-label="Rechercher">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M15.5 14h-.79l-.28-.27a6 6 0 1 0-.71.71l.27.28v.79l4.25 4.25 1.27-1.27L15.5 14zm-5.5 0a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"
+        </section>
+        <p class="sidebar-note">
+          Astuce: clique une carte statistique pour filtrer immediatement la liste.
+        </p>
+      </aside>
+
+      <section class="workspace">
+        <header class="hero" id="section-dashboard">
+          <div class="hero-copy">
+            <h2>Suivi instantane du parc MDT</h2>
+            <p class="hero-sub">
+              Interface unifiee pour piloter les postes, prioriser la production et suivre la progression
+              du lot actif.
+            </p>
+          </div>
+        </header>
+
+        <section class="filter-hub filter-hub--option-a" id="section-filters">
+          <div class="filter-hub-toolbar">
+            <div class="search-wrap is-collapsed" id="search-wrap">
+              <button class="search-toggle" type="button" aria-label="Rechercher">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M15.5 14h-.79l-.28-.27a6 6 0 1 0-.71.71l.27.28v.79l4.25 4.25 1.27-1.27L15.5 14zm-5.5 0a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"
+                  />
+                </svg>
+              </button>
+              <input
+                id="search-input"
+                type="search"
+                placeholder="Rechercher par nom, serie ou MAC"
+                autocomplete="off"
               />
-            </svg>
-          </button>
-          <input
-            id="search-input"
-            type="search"
-            placeholder="Rechercher par nom, serie ou MAC"
-            autocomplete="off"
-          />
-        </div>
-        <div class="controls-meta">
-          <button id="report-zero-btn" type="button">Creer un rapport</button>
-          <button id="refresh-btn" type="button">Rafraichir</button>
-          <span id="last-updated">Derniere mise a jour : --</span>
-        </div>
-      </section>
+            </div>
+            <div class="controls-meta">
+              <button id="report-zero-btn" type="button">Creer un rapport</button>
+              <button id="refresh-btn" type="button">Rafraichir</button>
+              <span id="last-updated">Derniere mise a jour : --</span>
+            </div>
+          </div>
 
-      <section class="controls-secondary">
-        <div class="layout-group">
-          <span class="controls-label">Disposition</span>
-          <div class="pill-group layout-buttons" role="group" aria-label="Disposition de la grille">
-            <button class="layout-btn" data-layout="1" type="button" aria-pressed="false">1</button>
-            <button class="layout-btn" data-layout="2" type="button" aria-pressed="false">2</button>
-            <button class="layout-btn" data-layout="3" type="button" aria-pressed="false">3</button>
-            <button class="layout-btn" data-layout="6" type="button" aria-pressed="false">6</button>
+          <div class="filter-hub-head">
+            <div>
+              <p class="filter-hub-kicker">Filtres intelligents</p>
+              <p class="filter-hub-sub">
+                Combine technicien, tag, defauts et commentaires pour cibler la bonne machine en quelques clics.
+              </p>
+            </div>
+            <div class="filter-hub-actions">
+              <span class="filter-active-chip" id="active-filters-chip" aria-live="polite">
+                Aucun filtre actif
+              </span>
+              <button class="filter-reset-btn" id="reset-filters-btn" type="button">Reinitialiser</button>
+            </div>
           </div>
-        </div>
-        <div class="tag-filter-group">
-          <span class="controls-label">Tags</span>
-          <div class="tag-select" id="tag-filters" role="group" aria-label="Filtrer par tag"></div>
-        </div>
-        <div class="test-filter-group">
-          <span class="controls-label">Defauts</span>
-          <div class="pill-group test-filters" role="group" aria-label="Filtrer par test en echec">
-            <button class="test-filter-btn" data-component="pad" type="button" aria-pressed="false">
-              Pad
-            </button>
-            <button class="test-filter-btn" data-component="camera" type="button" aria-pressed="false">
-              Cam
-            </button>
-            <button class="test-filter-btn" data-component="usb" type="button" aria-pressed="false">
-              USB
-            </button>
-            <button class="test-filter-btn" data-component="keyboard" type="button" aria-pressed="false">
-              Clavier
-            </button>
-            <button class="test-filter-btn" data-component="badgeReader" type="button" aria-pressed="false">
-              Badge
-            </button>
-            <button class="test-filter-btn" data-component="biosBattery" type="button" aria-pressed="false">
-              Pile BIOS
-            </button>
-            <button class="test-filter-btn" data-component="biosPassword" type="button" aria-pressed="false">
-              MDP BIOS
-            </button>
-          </div>
-        </div>
-        <div class="comment-filter-group">
-          <span class="controls-label">Commentaires</span>
-          <div class="pill-group comment-filters" role="group" aria-label="Filtrer par commentaire">
-            <button class="comment-filter-btn" data-comment="with" type="button" aria-pressed="false">
-              Avec commentaire
-            </button>
-            <button class="comment-filter-btn" data-comment="without" type="button" aria-pressed="false">
-              Sans commentaire
-            </button>
-          </div>
-        </div>
-      </section>
 
-      <section class="board">
-        <div id="scroll-top-sentinel" class="scroll-sentinel" aria-hidden="true"></div>
-        <div class="list" id="machine-list" aria-live="polite"></div>
-        <div id="scroll-sentinel" class="scroll-sentinel" aria-hidden="true"></div>
+          <section class="controls">
+            <div class="workspace-filter-card">
+              <span class="controls-label">Techniciens</span>
+              <div class="filters" role="group" aria-label="Filtrer par technicien">
+                <div class="filter-group tech-filters" id="tech-filters" role="group" aria-label="Filtrer par technicien">
+                </div>
+              </div>
+            </div>
+            <div class="workspace-filter-card">
+              <div class="layout-group">
+                <span class="controls-label">Disposition</span>
+                <div class="pill-group layout-buttons" role="group" aria-label="Disposition de la grille">
+                  <button class="layout-btn" data-layout="1" type="button" aria-pressed="false">1</button>
+                  <button class="layout-btn" data-layout="2" type="button" aria-pressed="false">2</button>
+                  <button class="layout-btn" data-layout="3" type="button" aria-pressed="false">3</button>
+                  <button class="layout-btn" data-layout="6" type="button" aria-pressed="false">6</button>
+                </div>
+              </div>
+              <div class="tag-filter-group">
+                <span class="controls-label">Tags</span>
+                <div class="tag-select" id="tag-filters" role="group" aria-label="Filtrer par tag"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="controls-secondary">
+            <div class="test-filter-group">
+              <span class="controls-label">Defauts</span>
+              <div class="pill-group test-filters" role="group" aria-label="Filtrer par test en echec">
+                <button class="test-filter-btn" data-component="pad" type="button" aria-pressed="false">
+                  Pad
+                </button>
+                <button class="test-filter-btn" data-component="camera" type="button" aria-pressed="false">
+                  Cam
+                </button>
+                <button class="test-filter-btn" data-component="usb" type="button" aria-pressed="false">
+                  USB
+                </button>
+                <button class="test-filter-btn" data-component="keyboard" type="button" aria-pressed="false">
+                  Clavier
+                </button>
+                <button class="test-filter-btn" data-component="badgeReader" type="button" aria-pressed="false">
+                  Badge
+                </button>
+                <button class="test-filter-btn" data-component="biosBattery" type="button" aria-pressed="false">
+                  Pile BIOS
+                </button>
+                <button class="test-filter-btn" data-component="biosPassword" type="button" aria-pressed="false">
+                  MDP BIOS
+                </button>
+                <button class="test-filter-btn" data-component="wifiStandard" type="button" aria-pressed="false">
+                  Wi-Fi
+                </button>
+              </div>
+            </div>
+            <div class="comment-filter-group">
+              <span class="controls-label">Commentaires</span>
+              <div class="pill-group comment-filters" role="group" aria-label="Filtrer par commentaire">
+                <button class="comment-filter-btn" data-comment="with" type="button" aria-pressed="false">
+                  Avec commentaire
+                </button>
+                <button class="comment-filter-btn" data-comment="without" type="button" aria-pressed="false">
+                  Sans commentaire
+                </button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="board" id="section-board">
+          <div class="board-toolbar">
+            <div class="board-copy">
+              <p class="board-kicker">Production</p>
+              <h2>Liste des postes en cours</h2>
+              <p class="board-sub">
+                Vue operationnelle en temps reel avec suivi clair des machines et du lot prioritaire.
+              </p>
+            </div>
+            <aside class="lot-overview-card" id="lot-overview-card" aria-live="polite">
+              <p class="lot-overview-kicker">Lot en cours</p>
+              <h3 id="lot-overview-name">Aucun lot actif</h3>
+              <div class="lot-overview-progress">
+                <div class="lot-overview-track" aria-hidden="true">
+                  <span id="lot-overview-fill"></span>
+                </div>
+                <div class="lot-overview-meta">
+                  <strong id="lot-overview-count">-- / --</strong>
+                  <span id="lot-overview-status">Attente d'un lot actif</span>
+                </div>
+              </div>
+              <ul class="lot-overview-list" id="lot-overview-list">
+                <li class="lot-overview-empty">Aucun lot configure.</li>
+              </ul>
+            </aside>
+          </div>
+          <div id="scroll-top-sentinel" class="scroll-sentinel" aria-hidden="true"></div>
+          <div class="list" id="machine-list" aria-live="polite"></div>
+          <div id="scroll-sentinel" class="scroll-sentinel" aria-hidden="true"></div>
+        </section>
       </section>
     </main>
 
@@ -232,6 +330,16 @@
               <option value="desktop">Tour</option>
             </select>
           </label>
+          <label class="modal-field">
+            <span>Lot</span>
+            <select name="lotId" id="report-zero-lot">
+              <option value="">Attribution automatique (priorite/assignation)</option>
+            </select>
+          </label>
+          <label class="modal-check">
+            <input type="checkbox" name="doubleCheck" value="1" />
+            <span>Double check (n'incremente pas la production)</span>
+          </label>
           <div class="modal-error" id="report-zero-error" hidden></div>
           <div class="modal-actions">
             <button type="button" class="ghost-btn" data-action="close-report-zero">Annuler</button>
@@ -241,6 +349,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260204a" defer></script>
+    <script src="/app.js?v=20260223f" defer></script>
   </body>
 </html>

@@ -11,41 +11,70 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/login.css" />
+    <link rel="stylesheet" href="/login.css?v=20260223a" />
   </head>
   <body class="login-body">
-    <div class="login-aura" aria-hidden="true"></div>
-    <main class="login-card">
-      <p class="login-kicker">MDT Secure</p>
-      <h1>Connexion</h1>
-      <p class="login-sub">
-        Authentifiez-vous via LDAP ou le compte admin local.
-      </p>
-      <div class="login-error" id="login-error">
-        Identifiants invalides. Reessayez.
-      </div>
-      <form class="login-form" method="post" action="/login">
-        <label>
-          Utilisateur
-          <input
-            type="text"
-            name="username"
-            autocomplete="username"
-            required
-          />
-        </label>
-        <label>
-          Mot de passe
-          <input
-            type="password"
-            name="password"
-            autocomplete="current-password"
-            required
-          />
-        </label>
-        <button type="submit">Se connecter</button>
-      </form>
+    <div class="login-bg-orb orb-a" aria-hidden="true"></div>
+    <div class="login-bg-orb orb-b" aria-hidden="true"></div>
+    <main class="login-shell">
+      <section class="login-panel">
+        <p class="login-kicker">MDT Live Ops</p>
+        <h1>Connexion securisee atelier</h1>
+        <p class="login-sub">
+          Connecte-toi pour acceder au suivi production, aux lots prioritaires et au journal technique.
+        </p>
+        <ul class="login-points">
+          <li>Filtrage dynamique des postes en temps reel</li>
+          <li>Gestion des lots et attribution des techniciens</li>
+          <li>Historique des interventions centralise</li>
+        </ul>
+      </section>
+
+      <section class="login-card" aria-labelledby="login-title">
+        <h2 id="login-title">Bienvenue</h2>
+        <p class="login-card-sub">Authentification LDAP ou compte admin local.</p>
+        <div class="login-error" id="login-error" role="status" aria-live="polite">
+          Identifiants invalides. Reessayez.
+        </div>
+        <form class="login-form" method="post" action="/login" id="login-form">
+          <label class="login-field">
+            <span>Utilisateur</span>
+            <input
+              id="login-username"
+              type="text"
+              name="username"
+              autocomplete="username"
+              required
+            />
+          </label>
+
+          <label class="login-field">
+            <span>Mot de passe</span>
+            <div class="password-wrap">
+              <input
+                id="login-password"
+                type="password"
+                name="password"
+                autocomplete="current-password"
+                required
+              />
+              <button
+                class="toggle-password-btn"
+                id="toggle-password"
+                type="button"
+                aria-controls="login-password"
+                aria-pressed="false"
+              >
+                Afficher
+              </button>
+            </div>
+          </label>
+
+          <button type="submit" id="login-submit">Se connecter</button>
+        </form>
+        <p class="login-footnote">Acces reserve au personnel autorise.</p>
+      </section>
     </main>
-    <script src="/login.js" defer></script>
+    <script src="/login.js?v=20260223a" defer></script>
   </body>
 </html>

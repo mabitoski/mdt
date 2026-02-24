@@ -14,6 +14,8 @@ const state = {
   machines: [],
   tags: [],
   activeTagId: null,
+  lots: [],
+  activeLotId: null,
   stats: null,
   techOptions: [],
   filter: 'all',
@@ -68,7 +70,8 @@ const state = {
   scrollHold: null,
   scrollHoldRaf: null,
   scrollAnchorHold: null,
-  scrollAnchorHoldRaf: null
+  scrollAnchorHoldRaf: null,
+  reportsEpoch: 0
 };
 
 const listEl = document.getElementById('machine-list');
@@ -82,6 +85,7 @@ const reportZeroModal = document.getElementById('report-zero-modal');
 const reportZeroForm = document.getElementById('report-zero-form');
 const reportZeroError = document.getElementById('report-zero-error');
 const reportZeroSubmit = document.getElementById('report-zero-submit');
+const reportZeroLotSelect = document.getElementById('report-zero-lot');
 const suggestionBtn = document.getElementById('suggestion-btn');
 const suggestionModal = document.getElementById('suggestion-modal');
 const suggestionListEl = document.getElementById('suggestion-list');
@@ -108,17 +112,30 @@ const statTotal = document.getElementById('stat-total');
 const statLaptop = document.getElementById('stat-laptop');
 const statDesktop = document.getElementById('stat-desktop');
 const statUnknown = document.getElementById('stat-unknown');
+const statLotCard = document.getElementById('stat-lot-card');
+const statLotProgress = document.getElementById('stat-lot-progress');
+const statLotName = document.getElementById('stat-lot-name');
+const lotOverviewCard = document.getElementById('lot-overview-card');
+const lotOverviewName = document.getElementById('lot-overview-name');
+const lotOverviewCount = document.getElementById('lot-overview-count');
+const lotOverviewStatus = document.getElementById('lot-overview-status');
+const lotOverviewFill = document.getElementById('lot-overview-fill');
+const lotOverviewList = document.getElementById('lot-overview-list');
 const statFilterCards = document.querySelectorAll('.stat-card[data-filter]');
 const statTotalCard = document.getElementById('stat-total-card');
 const statTimeLabel = document.getElementById('stat-time-label');
 const techFiltersEl = document.getElementById('tech-filters');
 const tagFiltersEl = document.getElementById('tag-filters');
+const sidebarNavButtons = document.querySelectorAll('.sidebar-nav-btn[data-scroll-target]');
 const layoutButtons = document.querySelectorAll('.layout-btn');
 const testFilterButtons = document.querySelectorAll('.test-filter-btn');
 const commentFilterButtons = document.querySelectorAll('.comment-filter-btn');
 const testFiltersEl = document.querySelector('.test-filters');
 const commentFiltersEl = document.querySelector('.comment-filters');
+const resetFiltersBtn = document.getElementById('reset-filters-btn');
+const activeFiltersChip = document.getElementById('active-filters-chip');
 const adminLink = document.getElementById('admin-link');
+const lotsLink = document.getElementById('lots-link');
 const commentTimers = new Map();
 let activePatchnoteId = null;
 let infiniteObserver = null;
@@ -134,6 +151,7 @@ const categoryLabels = {
 };
 const categoryCycle = ['desktop', 'unknown', 'laptop'];
 const DEFAULT_TAG_LABEL = 'En cours';
+const DEFAULT_LOT_LABEL = 'Aucun lot';
 
 const statusLabels = {
   ok: 'OK',
@@ -158,7 +176,6 @@ const componentLabels = {
   cpuStress: 'CPU (stress)',
   gpuStress: 'GPU (stress)',
   networkPing: 'Ping',
-  wifiStandard: 'Wi-Fi (norme)',
   fsCheck: 'Check disque',
   gpu: 'GPU',
   usb: 'Ports USB',
@@ -168,7 +185,8 @@ const componentLabels = {
   badgeReader: 'Lecteur badge',
   biosBattery: 'Pile BIOS',
   biosLanguage: 'Langue BIOS',
-  biosPassword: 'Mot de passe BIOS'
+  biosPassword: 'Mot de passe BIOS',
+  wifiStandard: 'Norme Wi-Fi'
 };
 
 const componentOrder = [
@@ -180,7 +198,6 @@ const componentOrder = [
   'cpuStress',
   'gpuStress',
   'networkPing',
-  'wifiStandard',
   'fsCheck',
   'gpu',
   'usb',
@@ -190,7 +207,8 @@ const componentOrder = [
   'badgeReader',
   'biosBattery',
   'biosLanguage',
-  'biosPassword'
+  'biosPassword',
+  'wifiStandard'
 ];
 const componentStatusCycles = {
   biosLanguage: ['not_tested', 'fr', 'en'],
@@ -389,6 +407,7 @@ function buildQueryParams({ includeCategory = true, includeTech = true } = {}) {
 }
 
 function resetPagination() {
+  state.reportsEpoch += 1;
   state.pageStart = 0;
   state.pages = [];
   state.hasMore = true;
@@ -818,6 +837,8 @@ async function loadMeta() {
     const data = await response.json();
     state.tags = Array.isArray(data.tags) ? data.tags : [];
     state.activeTagId = data.activeTagId ? normalizeTagId(data.activeTagId) : null;
+    state.lots = Array.isArray(data.lots) ? data.lots : [];
+    state.activeLotId = data.activeLotId ? normalizeLotId(data.activeLotId) : null;
     if (data.permissions && typeof data.permissions.canDeleteReport === 'boolean') {
       state.canDeleteReport = data.permissions.canDeleteReport;
     }
@@ -827,6 +848,8 @@ async function loadMeta() {
     hydrateTagFilterFromNames();
     renderTagFilters();
     renderTechFilters();
+    renderLotMetrics();
+    renderReportZeroLotOptions();
   } catch (error) {
     // ignore
   }
@@ -890,6 +913,10 @@ function ensurePagesForRange(startIndex, endIndex) {
 }
 
 async function loadReportsPage(offset) {
+  const epoch = state.reportsEpoch;
+  if (epoch !== state.reportsEpoch) {
+    return;
+  }
   if (state.isLoadingPage) {
     return;
   }
@@ -916,6 +943,9 @@ async function loadReportsPage(offset) {
       throw new Error('fetch_failed');
     }
     const data = await response.json();
+    if (epoch !== state.reportsEpoch) {
+      return;
+    }
     if (!data.ok) {
       throw new Error('fetch_failed');
     }
@@ -947,10 +977,14 @@ async function loadReportsPage(offset) {
     updateLastUpdated();
     state.lastLoadScrollY = getScrollTop();
   } catch (error) {
-    listEl.innerHTML = '<div class="empty">Erreur lors du chargement.</div>';
+    if (epoch === state.reportsEpoch) {
+      listEl.innerHTML = '<div class="empty">Erreur lors du chargement.</div>';
+    }
   } finally {
-    state.isLoadingPage = false;
-    pumpOffsetQueue();
+    if (epoch === state.reportsEpoch) {
+      state.isLoadingPage = false;
+      pumpOffsetQueue();
+    }
   }
 }
 
@@ -993,6 +1027,7 @@ function initInfiniteScroll() {
   window.addEventListener(
     'resize',
     () => {
+      updateSearchCollapse();
       scheduleVirtualRender();
     },
     { passive: true }
@@ -1035,6 +1070,7 @@ function updateTestFilterButtons() {
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
+  updateFilterDockState();
 }
 
 function normalizeTech(value) {
@@ -1134,6 +1170,259 @@ function getTagLabel(machine) {
   return tagId ? getTagLabelById(tagId) : DEFAULT_TAG_LABEL;
 }
 
+function normalizeLotId(value) {
+  if (!value) {
+    return '';
+  }
+  return String(value).trim().toLowerCase();
+}
+
+function buildLotLabel(lot) {
+  if (!lot || typeof lot !== 'object') {
+    return DEFAULT_LOT_LABEL;
+  }
+  const supplier = String(lot.supplier || '').trim();
+  const lotNumber = String(lot.lotNumber || '').trim();
+  if (supplier && lotNumber) {
+    return `${supplier} - lot ${lotNumber}`;
+  }
+  if (lot.label) {
+    return String(lot.label).trim();
+  }
+  if (supplier) {
+    return supplier;
+  }
+  if (lotNumber) {
+    return `Lot ${lotNumber}`;
+  }
+  return DEFAULT_LOT_LABEL;
+}
+
+function getMachineLot(machine) {
+  if (!machine || !machine.lot || typeof machine.lot !== 'object') {
+    return null;
+  }
+  const lotId = normalizeLotId(machine.lot.id || '');
+  if (lotId) {
+    const fromMeta = Array.isArray(state.lots)
+      ? state.lots.find((lot) => normalizeLotId(lot.id || '') === lotId)
+      : null;
+    if (fromMeta) {
+      return { ...fromMeta, ...machine.lot };
+    }
+  }
+  return machine.lot;
+}
+
+function getActiveLot() {
+  if (!Array.isArray(state.lots) || !state.lots.length) {
+    return null;
+  }
+  const activeId = normalizeLotId(state.activeLotId || '');
+  if (activeId) {
+    const exact = state.lots.find((lot) => normalizeLotId(lot.id || '') === activeId);
+    if (exact) {
+      return exact;
+    }
+  }
+  return (
+    state.lots.find(
+      (lot) => lot && !lot.isPaused && Number.isFinite(lot.targetCount) && lot.producedCount < lot.targetCount
+    ) || null
+  );
+}
+
+function getLotProgress(lot) {
+  const producedRaw = Number.parseInt(lot && lot.producedCount, 10);
+  const targetRaw = Number.parseInt(lot && lot.targetCount, 10);
+  const remainingRaw = Number.parseInt(lot && lot.remainingCount, 10);
+  const produced = Number.isFinite(producedRaw) ? Math.max(producedRaw, 0) : 0;
+  const target = Number.isFinite(targetRaw) ? Math.max(targetRaw, 0) : 0;
+  const remaining = Number.isFinite(remainingRaw) ? Math.max(remainingRaw, 0) : Math.max(target - produced, 0);
+  const ratio = target > 0 ? Math.max(0, Math.min(1, produced / target)) : 0;
+  return {
+    produced,
+    target,
+    remaining,
+    percent: Math.round(ratio * 100)
+  };
+}
+
+function getLotStatusText(lot, progress) {
+  if (!lot) {
+    return 'Aucun lot actif';
+  }
+  if (lot.isPaused) {
+    return 'Production en pause';
+  }
+  if (progress.target > 0 && progress.produced >= progress.target) {
+    return 'Objectif atteint';
+  }
+  if (progress.remaining > 0) {
+    return `${progress.remaining} restants`;
+  }
+  return 'En cours';
+}
+
+function rankLots(lots, activeId) {
+  return [...lots].sort((a, b) => {
+    const aId = normalizeLotId(a && a.id);
+    const bId = normalizeLotId(b && b.id);
+    const aActive = aId && activeId && aId === activeId ? 1 : 0;
+    const bActive = bId && activeId && bId === activeId ? 1 : 0;
+    if (aActive !== bActive) {
+      return bActive - aActive;
+    }
+    const aPaused = a && a.isPaused ? 1 : 0;
+    const bPaused = b && b.isPaused ? 1 : 0;
+    if (aPaused !== bPaused) {
+      return aPaused - bPaused;
+    }
+    const aPriorityRaw = Number.parseInt(a && a.priority, 10);
+    const bPriorityRaw = Number.parseInt(b && b.priority, 10);
+    const aPriority = Number.isFinite(aPriorityRaw) ? aPriorityRaw : 99999;
+    const bPriority = Number.isFinite(bPriorityRaw) ? bPriorityRaw : 99999;
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
+    }
+    const aLabel = buildLotLabel(a);
+    const bLabel = buildLotLabel(b);
+    return aLabel.localeCompare(bLabel, 'fr');
+  });
+}
+
+function renderLotOverview(activeLot = getActiveLot()) {
+  if (!lotOverviewCard) {
+    return;
+  }
+  const lots = Array.isArray(state.lots)
+    ? state.lots.filter((lot) => lot && typeof lot === 'object')
+    : [];
+  const activeId = normalizeLotId(activeLot && activeLot.id ? activeLot.id : '');
+
+  if (activeLot) {
+    const progress = getLotProgress(activeLot);
+    const status = getLotStatusText(activeLot, progress);
+    lotOverviewCard.classList.toggle('is-active', !activeLot.isPaused && progress.target > progress.produced);
+    if (lotOverviewName) {
+      lotOverviewName.textContent = buildLotLabel(activeLot);
+    }
+    if (lotOverviewCount) {
+      const targetLabel = progress.target > 0 ? progress.target : '--';
+      lotOverviewCount.textContent = `${progress.produced} / ${targetLabel}`;
+    }
+    if (lotOverviewStatus) {
+      lotOverviewStatus.textContent = status;
+    }
+    if (lotOverviewFill) {
+      lotOverviewFill.style.width = `${progress.percent}%`;
+    }
+  } else {
+    lotOverviewCard.classList.remove('is-active');
+    if (lotOverviewName) {
+      lotOverviewName.textContent = 'Aucun lot actif';
+    }
+    if (lotOverviewCount) {
+      lotOverviewCount.textContent = '-- / --';
+    }
+    if (lotOverviewStatus) {
+      lotOverviewStatus.textContent = 'Attente d\'un lot actif';
+    }
+    if (lotOverviewFill) {
+      lotOverviewFill.style.width = '0%';
+    }
+  }
+
+  if (!lotOverviewList) {
+    return;
+  }
+  if (!lots.length) {
+    lotOverviewList.innerHTML = '<li class="lot-overview-empty">Aucun lot configure.</li>';
+    return;
+  }
+
+  const ranked = rankLots(lots, activeId).slice(0, 4);
+  lotOverviewList.innerHTML = ranked
+    .map((lot) => {
+      const lotId = normalizeLotId(lot.id);
+      const isActive = Boolean(activeId && lotId === activeId);
+      const progress = getLotProgress(lot);
+      const statusText = getLotStatusText(lot, progress);
+      const targetLabel = progress.target > 0 ? progress.target : '--';
+      const classes = ['lot-overview-item'];
+      if (isActive) {
+        classes.push('is-active');
+      }
+      if (lot.isPaused) {
+        classes.push('is-paused');
+      }
+      return `
+        <li class="${classes.join(' ')}">
+          <div class="lot-overview-item-head">
+            <strong>${escapeHtml(buildLotLabel(lot))}</strong>
+            <span>${progress.produced}/${targetLabel}</span>
+          </div>
+          <div class="lot-overview-track" aria-hidden="true">
+            <span style="width:${progress.percent}%"></span>
+          </div>
+          <p class="lot-overview-item-status">${escapeHtml(statusText)}</p>
+        </li>
+      `;
+    })
+    .join('');
+}
+
+function renderLotMetrics() {
+  const lot = getActiveLot();
+  renderLotOverview(lot);
+  if (!statLotProgress || !statLotName || !statLotCard) {
+    return;
+  }
+  if (!lot) {
+    statLotCard.classList.remove('is-active');
+    statLotProgress.textContent = '--';
+    statLotName.textContent = 'Aucun lot actif';
+    return;
+  }
+  const progress = getLotProgress(lot);
+  const produced = progress.produced;
+  const target = progress.target;
+  const remaining = progress.remaining;
+  statLotCard.classList.toggle('is-active', !lot.isPaused && produced < target);
+  statLotProgress.textContent = `${produced}/${target > 0 ? target : '--'}`;
+  const status = lot.isPaused ? 'PAUSE' : remaining > 0 ? `${remaining} restants` : 'objectif atteint';
+  statLotName.textContent = `${buildLotLabel(lot)} (${status})`;
+}
+
+function renderReportZeroLotOptions() {
+  if (!reportZeroLotSelect) {
+    return;
+  }
+  const currentValue = String(reportZeroLotSelect.value || '').trim();
+  const options = [
+    '<option value="">Attribution automatique (priorite/assignation)</option>'
+  ];
+  const lots = Array.isArray(state.lots) ? state.lots : [];
+  lots.forEach((lot) => {
+    if (!lot || !lot.id) {
+      return;
+    }
+    const label = buildLotLabel(lot);
+    const produced = Number.isFinite(lot.producedCount) ? lot.producedCount : 0;
+    const target = Number.isFinite(lot.targetCount) ? lot.targetCount : 0;
+    const paused = lot.isPaused ? ' [PAUSE]' : '';
+    options.push(
+      `<option value="${escapeHtml(lot.id)}">${escapeHtml(label)} (${produced}/${target})${escapeHtml(
+        paused
+      )}</option>`
+    );
+  });
+  reportZeroLotSelect.innerHTML = options.join('');
+  if (currentValue) {
+    reportZeroLotSelect.value = currentValue;
+  }
+}
+
 function updateTechFilterButtons() {
   if (!techFiltersEl) {
     return;
@@ -1145,6 +1434,7 @@ function updateTechFilterButtons() {
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
+  updateFilterDockState();
 }
 
 function renderTechFilters() {
@@ -1219,6 +1509,7 @@ function updateTagFilterButtons() {
       .filter(Boolean);
     summary.textContent = buildTagSummaryFromLabels(labels);
   }
+  updateFilterDockState();
 }
 
 function renderTagFilters() {
@@ -1371,12 +1662,87 @@ function updateTimeFilterLabel() {
   statTimeLabel.textContent = dateFilterLabels[state.dateFilter] || 'Tous';
 }
 
+function getActiveFilterCount() {
+  let count = 0;
+  if (state.filter && state.filter !== 'all') {
+    count += 1;
+  }
+  if (state.dateFilter && state.dateFilter !== 'all') {
+    count += 1;
+  }
+  if (state.techFilter && state.techFilter !== 'all') {
+    count += 1;
+  }
+  if (Array.isArray(state.tagFilter) && state.tagFilter.length) {
+    count += state.tagFilter.length;
+  }
+  if (state.componentFilter && state.componentFilter !== 'all') {
+    count += 1;
+  }
+  if (state.commentFilter && state.commentFilter !== 'all') {
+    count += 1;
+  }
+  if (state.search && state.search.trim()) {
+    count += 1;
+  }
+  if (state.quickFilter && state.quickFilter.value) {
+    count += 1;
+  }
+  return count;
+}
+
+function updateFilterDockState() {
+  const count = getActiveFilterCount();
+  if (activeFiltersChip) {
+    const plural = count > 1 ? 's' : '';
+    activeFiltersChip.classList.toggle('is-active', count > 0);
+    activeFiltersChip.textContent = count > 0 ? `${count} filtre${plural} actif${plural}` : 'Aucun filtre actif';
+  }
+  if (resetFiltersBtn) {
+    resetFiltersBtn.disabled = count === 0;
+  }
+}
+
 function updateSearchCollapse() {
   if (!searchWrap || !searchInput) {
     return;
   }
+  const collapseEnabled = window.matchMedia('(max-width: 980px)').matches;
   const hasValue = Boolean(state.search && state.search.trim());
-  searchWrap.classList.toggle('is-collapsed', !hasValue);
+  searchWrap.classList.toggle('is-collapsed', collapseEnabled && !hasValue);
+  updateFilterDockState();
+}
+
+function setActiveSidebarNav(targetId) {
+  if (!sidebarNavButtons.length) {
+    return;
+  }
+  sidebarNavButtons.forEach((button) => {
+    const active = (button.dataset.scrollTarget || '') === targetId;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function initSidebarNavigation() {
+  if (!sidebarNavButtons.length) {
+    return;
+  }
+  sidebarNavButtons.forEach((button) => {
+    button.setAttribute('aria-pressed', button.classList.contains('is-active') ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      const targetId = (button.dataset.scrollTarget || '').trim();
+      if (!targetId) {
+        return;
+      }
+      const target = document.getElementById(targetId);
+      if (!target) {
+        return;
+      }
+      setActiveSidebarNav(targetId);
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
 }
 
 function getStartOfToday() {
@@ -1470,6 +1836,7 @@ function updateCommentFilterButtons() {
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
+  updateFilterDockState();
 }
 
 function escapeHtml(value) {
@@ -1491,6 +1858,13 @@ function setAdminLinkVisible(visible) {
   adminLink.hidden = !visible;
 }
 
+function setLotsLinkVisible(visible) {
+  if (!lotsLink) {
+    return;
+  }
+  lotsLink.hidden = !visible;
+}
+
 function canDeleteReportFromUser(user) {
   if (!user) {
     return false;
@@ -1505,10 +1879,11 @@ function canDeleteReportFromUser(user) {
 }
 
 async function initAdminLink() {
-  if (!adminLink) {
+  if (!adminLink && !lotsLink) {
     return;
   }
   setAdminLinkVisible(false);
+  setLotsLinkVisible(false);
   try {
     const response = await fetch('/api/me');
     if (response.status === 401) {
@@ -1527,11 +1902,13 @@ async function initAdminLink() {
       if (canDelete) {
         state.canDeleteReport = true;
         state.canEditTags = true;
+        setLotsLinkVisible(true);
         renderList();
       }
     }
   } catch (error) {
     setAdminLinkVisible(false);
+    setLotsLinkVisible(false);
   }
 }
 
@@ -1626,6 +2003,69 @@ function normalizeBiosPasswordKey(value) {
   return normalized === 'ok' || normalized === 'nok' || normalized === 'not_tested' ? normalized : null;
 }
 
+function normalizeWifiStandardKey(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'ok' : 'nok';
+  }
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return 'ok';
+    }
+    if (value === 0) {
+      return 'nok';
+    }
+    return null;
+  }
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+  const cleaned = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (
+    cleaned.includes('not tested') ||
+    cleaned.includes('not_tested') ||
+    cleaned.includes('non teste') ||
+    cleaned.includes('non testee') ||
+    cleaned.includes('pas teste') ||
+    cleaned.includes('not run')
+  ) {
+    return 'not_tested';
+  }
+
+  const modernSuffixes = new Set(['be', 'ax', 'ac', 'n']);
+  const legacySuffixes = new Set(['g', 'a', 'b']);
+  const standards = Array.from(cleaned.matchAll(/(?:802(?:[.\s-])?)?11\s*(be|ax|ac|n|g|a|b)\b/gi)).map(
+    (match) => match[1].toLowerCase()
+  );
+  if (standards.some((suffix) => modernSuffixes.has(suffix))) {
+    return 'ok';
+  }
+  if (standards.some((suffix) => legacySuffixes.has(suffix))) {
+    return 'nok';
+  }
+
+  if (/\bwi-?fi\s*(7|6e?|5|4)\b/.test(cleaned)) {
+    return 'ok';
+  }
+  if (/\bwi-?fi\s*(3|2|1)\b/.test(cleaned)) {
+    return 'nok';
+  }
+  if (
+    cleaned.includes('no wireless interface') ||
+    cleaned.includes('there is no wireless interface') ||
+    cleaned.includes('aucune interface sans fil') ||
+    cleaned.includes('aucune interface reseau sans fil')
+  ) {
+    return 'nok';
+  }
+
+  const normalized = normalizeStatusKey(cleaned);
+  return normalized === 'ok' || normalized === 'nok' || normalized === 'not_tested' ? normalized : null;
+}
+
 function resolveComponentStatusDisplay(key, value) {
   if (key === 'biosLanguage') {
     const language = normalizeBiosLanguageKey(value);
@@ -1649,6 +2089,14 @@ function resolveComponentStatusDisplay(key, value) {
     return { status: 'not_tested', label: statusLabels.not_tested };
   }
 
+  if (key === 'wifiStandard') {
+    const normalized = normalizeWifiStandardKey(value);
+    if (normalized) {
+      return { status: normalized, label: statusLabels[normalized] || '--' };
+    }
+    return { status: 'not_tested', label: statusLabels.not_tested };
+  }
+
   const normalized = normalizeStatusKey(value);
   if (normalized) {
     return { status: normalized, label: statusLabels[normalized] || '--' };
@@ -1665,7 +2113,11 @@ function summarizeComponents(components, commentValue = '') {
         return;
       }
       const statusKey =
-        componentKey === 'biosPassword' ? normalizeBiosPasswordKey(value) : normalizeStatusKey(value);
+        componentKey === 'biosPassword'
+          ? normalizeBiosPasswordKey(value)
+          : componentKey === 'wifiStandard'
+            ? normalizeWifiStandardKey(value)
+            : normalizeStatusKey(value);
       if (!statusKey) {
         return;
       }
@@ -2438,6 +2890,7 @@ function openReportZeroModal() {
   }
   reportZeroModal.hidden = false;
   reportZeroForm.reset();
+  renderReportZeroLotOptions();
   showReportZeroError('');
   const firstInput = reportZeroForm.querySelector('input[name="hostname"]');
   if (firstInput) {
@@ -2603,13 +3056,17 @@ function getReportZeroPayload() {
   const macAddress = String(formData.get('macAddress') || '').trim();
   const technician = String(formData.get('technician') || '').trim();
   const category = String(formData.get('category') || 'unknown').trim();
+  const lotId = String(formData.get('lotId') || '').trim();
+  const doubleCheck = String(formData.get('doubleCheck') || '').trim() !== '';
 
   return {
     hostname: hostname || null,
     serialNumber: serialNumber || null,
     macAddress: macAddress || null,
     technician: technician || null,
-    category: category || 'unknown'
+    category: category || 'unknown',
+    lotId: lotId || null,
+    doubleCheck
   };
 }
 
@@ -2894,6 +3351,7 @@ function updateStats() {
     statLaptop.textContent = state.stats.laptop || 0;
     statDesktop.textContent = state.stats.desktop || 0;
     statUnknown.textContent = state.stats.unknown || 0;
+    renderLotMetrics();
     return;
   }
   const uniqueMachines = getUniqueMachines(getBaseFilteredMachines());
@@ -2906,6 +3364,7 @@ function updateStats() {
   statLaptop.textContent = laptop;
   statDesktop.textContent = desktop;
   statUnknown.textContent = unknown;
+  renderLotMetrics();
 }
 
 function updateStatFilterCards() {
@@ -2918,11 +3377,48 @@ function updateStatFilterCards() {
     card.classList.toggle('is-active', active);
     card.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
+  updateFilterDockState();
 }
 
 function setCategoryFilter(filter) {
   state.filter = filter || 'all';
   updateStatFilterCards();
+  savePreferences();
+  reloadReports();
+}
+
+function resetAllFilters() {
+  if (getActiveFilterCount() <= 0) {
+    return;
+  }
+  state.filter = 'all';
+  state.techFilter = 'all';
+  state.tagFilter = [];
+  state.tagFilterNames = [];
+  state.componentFilter = 'all';
+  state.commentFilter = 'all';
+  state.dateFilter = 'all';
+  state.quickFilter = null;
+  state.activeToken = null;
+  state.search = '';
+  if (searchTimer) {
+    window.clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  if (searchInput) {
+    searchInput.value = '';
+  }
+  if (tagFiltersEl) {
+    tagFiltersEl.classList.remove('is-open');
+  }
+  updateSearchCollapse();
+  updateStatFilterCards();
+  updateTechFilterButtons();
+  updateTestFilterButtons();
+  updateCommentFilterButtons();
+  renderTagFilters();
+  renderTechFilters();
+  updateTimeFilterLabel();
   savePreferences();
   reloadReports();
 }
@@ -3085,9 +3581,6 @@ function buildDiagnosticsHtml(detail) {
     if (tests.networkPing || tests.networkPingTarget) {
       addRow('Ping', tests.networkPing, tests.networkPingTarget || null, 'networkPing');
     }
-    if (tests.wifiStandard || tests.wifiStandardValue) {
-      addRow('Wi-Fi (norme)', tests.wifiStandard, tests.wifiStandardValue || null, 'wifiStandard');
-    }
     if (tests.fsCheck) {
       addRow('Check disque', tests.fsCheck, null, 'fsCheck');
     }
@@ -3151,6 +3644,7 @@ function renderList(isScrollUpdate = false) {
   updateTimeFilterLabel();
   updateStats();
   updateStatFilterCards();
+  updateFilterDockState();
   const useQuickFilter = Boolean(state.quickFilter && state.quickFilter.value);
   const cacheKey = JSON.stringify({
     length: state.machines.length,
@@ -3260,9 +3754,33 @@ function renderList(isScrollUpdate = false) {
       const tagLabel = getTagLabel(machine);
       const tagValue = escapeHtml(tagLabel);
       const tagIdValue = escapeHtml(getTagId(machine));
+      const lotData = getMachineLot(machine);
+      const rawLotLabel = lotData ? buildLotLabel(lotData) : '';
+      const hasAssignedLot = Boolean(rawLotLabel && rawLotLabel !== DEFAULT_LOT_LABEL);
+      const lotLabel = hasAssignedLot ? rawLotLabel : DEFAULT_LOT_LABEL;
+      const lotValue = escapeHtml(lotLabel);
       const tagHtml = state.canEditTags && tagIdValue
         ? `<button class="tag-pill is-editable" type="button" title="${tagValue}" data-tag="${tagValue}" data-tag-id="${tagIdValue}">${tagValue}</button>`
         : `<span class="tag-pill" title="${tagValue}">${tagValue}</span>`;
+      const lotClasses = ['lot-pill'];
+      if (!hasAssignedLot) {
+        lotClasses.push('is-empty');
+      }
+      if (lotData && lotData.isPaused) {
+        lotClasses.push('is-paused');
+      }
+      const lotHtml = `
+        <span class="${lotClasses.join(' ')}" title="${lotValue}">
+          <span class="lot-pill-label">Lot</span>
+          <span class="lot-pill-value">${lotValue}</span>
+        </span>
+      `;
+      const lotInlineHtml = `
+        <p class="machine-lot-line${hasAssignedLot ? '' : ' is-empty'}">
+          <span>Lot en cours</span>
+          <strong>${lotValue}</strong>
+        </p>
+      `;
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
       const commentDisplay = commentValue || 'Ajouter un commentaire';
       const isEditingComment = state.quickCommentId === machine.id;
@@ -3329,7 +3847,10 @@ function renderList(isScrollUpdate = false) {
           <div class="card-top">
             ${categoryBadge}
             <div class="card-top-right">
-              ${tagHtml}
+              <div class="card-top-tags">
+                ${tagHtml}
+                ${lotHtml}
+              </div>
               <span class="machine-meta"><span>${lastSeen}</span></span>
             </div>
           </div>
@@ -3337,6 +3858,7 @@ function renderList(isScrollUpdate = false) {
             <div class="card-left">
               <h3 class="machine-title">${title}</h3>
               <p class="machine-sub">${subtitle}</p>
+              ${lotInlineHtml}
               <div class="machine-meta-row">
                 ${buildMetaChip('SN', serialValue, serialValue, 'serial', state.activeToken, machine.id)}
                 ${buildMetaChip('Tech', technicianValue, technicianValue, 'tech', state.activeToken, machine.id)}
@@ -3437,8 +3959,13 @@ function buildDetailHtml(detail) {
   const category = normalizeCategory(detail.category);
   const title = escapeHtml(formatPrimary(detail));
   const subtitle = escapeHtml(formatSubtitle(detail));
+  const lot = getMachineLot(detail);
+  const lotLabel = lot ? buildLotLabel(lot) : '';
   const technicianLine = detail.technician
     ? `<p class="detail-tech"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></p>`
+    : '';
+  const lotLine = lotLabel
+    ? `<p class="detail-tech"><span>Lot</span><strong>${escapeHtml(lotLabel)}</strong></p>`
     : '';
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const padStatus = getPadStatus(detail);
@@ -3446,7 +3973,8 @@ function buildDetailHtml(detail) {
   const componentDefaults = {
     biosBattery: 'not_tested',
     biosLanguage: 'not_tested',
-    biosPassword: 'not_tested'
+    biosPassword: 'not_tested',
+    wifiStandard: 'not_tested'
   };
   const rawComponents =
     detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
@@ -3711,6 +4239,7 @@ function buildDetailHtml(detail) {
       ${buildCategoryBadge(category, detailId, 'detail-category')}
       <p class="machine-sub">${subtitle}</p>
       ${technicianLine}
+      ${lotLine}
       ${actionBar}
     </div>
     <div class="detail-grid">
@@ -3759,6 +4288,8 @@ function buildReportDocument(detail) {
   const category = normalizeCategory(detail.category);
   const title = escapeHtml(formatPrimary(detail));
   const subtitle = escapeHtml(formatSubtitle(detail));
+  const lot = getMachineLot(detail);
+  const lotLabel = lot ? buildLotLabel(lot) : '';
   const generatedAt = new Date().toLocaleString('fr-FR', {
     day: '2-digit',
     month: 'short',
@@ -3768,6 +4299,9 @@ function buildReportDocument(detail) {
   });
   const technicianLine = detail.technician
     ? `<div class="report-meta-row"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></div>`
+    : '';
+  const lotLine = lotLabel
+    ? `<div class="report-meta-row"><span>Lot</span><strong>${escapeHtml(lotLabel)}</strong></div>`
     : '';
 
   const payload =
@@ -3787,7 +4321,8 @@ function buildReportDocument(detail) {
   const componentDefaults = {
     biosBattery: 'not_tested',
     biosLanguage: 'not_tested',
-    biosPassword: 'not_tested'
+    biosPassword: 'not_tested',
+    wifiStandard: 'not_tested'
   };
   const rawComponents =
     detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
@@ -4149,6 +4684,7 @@ function buildReportDocument(detail) {
               formatDateTime(detail.createdAt)
             )}</strong></div>
             ${technicianLine}
+            ${lotLine}
           </div>
         </div>
         <div class="summary-row">
@@ -4474,6 +5010,8 @@ updateTagFilterButtons();
 applyLayout();
 updateTimeFilterLabel();
 updateStatFilterCards();
+initSidebarNavigation();
+updateFilterDockState();
 
 if (searchToggle && searchWrap && searchInput) {
   searchToggle.addEventListener('click', () => {
@@ -4484,9 +5022,7 @@ if (searchToggle && searchWrap && searchInput) {
     searchWrap.classList.remove('is-collapsed');
   });
   searchInput.addEventListener('blur', () => {
-    if (!searchInput.value.trim()) {
-      searchWrap.classList.add('is-collapsed');
-    }
+    updateSearchCollapse();
   });
 }
 
@@ -4501,6 +5037,12 @@ if (searchInput) {
     searchTimer = setTimeout(() => {
       reloadReports();
     }, 300);
+  });
+}
+
+if (resetFiltersBtn) {
+  resetFiltersBtn.addEventListener('click', () => {
+    resetAllFilters();
   });
 }
 
