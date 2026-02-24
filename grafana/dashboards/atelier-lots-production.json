@@ -1,0 +1,242 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 3 },
+              { "color": "red", "value": 8 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*)::integer AS value FROM lots WHERE is_paused = false AND produced_count < target_count;",
+          "refId": "A"
+        }
+      ],
+      "title": "Lots actifs",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 40 },
+              { "color": "green", "value": 75 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ROUND(100 * COALESCE(SUM(produced_count)::numeric / NULLIF(SUM(target_count), 0), 0), 1) AS value FROM lots WHERE target_count > 0;",
+          "refId": "A"
+        }
+      ],
+      "title": "Progression globale lots %",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 200 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, COALESCE(r.lot_id::text, 'none') AS lot_id, COALESCE(l.supplier || ' #' || l.lot_number, 'Sans lot') AS lot_label, r.components FROM reports r LEFT JOIN lots l ON l.id = r.lot_id WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.machine_key) SELECT COUNT(*) FILTER (WHERE incidents > 0)::integer AS value FROM counted;",
+          "refId": "A"
+        }
+      ],
+      "title": "Postes incidents (scope)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "id": 4,
+      "options": {
+        "orientation": "auto",
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, COALESCE(r.lot_id::text, 'none') AS lot_id, COALESCE(l.supplier || ' #' || l.lot_number, 'Sans lot') AS lot_label, r.components FROM reports r LEFT JOIN lots l ON l.id = r.lot_id WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT l.lot_label AS metric, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.machine_key, l.lot_label) SELECT metric, SUM(incidents)::integer AS value FROM counted GROUP BY metric ORDER BY value DESC LIMIT 20;",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidents par lot (periode)",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 18,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('day', counted_at) AS \"time\", COUNT(*)::integer AS postes FROM lot_progress WHERE counted_at >= NOW() - INTERVAL '30 days' GROUP BY 1 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Production lots par jour (30 jours)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "displayMode": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Progression %" },
+            "properties": [
+              { "id": "unit", "value": "percent" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Taux postes incident %" },
+            "properties": [
+              { "id": "unit", "value": "percent" }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 14 },
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "footer": {
+          "show": false,
+          "reducer": ["sum"],
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, COALESCE(r.lot_id::text, 'none') AS lot_id, COALESCE(l.supplier || ' #' || l.lot_number, 'Sans lot') AS lot_label, r.components FROM reports r LEFT JOIN lots l ON l.id = r.lot_id WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), machine_inc AS (SELECT l.lot_id, l.lot_label, l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.lot_id, l.lot_label, l.machine_key), lot_scope AS (SELECT lot_id, lot_label, COUNT(*)::integer AS postes_scope, COUNT(*) FILTER (WHERE incidents > 0)::integer AS postes_incidents_scope, SUM(incidents)::integer AS incidents_scope FROM machine_inc GROUP BY lot_id, lot_label), lot_rows AS (SELECT l.id::text AS lot_id, l.supplier AS fournisseur, l.lot_number AS lot, l.target_count AS objectif, l.produced_count AS produits, CASE WHEN l.is_paused THEN 'Pause' WHEN l.produced_count >= l.target_count THEN 'Termine' ELSE 'Actif' END AS statut, l.priority AS priorite FROM lots l) SELECT lr.fournisseur AS \"Fournisseur\", lr.lot AS \"Lot\", lr.objectif AS \"Objectif\", lr.produits AS \"Produits\", GREATEST(lr.objectif - lr.produits, 0) AS \"Restants\", ROUND(100 * COALESCE(lr.produits::numeric / NULLIF(lr.objectif, 0), 0), 1) AS \"Progression %\", COALESCE(ls.postes_scope, 0) AS \"Postes scope\", COALESCE(ls.postes_incidents_scope, 0) AS \"Postes incidents\", COALESCE(ls.incidents_scope, 0) AS \"Incidents\", ROUND(100 * COALESCE(ls.postes_incidents_scope::numeric / NULLIF(ls.postes_scope, 0), 0), 1) AS \"Taux postes incident %\", lr.statut AS \"Statut\", lr.priorite AS \"Priorite\" FROM lot_rows lr LEFT JOIN lot_scope ls ON ls.lot_id = lr.lot_id UNION ALL SELECT '--' AS \"Fournisseur\", 'Sans lot' AS \"Lot\", 0 AS \"Objectif\", 0 AS \"Produits\", 0 AS \"Restants\", 0::numeric AS \"Progression %\", COALESCE(ls.postes_scope, 0) AS \"Postes scope\", COALESCE(ls.postes_incidents_scope, 0) AS \"Postes incidents\", COALESCE(ls.incidents_scope, 0) AS \"Incidents\", ROUND(100 * COALESCE(ls.postes_incidents_scope::numeric / NULLIF(ls.postes_scope, 0), 0), 1) AS \"Taux postes incident %\", 'Hors lot' AS \"Statut\", 9999 AS \"Priorite\" FROM lot_scope ls WHERE ls.lot_id = 'none' ORDER BY \"Priorite\" ASC, \"Lot\" ASC;",
+          "refId": "A"
+        }
+      ],
+      "title": "Detail lots + incidentologie",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "light",
+  "tags": ["atelier", "lots", "production"],
+  "templating": { "list": [] },
+  "time": { "from": "now-30d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Atelier lots production",
+  "uid": "mdt-atelier-lots",
+  "version": 1,
+  "weekStart": ""
+}

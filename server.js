@@ -78,6 +78,33 @@ const OBJECT_STORAGE_RENAME_ON_TAG =
 const DEFAULT_LDAP_SEARCH_FILTER = '(sAMAccountName={{username}})';
 const DEFAULT_LDAP_SEARCH_ATTRIBUTES = 'dn,cn,mail';
 const LDAP_URL = process.env.LDAP_URL || '';
+const GRAFANA_PUBLIC_URL = process.env.GRAFANA_PUBLIC_URL || 'http://10.1.10.27:3002';
+
+function normalizeOrigin(value) {
+  if (!value) {
+    return '';
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.origin || '';
+  } catch (error) {
+    return '';
+  }
+}
+
+const GRAFANA_CSP_SOURCES = Array.from(
+  new Set(
+    [
+      'http://10.1.10.27:3002',
+      'http://127.0.0.1:3002',
+      'http://localhost:3002',
+      'https://10.1.10.27:3002',
+      'https://127.0.0.1:3002',
+      'https://localhost:3002',
+      normalizeOrigin(GRAFANA_PUBLIC_URL)
+    ].filter(Boolean)
+  )
+);
 const LDAP_BIND_DN = process.env.LDAP_BIND_DN || '';
 const LDAP_BIND_PASSWORD = process.env.LDAP_BIND_PASSWORD || '';
 const LDAP_SEARCH_BASE = process.env.LDAP_SEARCH_BASE || '';
@@ -1740,7 +1767,9 @@ app.use(
         'font-src': ["'self'", 'https://fonts.gstatic.com'],
         'img-src': ["'self'", 'data:'],
         'script-src': ["'self'"],
-        'connect-src': ["'self'"],
+        'connect-src': ["'self'", ...GRAFANA_CSP_SOURCES],
+        'frame-src': ["'self'", ...GRAFANA_CSP_SOURCES],
+        'child-src': ["'self'", ...GRAFANA_CSP_SOURCES],
         'upgrade-insecure-requests': null
       }
     }

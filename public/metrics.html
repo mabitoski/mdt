@@ -15,7 +15,7 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/styles.css?v=20260224a" />
+    <link rel="stylesheet" href="/styles.css?v=20260224b" />
   </head>
   <body class="dashboard-page admin-page metrics-page">
     <div class="aura" aria-hidden="true"></div>
@@ -109,6 +109,20 @@
               Ouvrir en plein ecran
             </a>
           </div>
+          <div class="metrics-dashboard-tabs" id="metrics-dashboard-tabs">
+            <button class="metrics-dashboard-tab is-active" type="button" data-dashboard="overview">
+              Vue globale
+            </button>
+            <button class="metrics-dashboard-tab" type="button" data-dashboard="lots">
+              Vue lots
+            </button>
+            <button class="metrics-dashboard-tab" type="button" data-dashboard="types">
+              Type de poste
+            </button>
+            <button class="metrics-dashboard-tab" type="button" data-dashboard="weekly">
+              Semaine
+            </button>
+          </div>
           <p class="grafana-hint" id="grafana-hint">
             Chargement du dashboard...
           </p>
@@ -123,6 +137,6 @@
       </section>
     </main>
 
-    <script src="/metrics.js?v=20260224a" defer></script>
+    <script src="/metrics.js?v=20260224b" defer></script>
   </body>
 </html>
