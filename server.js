@@ -5315,6 +5315,33 @@ function drawReportPdf(doc, data) {
     }
   ].filter((row) => row.status != null);
 
+  const displayedSummary = { ok: 0, nok: 0, other: 0, total: 0 };
+  const addSummaryStatus = (statusKey) => {
+    if (!statusKey) {
+      return;
+    }
+    const normalized = statusKey === 'fr' || statusKey === 'en' ? 'ok' : statusKey;
+    if (normalized === 'ok') {
+      displayedSummary.ok += 1;
+    } else if (normalized === 'nok') {
+      displayedSummary.nok += 1;
+    } else {
+      displayedSummary.other += 1;
+    }
+    displayedSummary.total += 1;
+  };
+
+  diagnosticsRows.forEach((row) => {
+    addSummaryStatus(normalizeStatusKey(row && row.status));
+  });
+  componentRows.forEach((row) => {
+    if (!row) {
+      return;
+    }
+    const resolved = resolveComponentStatusDisplay(row.key, row.status);
+    addSummaryStatus(resolved && resolved.statusKey ? resolved.statusKey : normalizeStatusKey(row.status));
+  });
+
   const identRows = [
     { label: 'Serial', value: data.serialNumber },
     { label: 'MAC', value: data.macPrimary },
@@ -5337,7 +5364,7 @@ function drawReportPdf(doc, data) {
   const summaryCards = [
     {
       label: 'OK total',
-      value: `${data.summary.ok || 0}`,
+      value: `${displayedSummary.ok || 0}`,
       tones: {
         background: palette.summaryOkBg,
         border: palette.summaryOkBorder,
@@ -5347,7 +5374,7 @@ function drawReportPdf(doc, data) {
     },
     {
       label: 'NOK total',
-      value: `${data.summary.nok || 0}`,
+      value: `${displayedSummary.nok || 0}`,
       tones: {
         background: palette.summaryNokBg,
         border: palette.summaryNokBorder,
@@ -5357,7 +5384,7 @@ function drawReportPdf(doc, data) {
     },
     {
       label: 'Non testé',
-      value: `${data.summary.other || 0}`,
+      value: `${displayedSummary.other || 0}`,
       tones: {
         background: palette.summaryNtBg,
         border: palette.summaryNtBorder,
