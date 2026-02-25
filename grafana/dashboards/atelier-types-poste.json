@@ -1,39 +1,69 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "id": null,
   "links": [],
   "liveNow": false,
   "panels": [
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 30 },
-              { "color": "red", "value": 55 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 55
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "options": {
         "colorMode": "background_solid",
         "graphMode": "none",
         "justifyMode": "center",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "value_and_name"
       },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND COALESCE(r.category,'unknown') = 'laptop' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.machine_key) SELECT ROUND(100 * COALESCE(COUNT(*) FILTER (WHERE incidents > 0)::numeric / NULLIF(COUNT(*), 0), 0), 1) AS value FROM counted;",
@@ -44,34 +74,62 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 30 },
-              { "color": "red", "value": 55 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 55
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 8, "x": 8, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
       "id": 2,
       "options": {
         "colorMode": "background_solid",
         "graphMode": "none",
         "justifyMode": "center",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "value_and_name"
       },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND COALESCE(r.category,'unknown') = 'desktop' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.machine_key) SELECT ROUND(100 * COALESCE(COUNT(*) FILTER (WHERE incidents > 0)::numeric / NULLIF(COUNT(*), 0), 0), 1) AS value FROM counted;",
@@ -82,34 +140,62 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 30 },
-              { "color": "red", "value": 55 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 55
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
       "id": 3,
       "options": {
         "colorMode": "background_solid",
         "graphMode": "none",
         "justifyMode": "center",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "textMode": "value_and_name"
       },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND COALESCE(r.category,'unknown') = 'unknown' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.machine_key) SELECT ROUND(100 * COALESCE(COUNT(*) FILTER (WHERE incidents > 0)::numeric / NULLIF(COUNT(*), 0), 0), 1) AS value FROM counted;",
@@ -120,9 +206,24 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
-      "gridPos": { "h": 9, "w": 10, "x": 0, "y": 5 },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 10,
+        "x": 0,
+        "y": 5
+      },
       "id": 4,
       "options": {
         "orientation": "auto",
@@ -133,7 +234,10 @@
       },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, COALESCE(r.category, 'unknown') AS category, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT category, l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY category, l.machine_key) SELECT CASE category WHEN 'laptop' THEN 'Portable' WHEN 'desktop' THEN 'Tour' ELSE 'Inconnu' END AS metric, COUNT(*) FILTER (WHERE incidents > 0)::integer AS value FROM counted GROUP BY category ORDER BY value DESC;",
@@ -144,10 +248,15 @@
       "type": "barchart"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
@@ -157,7 +266,12 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 9, "w": 14, "x": 10, "y": 5 },
+      "gridPos": {
+        "h": 9,
+        "w": 14,
+        "x": 10,
+        "y": 5
+      },
       "id": 5,
       "options": {
         "legend": {
@@ -172,7 +286,10 @@
       },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "time_series",
           "rawQuery": true,
           "rawSql": "WITH daily_latest AS (SELECT DISTINCT ON (r.machine_key, date_trunc('day', r.last_seen)) date_trunc('day', r.last_seen) AS day, r.machine_key, COALESCE(r.category, 'unknown') AS category, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND r.last_seen >= NOW() - INTERVAL '30 days' ORDER BY r.machine_key, date_trunc('day', r.last_seen), r.last_seen DESC, r.created_at DESC, r.id DESC) SELECT day AS \"time\", CASE category WHEN 'laptop' THEN 'Portable' WHEN 'desktop' THEN 'Tour' ELSE 'Inconnu' END AS metric, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS value FROM daily_latest d LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(d.components)) AS e(key, value) ON TRUE GROUP BY day, metric ORDER BY day;",
@@ -183,7 +300,10 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -192,27 +312,43 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Taux incident %" },
+            "matcher": {
+              "id": "byName",
+              "options": "Taux incident %"
+            },
             "properties": [
-              { "id": "unit", "value": "percent" }
+              {
+                "id": "unit",
+                "value": "percent"
+              }
             ]
           }
         ]
       },
-      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 14 },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
       "id": 6,
       "options": {
         "cellHeight": "sm",
         "showHeader": true,
         "footer": {
           "show": false,
-          "reducer": ["sum"],
+          "reducer": [
+            "sum"
+          ],
           "fields": ""
         }
       },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, COALESCE(r.category, 'unknown') AS category, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), exploded AS (SELECT CASE category WHEN 'laptop' THEN 'Portable' WHEN 'desktop' THEN 'Tour' ELSE 'Inconnu' END AS type_poste, CASE e.key WHEN 'keyboard' THEN 'Clavier' WHEN 'camera' THEN 'Camera' WHEN 'usb' THEN 'USB' WHEN 'pad' THEN 'Pave tactile' WHEN 'badgeReader' THEN 'Lecteur badge' WHEN 'biosBattery' THEN 'Pile BIOS' WHEN 'biosLanguage' THEN 'Langue BIOS' WHEN 'biosPassword' THEN 'Mot de passe BIOS' WHEN 'wifiStandard' THEN 'Norme Wi-Fi' ELSE e.key END AS composant, lower(COALESCE(e.value,'')) AS status FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE), agg AS (SELECT type_poste, composant, COUNT(*) FILTER (WHERE status IN ('nok','timeout','denied','absent'))::numeric AS incidents, COUNT(*) FILTER (WHERE status NOT IN ('not_tested','unknown',''))::numeric AS testes FROM exploded GROUP BY type_poste, composant) SELECT type_poste AS \"Type poste\", composant AS \"Composant\", incidents::integer AS \"Incidents\", ROUND(100 * COALESCE(incidents / NULLIF(testes, 0), 0), 1) AS \"Taux incident %\" FROM agg WHERE incidents > 0 ORDER BY \"Incidents\" DESC, \"Taux incident %\" DESC LIMIT 50;",
@@ -221,18 +357,79 @@
       ],
       "title": "Composants incidentes par type",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "id": 301,
+      "options": {
+        "orientation": "auto",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0,
+        "showValue": "auto",
+        "stacking": "none",
+        "barRadius": 0,
+        "groupWidth": 0.7,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT CASE t.category WHEN 'laptop' THEN 'Portable' WHEN 'desktop' THEN 'Tour' ELSE 'Inconnu' END AS metric, COUNT(*)::integer AS value FROM report_component_transitions t WHERE t.is_corrected AND $__timeFilter(t.last_seen) GROUP BY 1 ORDER BY value DESC;",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidents corriges par type de poste",
+      "type": "barchart"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "style": "light",
-  "tags": ["atelier", "type", "poste"],
-  "templating": { "list": [] },
-  "time": { "from": "now-30d", "to": "now" },
+  "tags": [
+    "atelier",
+    "type",
+    "poste"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "Atelier types poste",
   "uid": "mdt-atelier-types",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

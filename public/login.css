@@ -103,6 +103,55 @@ body.login-body {
   align-content: center;
 }
 
+.login-brand {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  max-width: 360px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(125, 211, 252, 0.4);
+  background:
+    linear-gradient(130deg, rgba(8, 15, 26, 0.72), rgba(10, 20, 34, 0.56)),
+    radial-gradient(circle at 84% 18%, rgba(45, 212, 191, 0.22), transparent 46%);
+  box-shadow:
+    inset 0 0 0 1px rgba(125, 211, 252, 0.14),
+    0 12px 24px rgba(2, 10, 21, 0.3);
+}
+
+.login-brand-logo {
+  display: block;
+  width: 100%;
+  max-width: 92px;
+  height: auto;
+  border-radius: 13px;
+  border: 1px solid rgba(125, 211, 252, 0.34);
+  box-shadow: 0 8px 14px rgba(3, 10, 22, 0.36);
+}
+
+.login-brand-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.login-brand-name {
+  color: #f2fbff;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.login-brand-tag {
+  color: #93d9ea;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
 .login-kicker {
   margin: 0;
   text-transform: uppercase;
@@ -309,5 +358,60 @@ body.login-body {
 
   .toggle-password-btn {
     width: 100%;
+  }
+
+  .login-brand-logo {
+    max-width: 68px;
+  }
+
+  .login-brand {
+    grid-template-columns: 68px minmax(0, 1fr);
+    padding: 8px 9px;
+  }
+
+  .login-brand-name {
+    font-size: 0.76rem;
+  }
+
+  .login-brand-tag {
+    font-size: 0.55rem;
+    letter-spacing: 0.15em;
+  }
+}
+
+/* Modern login brand refinement */
+.login-brand {
+  grid-template-columns: 78px minmax(0, 1fr);
+  width: auto;
+  max-width: none;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.login-brand-logo {
+  max-width: 78px;
+  border: 1px solid rgba(125, 211, 252, 0.4);
+  box-shadow: 0 8px 14px rgba(3, 10, 22, 0.32);
+}
+
+.login-brand-name {
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+}
+
+.login-brand-tag {
+  letter-spacing: 0.18em;
+}
+
+@media (max-width: 520px) {
+  .login-brand {
+    grid-template-columns: 62px minmax(0, 1fr);
+  }
+
+  .login-brand-logo {
+    max-width: 62px;
   }
 }

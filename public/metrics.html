@@ -15,14 +15,20 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/styles.css?v=20260224b" />
+    <link rel="stylesheet" href="/styles.css?v=20260225b" />
   </head>
   <body class="dashboard-page admin-page metrics-page">
     <div class="aura" aria-hidden="true"></div>
     <main class="app app-shell">
       <aside class="left-sidebar" aria-label="Navigation metrics">
         <div class="sidebar-head">
-          <p class="hero-kicker">Ops Analytics</p>
+          <div class="sidebar-brand" aria-label="Identite du site">
+            <img class="sidebar-brand-logo" src="/logo.png?v=20260225b" alt="MMA Automation" />
+            <div class="sidebar-brand-copy">
+              <span class="sidebar-brand-name">MMA Automation</span>
+              <span class="sidebar-brand-tag">Ops Platform</span>
+            </div>
+          </div>
           <h1 class="sidebar-title">Metrics qualite</h1>
           <p class="sidebar-sub">
             Vue analytique des lots et des problemes machines avec un dashboard temps reel.
@@ -113,6 +119,9 @@
             <button class="metrics-dashboard-tab is-active" type="button" data-dashboard="overview">
               Vue globale
             </button>
+            <button class="metrics-dashboard-tab" type="button" data-dashboard="corrections">
+              Corrections
+            </button>
             <button class="metrics-dashboard-tab" type="button" data-dashboard="lots">
               Vue lots
             </button>
@@ -137,6 +146,6 @@
       </section>
     </main>
 
-    <script src="/metrics.js?v=20260224b" defer></script>
+    <script src="/metrics.js?v=20260225c" defer></script>
   </body>
 </html>

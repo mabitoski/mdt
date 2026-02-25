@@ -15,14 +15,20 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/styles.css?v=20260223j" />
+    <link rel="stylesheet" href="/styles.css?v=20260225b" />
   </head>
   <body class="dashboard-page legacy-page" data-view="legacy">
     <div class="aura" aria-hidden="true"></div>
     <main class="app app-shell">
       <aside class="left-sidebar" aria-label="Navigation principale">
         <div class="sidebar-head">
-          <p class="hero-kicker">MDT Live Ops</p>
+          <div class="sidebar-brand" aria-label="Identite du site">
+            <img class="sidebar-brand-logo" src="/logo.png?v=20260225b" alt="MMA Automation" />
+            <div class="sidebar-brand-copy">
+              <span class="sidebar-brand-name">MMA Automation</span>
+              <span class="sidebar-brand-tag">Ops Platform</span>
+            </div>
+          </div>
           <h1 class="sidebar-title">Console imports</h1>
           <p class="sidebar-sub">
             Vue dediee aux rapports importes depuis les historiques CSV, sans melanger la prod courante.
@@ -133,6 +139,7 @@
             <div class="controls-meta">
               <button id="report-zero-btn" type="button">Creer un rapport</button>
               <button id="refresh-btn" type="button">Rafraichir</button>
+              <button id="purge-imports-btn" type="button" hidden>Supprimer imports</button>
               <span id="last-updated">Derniere mise a jour : --</span>
             </div>
           </div>
@@ -349,6 +356,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260223f" defer></script>
+    <script src="/app.js?v=20260225h" defer></script>
   </body>
 </html>

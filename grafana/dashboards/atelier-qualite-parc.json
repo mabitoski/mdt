@@ -35,15 +35,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 1500 },
-              { "color": "red", "value": 2500 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1500
+              },
+              {
+                "color": "red",
+                "value": 2500
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "options": {
         "colorMode": "background_solid",
@@ -51,7 +65,9 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -60,7 +76,10 @@
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC) SELECT COUNT(*)::integer AS value FROM latest;",
@@ -83,15 +102,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 350 },
-              { "color": "red", "value": 700 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 350
+              },
+              {
+                "color": "red",
+                "value": 700
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
       "id": 2,
       "options": {
         "colorMode": "background_solid",
@@ -99,7 +132,9 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -108,7 +143,10 @@
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), machine_incidents AS (SELECT l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.machine_key) SELECT COUNT(*) FILTER (WHERE incidents > 0)::integer AS value FROM machine_incidents;",
@@ -131,15 +169,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 400 },
-              { "color": "red", "value": 900 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 400
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
       "id": 3,
       "options": {
         "colorMode": "background_solid",
@@ -147,7 +199,9 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -156,7 +210,10 @@
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), exploded AS (SELECT lower(COALESCE(e.value,'')) AS status FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE) SELECT COUNT(*) FILTER (WHERE status IN ('nok','timeout','denied','absent'))::integer AS value FROM exploded;",
@@ -180,15 +237,29 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 35 },
-              { "color": "red", "value": 55 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 35
+              },
+              {
+                "color": "red",
+                "value": 55
+              }
             ]
           }
         },
         "overrides": []
       },
-      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
       "id": 4,
       "options": {
         "colorMode": "background_solid",
@@ -196,7 +267,9 @@
         "justifyMode": "center",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
@@ -205,7 +278,10 @@
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), machine_incidents AS (SELECT l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.machine_key) SELECT ROUND(100 * COALESCE(COUNT(*) FILTER (WHERE incidents > 0)::numeric / NULLIF(COUNT(*), 0), 0), 1) AS value FROM machine_incidents;",
@@ -216,7 +292,10 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -225,7 +304,12 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
       "id": 5,
       "options": {
         "orientation": "auto",
@@ -237,7 +321,10 @@
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), exploded AS (SELECT CASE e.key WHEN 'diskReadTest' THEN 'Lecture disque' WHEN 'diskWriteTest' THEN 'Ecriture disque' WHEN 'ramTest' THEN 'RAM' WHEN 'cpuTest' THEN 'CPU' WHEN 'gpuTest' THEN 'GPU test' WHEN 'cpuStress' THEN 'CPU stress' WHEN 'gpuStress' THEN 'GPU stress' WHEN 'networkPing' THEN 'Ping' WHEN 'fsCheck' THEN 'Check disque' WHEN 'gpu' THEN 'GPU' WHEN 'usb' THEN 'USB' WHEN 'keyboard' THEN 'Clavier' WHEN 'camera' THEN 'Camera' WHEN 'pad' THEN 'Pave tactile' WHEN 'badgeReader' THEN 'Lecteur badge' WHEN 'biosBattery' THEN 'Pile BIOS' WHEN 'biosLanguage' THEN 'Langue BIOS' WHEN 'biosPassword' THEN 'Mot de passe BIOS' WHEN 'wifiStandard' THEN 'Norme Wi-Fi' ELSE e.key END AS metric, lower(COALESCE(e.value,'')) AS status FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE), agg AS (SELECT metric, COUNT(*) FILTER (WHERE status IN ('nok','timeout','denied','absent'))::numeric AS incident_count, COUNT(*) FILTER (WHERE status NOT IN ('not_tested','unknown',''))::numeric AS tested_count FROM exploded GROUP BY metric) SELECT metric, ROUND(100 * COALESCE(incident_count / NULLIF(tested_count, 0), 0), 1) AS value FROM agg WHERE tested_count > 0 ORDER BY value DESC;",
@@ -248,7 +335,10 @@
       "type": "barchart"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -257,7 +347,12 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 5 },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
       "id": 6,
       "options": {
         "legend": {
@@ -267,7 +362,9 @@
         },
         "pieType": "donut",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": true
         },
@@ -279,7 +376,10 @@
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), exploded AS (SELECT CASE e.key WHEN 'keyboard' THEN 'Clavier' WHEN 'camera' THEN 'Camera' WHEN 'usb' THEN 'USB' WHEN 'pad' THEN 'Pave tactile' WHEN 'badgeReader' THEN 'Lecteur badge' WHEN 'biosBattery' THEN 'Pile BIOS' WHEN 'biosLanguage' THEN 'Langue BIOS' WHEN 'biosPassword' THEN 'Mot de passe BIOS' WHEN 'wifiStandard' THEN 'Norme Wi-Fi' ELSE e.key END AS metric, lower(COALESCE(e.value,'')) AS status FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE) SELECT metric, COUNT(*) FILTER (WHERE status IN ('nok','timeout','denied','absent'))::integer AS value FROM exploded GROUP BY metric HAVING COUNT(*) FILTER (WHERE status IN ('nok','timeout','denied','absent')) > 0 ORDER BY value DESC LIMIT 12;",
@@ -290,7 +390,10 @@
       "type": "piechart"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -299,7 +402,12 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 5 },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
       "id": 7,
       "options": {
         "orientation": "auto",
@@ -311,7 +419,10 @@
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, COALESCE(r.category, 'unknown') AS category, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT category, l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY category, l.machine_key), agg AS (SELECT CASE category WHEN 'laptop' THEN 'Portable' WHEN 'desktop' THEN 'Tour' ELSE 'Inconnu' END AS metric, COUNT(*)::integer AS postes, COUNT(*) FILTER (WHERE incidents > 0)::integer AS postes_incident FROM counted GROUP BY category) SELECT metric, ROUND(100 * COALESCE(postes_incident::numeric / NULLIF(postes, 0), 0), 1) AS value FROM agg ORDER BY value DESC;",
@@ -322,7 +433,10 @@
       "type": "barchart"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -331,21 +445,31 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 10, "w": 14, "x": 0, "y": 14 },
+      "gridPos": {
+        "h": 10,
+        "w": 14,
+        "x": 0,
+        "y": 14
+      },
       "id": 8,
       "options": {
         "cellHeight": "sm",
         "showHeader": true,
         "footer": {
           "show": false,
-          "reducer": ["sum"],
+          "reducer": [
+            "sum"
+          ],
           "fields": ""
         }
       },
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, COALESCE(NULLIF(r.hostname,''), r.machine_key) AS poste, COALESCE(NULLIF(r.serial_number,''), '--') AS serie, COALESCE(NULLIF(r.technician,''), '--') AS technicien, COALESCE(l.supplier || ' #' || l.lot_number, 'Sans lot') AS lot, r.last_seen, r.components FROM reports r LEFT JOIN lots l ON l.id = r.lot_id WHERE COALESCE(r.machine_key,'') <> '' AND $__timeFilter(r.last_seen) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT poste, serie, technicien, lot, last_seen, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('not_tested','unknown',''))::integer AS non_testes FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY poste, serie, technicien, lot, last_seen) SELECT poste AS \"Poste\", serie AS \"Serie\", technicien AS \"Technicien\", lot AS \"Lot\", incidents AS \"Incidents\", non_testes AS \"Non testes\", last_seen AS \"Derniere remontee\" FROM counted WHERE incidents > 0 ORDER BY incidents DESC, \"Derniere remontee\" DESC LIMIT 30;",
@@ -356,7 +480,10 @@
       "type": "table"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -365,7 +492,10 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Progression %" },
+            "matcher": {
+              "id": "byName",
+              "options": "Progression %"
+            },
             "properties": [
               {
                 "id": "unit",
@@ -375,21 +505,31 @@
           }
         ]
       },
-      "gridPos": { "h": 10, "w": 10, "x": 14, "y": 14 },
+      "gridPos": {
+        "h": 10,
+        "w": 10,
+        "x": 14,
+        "y": 14
+      },
       "id": 9,
       "options": {
         "cellHeight": "sm",
         "showHeader": true,
         "footer": {
           "show": false,
-          "reducer": ["sum"],
+          "reducer": [
+            "sum"
+          ],
           "fields": ""
         }
       },
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "table",
           "rawQuery": true,
           "rawSql": "SELECT supplier AS \"Fournisseur\", lot_number AS \"Lot\", target_count AS \"Objectif\", produced_count AS \"Produits\", GREATEST(target_count - produced_count, 0) AS \"Restants\", ROUND(100 * COALESCE(produced_count::numeric / NULLIF(target_count, 0), 0), 1) AS \"Progression %\", CASE WHEN is_paused THEN 'Pause' WHEN produced_count >= target_count THEN 'Termine' ELSE 'Actif' END AS \"Statut\", priority AS \"Priorite\" FROM lots ORDER BY is_paused ASC, (produced_count >= target_count) ASC, priority ASC, created_at ASC;",
@@ -400,7 +540,10 @@
       "type": "table"
     },
     {
-      "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -416,7 +559,12 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
       "id": 10,
       "options": {
         "legend": {
@@ -432,7 +580,10 @@
       "pluginVersion": "10.4.5",
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "mdt-postgres" },
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
           "format": "time_series",
           "rawQuery": true,
           "rawSql": "WITH daily_latest AS (SELECT DISTINCT ON (r.machine_key, date_trunc('day', r.last_seen)) date_trunc('day', r.last_seen) AS day, r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND r.last_seen >= NOW() - INTERVAL '30 days' ORDER BY r.machine_key, date_trunc('day', r.last_seen), r.last_seen DESC, r.created_at DESC, r.id DESC) SELECT day AS \"time\", COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM daily_latest d LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(d.components)) AS e(key, value) ON TRUE GROUP BY day ORDER BY day;",
@@ -441,12 +592,433 @@
       ],
       "title": "Incidents par jour (30 jours)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 20
+              },
+              {
+                "color": "green",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 32
+      },
+      "id": 101,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*)::integer AS value FROM report_component_transitions t WHERE t.is_corrected AND $__timeFilter(t.last_seen);",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidents corriges (periode)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 200
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 32
+      },
+      "id": 102,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*)::integer AS value FROM report_component_transitions t WHERE t.is_regressed AND $__timeFilter(t.last_seen);",
+          "refId": "A"
+        }
+      ],
+      "title": "Regressions (periode)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 200
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 32
+      },
+      "id": 103,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*)::integer AS value FROM report_component_manual_changes m WHERE $__timeFilter(m.occurred_at);",
+          "refId": "A"
+        }
+      ],
+      "title": "Modifs manuelles (periode)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3
+              },
+              {
+                "color": "green",
+                "value": 8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 32
+      },
+      "id": 104,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(DISTINCT t.component_key)::integer AS value FROM report_component_transitions t WHERE t.is_corrected AND $__timeFilter(t.last_seen);",
+          "refId": "A"
+        }
+      ],
+      "title": "Composants corriges distincts",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "displayMode": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "id": 105,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        }
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT t.component_label AS \"Composant\", COUNT(*)::integer AS \"Incidents corriges\" FROM report_component_transitions t WHERE t.is_corrected AND $__timeFilter(t.last_seen) GROUP BY t.component_label ORDER BY \"Incidents corriges\" DESC LIMIT 30;",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidents corriges par composant",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "id": 106,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('day', t.last_seen) AS \"time\", COUNT(*)::integer AS corriges FROM report_component_transitions t WHERE t.is_corrected AND t.last_seen >= NOW() - INTERVAL '30 days' GROUP BY 1 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Corrections par jour (30 jours)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "displayMode": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 107,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        }
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT m.occurred_at AS \"Date\", COALESCE(NULLIF(m.machine_key,''), '--') AS \"Machine\", m.component_label AS \"Composant\", UPPER(COALESCE(m.from_status_key,'--')) AS \"Avant\", UPPER(COALESCE(m.to_status_key,'--')) AS \"Apres\", CASE m.change_type WHEN 'corrected' THEN 'Corrige' WHEN 'regressed' THEN 'Regression' ELSE 'Mise a jour' END AS \"Type\", COALESCE(NULLIF(m.actor,''), '--') AS \"Acteur\", COALESCE(NULLIF(m.source,''), '--') AS \"Source\" FROM report_component_manual_changes m WHERE $__timeFilter(m.occurred_at) ORDER BY m.occurred_at DESC LIMIT 120;",
+          "refId": "A"
+        }
+      ],
+      "title": "Trace modifications manuelles recentes",
+      "type": "table"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "style": "light",
-  "tags": ["atelier", "qualite", "lots", "ops"],
+  "tags": [
+    "atelier",
+    "qualite",
+    "lots",
+    "ops"
+  ],
   "templating": {
     "list": []
   },
@@ -458,6 +1030,6 @@
   "timezone": "browser",
   "title": "Atelier qualite parc",
   "uid": "mdt-atelier-overview",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

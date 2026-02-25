@@ -21,6 +21,7 @@ app.disable('x-powered-by');
 
 const PORT = Number.parseInt(process.env.PORT || '3000', 10);
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const BRAND_LOGO_PATH = path.join(PUBLIC_DIR, 'logo.png');
 const JSON_LIMIT = process.env.JSON_LIMIT || '256kb';
 const INGEST_RATE_LIMIT = Number.parseInt(process.env.INGEST_RATE_LIMIT || '180', 10);
 const SESSION_SECRET =
@@ -69,10 +70,6 @@ const OBJECT_STORAGE_SECRET_KEY =
 const OBJECT_STORAGE_PREFIX =
   process.env.OBJECT_STORAGE_PREFIX || process.env.MDT_OBJECT_STORAGE_PREFIX || 'run';
 const OBJECT_STORAGE_ALIAS = process.env.OBJECT_STORAGE_ALIAS || 'alcyone';
-const OBJECT_STORAGE_CONSOLE_URL =
-  process.env.OBJECT_STORAGE_CONSOLE_URL || process.env.MDT_OBJECT_STORAGE_CONSOLE_URL || '';
-const OBJECT_STORAGE_BROWSER_PATH =
-  process.env.OBJECT_STORAGE_BROWSER_PATH || '/browser';
 const OBJECT_STORAGE_RENAME_ON_TAG =
   ['1', 'true', 'yes', 'on'].includes((process.env.OBJECT_STORAGE_RENAME_ON_TAG || '').toLowerCase());
 const DEFAULT_LDAP_SEARCH_FILTER = '(sAMAccountName={{username}})';
@@ -247,59 +244,6 @@ async function renameObjectStoragePrefix(oldPrefix, newPrefix) {
       console.warn('Failed to cleanup mc config dir', cleanupError);
     }
   }
-}
-
-function buildAlcyoneConsoleUrl({
-  reportId,
-  tagName,
-  serialNumber,
-  macAddress,
-  machineKey,
-  rawDestination
-}) {
-  if (!OBJECT_STORAGE_CONSOLE_URL || !reportId) {
-    return '';
-  }
-  const base = String(OBJECT_STORAGE_CONSOLE_URL).replace(/\/+$/, '');
-  const browserPath = `/${String(OBJECT_STORAGE_BROWSER_PATH || '/browser').replace(/^\/+/, '')}`;
-  let bucket = OBJECT_STORAGE_BUCKET;
-  let pathParts = [];
-
-  if (rawDestination) {
-    const cleaned = String(rawDestination).replace(/^\/+/, '');
-    const parts = cleaned.split('/').filter(Boolean);
-    if (parts.length >= 3) {
-      let start = 0;
-      if (parts[0] === OBJECT_STORAGE_ALIAS) {
-        start = 1;
-      }
-      if (parts[start]) {
-        bucket = parts[start];
-        pathParts = parts.slice(start + 1);
-      }
-    }
-  }
-
-  if (!pathParts.length) {
-    const tagSegment = normalizeObjectStorageSegment(tagName || DEFAULT_REPORT_TAG || 'en-cours');
-    const keyRaw =
-      buildMachineKey(serialNumber, macAddress, null) ||
-      (machineKey ? String(machineKey) : 'unknown');
-    const keySegment = normalizeObjectStorageSegment(keyRaw || 'unknown');
-    pathParts = [
-      normalizeObjectStorageSegment(OBJECT_STORAGE_PREFIX || 'run'),
-      tagSegment,
-      keySegment,
-      reportId
-    ];
-  }
-
-  const parts = [
-    browserPath,
-    encodeURIComponent(bucket),
-    ...pathParts.filter(Boolean).map((segment) => encodeURIComponent(segment))
-  ];
-  return `${base}${parts.join('/')}`;
 }
 
 async function getActiveTag(client) {
@@ -1180,6 +1124,80 @@ async function initDb() {
     'CREATE INDEX IF NOT EXISTS idx_patchnote_views_user ON patchnote_views(username, user_type)'
   );
 
+  await pool.query(`
+    CREATE OR REPLACE VIEW report_component_transitions AS
+    WITH exploded AS (
+      SELECT
+        reports.id AS report_id,
+        reports.machine_key,
+        reports.last_seen,
+        reports.created_at,
+        COALESCE(reports.category, 'unknown') AS category,
+        reports.lot_id,
+        COALESCE(NULLIF(reports.technician, ''), '--') AS technician,
+        e.key AS component_key,
+        lower(NULLIF(btrim(COALESCE(e.value, '')), '')) AS status_key
+      FROM reports
+      LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(reports.components)) AS e(key, value) ON TRUE
+      WHERE COALESCE(reports.machine_key, '') <> ''
+        AND e.key IS NOT NULL
+    ),
+    ordered AS (
+      SELECT
+        exploded.*,
+        LAG(exploded.status_key) OVER (
+          PARTITION BY exploded.machine_key, exploded.component_key
+          ORDER BY exploded.last_seen, exploded.created_at, exploded.report_id
+        ) AS previous_status_key
+      FROM exploded
+    )
+    SELECT
+      ordered.report_id,
+      ordered.machine_key,
+      ordered.last_seen,
+      ordered.created_at,
+      ordered.category,
+      ordered.lot_id,
+      ordered.technician,
+      ordered.component_key,
+      CASE ordered.component_key
+        WHEN 'diskReadTest' THEN 'Lecture disque'
+        WHEN 'diskWriteTest' THEN 'Ecriture disque'
+        WHEN 'ramTest' THEN 'RAM (WinSAT)'
+        WHEN 'cpuTest' THEN 'CPU (WinSAT)'
+        WHEN 'gpuTest' THEN 'GPU (WinSAT)'
+        WHEN 'cpuStress' THEN 'CPU (stress)'
+        WHEN 'gpuStress' THEN 'GPU (stress)'
+        WHEN 'networkPing' THEN 'Ping'
+        WHEN 'fsCheck' THEN 'Check disque'
+        WHEN 'gpu' THEN 'GPU'
+        WHEN 'usb' THEN 'Ports USB'
+        WHEN 'keyboard' THEN 'Clavier'
+        WHEN 'camera' THEN 'Camera'
+        WHEN 'pad' THEN 'Pave tactile'
+        WHEN 'badgeReader' THEN 'Lecteur badge'
+        WHEN 'biosBattery' THEN 'Pile BIOS'
+        WHEN 'biosLanguage' THEN 'Langue BIOS'
+        WHEN 'biosPassword' THEN 'Mot de passe BIOS'
+        WHEN 'wifiStandard' THEN 'Norme Wi-Fi'
+        ELSE ordered.component_key
+      END AS component_label,
+      ordered.previous_status_key,
+      ordered.status_key AS current_status_key,
+      (ordered.previous_status_key IN ('nok', 'timeout', 'denied', 'absent')) AS was_incident,
+      (ordered.status_key IN ('nok', 'timeout', 'denied', 'absent')) AS is_incident,
+      (
+        ordered.previous_status_key IN ('nok', 'timeout', 'denied', 'absent')
+        AND ordered.status_key = 'ok'
+      ) AS is_corrected,
+      (
+        ordered.previous_status_key = 'ok'
+        AND ordered.status_key IN ('nok', 'timeout', 'denied', 'absent')
+      ) AS is_regressed
+    FROM ordered
+    WHERE ordered.previous_status_key IS NOT NULL;
+  `);
+
   // Keep counters resilient even if old data existed before the lot feature.
   await pool.query(`
     UPDATE lots
@@ -1328,6 +1346,270 @@ async function initDb() {
       CREATE TRIGGER audit_log_reports
       AFTER INSERT OR UPDATE OR DELETE ON reports
       FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
+    `);
+    await pool.query(`
+      CREATE OR REPLACE VIEW report_component_manual_changes AS
+      WITH raw_logs AS (
+        SELECT
+          audit_log.id AS log_id,
+          audit_log.occurred_at,
+          COALESCE(NULLIF(audit_log.actor, ''), 'systeme') AS actor,
+          audit_log.actor_type,
+          audit_log.actor_ip,
+          audit_log.request_id,
+          audit_log.source,
+          COALESCE(
+            NULLIF(audit_log.machine_key, ''),
+            NULLIF(audit_log.new_data ->> 'machine_key', ''),
+            NULLIF(audit_log.old_data ->> 'machine_key', '')
+          ) AS machine_key,
+          COALESCE(
+            NULLIF(audit_log.row_id, ''),
+            NULLIF(audit_log.new_data ->> 'id', ''),
+            NULLIF(audit_log.old_data ->> 'id', '')
+          ) AS report_id,
+          safe_jsonb(audit_log.old_data ->> 'components') AS old_components,
+          safe_jsonb(audit_log.new_data ->> 'components') AS new_components
+        FROM audit_log
+        WHERE audit_log.table_name = 'reports'
+          AND audit_log.action = 'UPDATE'
+          AND audit_log.changed_fields @> ARRAY['components']::text[]
+          AND COALESCE(NULLIF(audit_log.actor, ''), '') <> ''
+      ),
+      component_changes AS (
+        SELECT
+          raw_logs.*,
+          keyset.key AS component_key,
+          lower(NULLIF(btrim(COALESCE(raw_logs.old_components ->> keyset.key, '')), '')) AS from_status_key,
+          lower(NULLIF(btrim(COALESCE(raw_logs.new_components ->> keyset.key, '')), '')) AS to_status_key
+        FROM raw_logs
+        LEFT JOIN LATERAL (
+          SELECT key
+          FROM (
+            SELECT jsonb_object_keys(COALESCE(raw_logs.old_components, '{}'::jsonb)) AS key
+            UNION
+            SELECT jsonb_object_keys(COALESCE(raw_logs.new_components, '{}'::jsonb)) AS key
+          ) keys
+        ) AS keyset ON TRUE
+      )
+      SELECT
+        component_changes.log_id,
+        component_changes.occurred_at,
+        component_changes.actor,
+        component_changes.actor_type,
+        component_changes.actor_ip,
+        component_changes.request_id,
+        component_changes.source,
+        component_changes.machine_key,
+        component_changes.report_id,
+        component_changes.component_key,
+        CASE component_changes.component_key
+          WHEN 'diskReadTest' THEN 'Lecture disque'
+          WHEN 'diskWriteTest' THEN 'Ecriture disque'
+          WHEN 'ramTest' THEN 'RAM (WinSAT)'
+          WHEN 'cpuTest' THEN 'CPU (WinSAT)'
+          WHEN 'gpuTest' THEN 'GPU (WinSAT)'
+          WHEN 'cpuStress' THEN 'CPU (stress)'
+          WHEN 'gpuStress' THEN 'GPU (stress)'
+          WHEN 'networkPing' THEN 'Ping'
+          WHEN 'fsCheck' THEN 'Check disque'
+          WHEN 'gpu' THEN 'GPU'
+          WHEN 'usb' THEN 'Ports USB'
+          WHEN 'keyboard' THEN 'Clavier'
+          WHEN 'camera' THEN 'Camera'
+          WHEN 'pad' THEN 'Pave tactile'
+          WHEN 'badgeReader' THEN 'Lecteur badge'
+          WHEN 'biosBattery' THEN 'Pile BIOS'
+          WHEN 'biosLanguage' THEN 'Langue BIOS'
+          WHEN 'biosPassword' THEN 'Mot de passe BIOS'
+          WHEN 'wifiStandard' THEN 'Norme Wi-Fi'
+          ELSE component_changes.component_key
+        END AS component_label,
+        component_changes.from_status_key,
+        component_changes.to_status_key,
+        (component_changes.from_status_key IN ('nok', 'timeout', 'denied', 'absent')) AS from_incident,
+        (component_changes.to_status_key IN ('nok', 'timeout', 'denied', 'absent')) AS to_incident,
+        (
+          component_changes.from_status_key IN ('nok', 'timeout', 'denied', 'absent')
+          AND component_changes.to_status_key = 'ok'
+        ) AS is_corrected,
+        (
+          component_changes.from_status_key = 'ok'
+          AND component_changes.to_status_key IN ('nok', 'timeout', 'denied', 'absent')
+        ) AS is_regressed,
+        CASE
+          WHEN component_changes.from_status_key IN ('nok', 'timeout', 'denied', 'absent')
+            AND component_changes.to_status_key = 'ok'
+          THEN 'corrected'
+          WHEN component_changes.from_status_key = 'ok'
+            AND component_changes.to_status_key IN ('nok', 'timeout', 'denied', 'absent')
+          THEN 'regressed'
+          ELSE 'updated'
+        END AS change_type
+      FROM component_changes
+      WHERE component_changes.component_key IS NOT NULL
+        AND component_changes.component_key NOT IN ('diskSmart', 'networkTest', 'memDiag', 'thermal')
+        AND component_changes.from_status_key IS DISTINCT FROM component_changes.to_status_key;
+    `);
+    await pool.query(`
+      CREATE OR REPLACE VIEW report_component_regressions AS
+      WITH manual_regressions AS (
+        SELECT
+          m.log_id::text AS event_id,
+          m.occurred_at AS event_time,
+          m.report_id::text AS report_id,
+          m.machine_key,
+          m.component_key,
+          m.component_label,
+          m.from_status_key AS previous_status_key,
+          m.to_status_key AS current_status_key,
+          COALESCE(r.category, 'unknown') AS category,
+          r.lot_id,
+          COALESCE(NULLIF(r.technician, ''), '--') AS technician,
+          m.actor,
+          m.actor_type,
+          m.actor_ip,
+          m.source,
+          'manual'::text AS regression_origin
+        FROM report_component_manual_changes m
+        LEFT JOIN reports r ON r.id::text = m.report_id
+        WHERE m.is_regressed
+          AND COALESCE(m.source, '') !~* '^POST /api/ingest'
+      ),
+      script_regressions_from_logs AS (
+        SELECT
+          m.log_id::text AS event_id,
+          m.occurred_at AS event_time,
+          m.report_id::text AS report_id,
+          m.machine_key,
+          m.component_key,
+          m.component_label,
+          m.from_status_key AS previous_status_key,
+          m.to_status_key AS current_status_key,
+          COALESCE(r.category, 'unknown') AS category,
+          r.lot_id,
+          COALESCE(NULLIF(r.technician, ''), '--') AS technician,
+          COALESCE(NULLIF(m.actor, ''), NULLIF(r.technician, ''), 'systeme') AS actor,
+          COALESCE(NULLIF(m.actor_type, ''), 'script') AS actor_type,
+          m.actor_ip,
+          COALESCE(NULLIF(m.source, ''), 'POST /api/ingest') AS source,
+          'script'::text AS regression_origin
+        FROM report_component_manual_changes m
+        LEFT JOIN reports r ON r.id::text = m.report_id
+        WHERE m.is_regressed
+          AND COALESCE(m.source, '') ~* '^POST /api/ingest'
+      ),
+      script_regressions_from_transitions AS (
+        SELECT
+          t.report_id::text AS event_id,
+          t.last_seen AS event_time,
+          t.report_id::text AS report_id,
+          t.machine_key,
+          t.component_key,
+          t.component_label,
+          t.previous_status_key,
+          t.current_status_key,
+          t.category,
+          t.lot_id,
+          COALESCE(NULLIF(t.technician, ''), '--') AS technician,
+          COALESCE(NULLIF(insert_log.actor, ''), NULLIF(t.technician, ''), 'systeme') AS actor,
+          COALESCE(NULLIF(insert_log.actor_type, ''), 'script') AS actor_type,
+          NULLIF(insert_log.actor_ip, '') AS actor_ip,
+          COALESCE(NULLIF(insert_log.source, ''), 'POST /api/ingest') AS source,
+          'script'::text AS regression_origin
+        FROM report_component_transitions t
+        LEFT JOIN LATERAL (
+          SELECT
+            audit_log.actor,
+            audit_log.actor_type,
+            audit_log.actor_ip,
+            audit_log.source
+          FROM audit_log
+          WHERE audit_log.table_name = 'reports'
+            AND audit_log.action = 'INSERT'
+            AND (
+              audit_log.row_id = t.report_id::text
+              OR audit_log.new_data ->> 'id' = t.report_id::text
+            )
+          ORDER BY audit_log.occurred_at DESC
+          LIMIT 1
+        ) insert_log ON TRUE
+        LEFT JOIN report_component_manual_changes manual
+          ON manual.report_id = t.report_id::text
+          AND manual.component_key = t.component_key
+          AND manual.is_regressed
+        WHERE t.is_regressed
+          AND manual.log_id IS NULL
+      )
+      SELECT
+        regressions.*,
+        CASE
+          WHEN COALESCE(regressions.source, '') ~* '^POST /api/ingest'
+          THEN 'Script MDT'
+          WHEN COALESCE(regressions.source, '') ~* '^PUT /api/reports/.+/component$'
+          THEN 'Edition manuelle composant'
+          WHEN COALESCE(regressions.source, '') ~* '^PUT /api/machines/.+/(pad|usb)$'
+          THEN 'Edition manuelle rapide'
+          WHEN COALESCE(regressions.source, '') ~* '^POST /api/reports/report-zero'
+          THEN 'Rapport zero manuel'
+          WHEN COALESCE(regressions.source, '') ~* '^POST /api/machines/.+/report-zero'
+          THEN 'Rapport zero clone'
+          ELSE COALESCE(NULLIF(regressions.source, ''), 'inconnu')
+        END AS source_group
+      FROM (
+        SELECT * FROM manual_regressions
+        UNION ALL
+        SELECT * FROM script_regressions_from_logs
+        UNION ALL
+        SELECT * FROM script_regressions_from_transitions
+      ) regressions;
+    `);
+  } else {
+    await pool.query(`
+      CREATE OR REPLACE VIEW report_component_manual_changes AS
+      SELECT
+        NULL::bigint AS log_id,
+        NULL::timestamptz AS occurred_at,
+        NULL::text AS actor,
+        NULL::text AS actor_type,
+        NULL::text AS actor_ip,
+        NULL::text AS request_id,
+        NULL::text AS source,
+        NULL::text AS machine_key,
+        NULL::text AS report_id,
+        NULL::text AS component_key,
+        NULL::text AS component_label,
+        NULL::text AS from_status_key,
+        NULL::text AS to_status_key,
+        NULL::boolean AS from_incident,
+        NULL::boolean AS to_incident,
+        NULL::boolean AS is_corrected,
+        NULL::boolean AS is_regressed,
+        NULL::text AS change_type
+      WHERE false;
+    `);
+    await pool.query(`
+      CREATE OR REPLACE VIEW report_component_regressions AS
+      SELECT
+        t.report_id::text AS event_id,
+        t.last_seen AS event_time,
+        t.report_id::text AS report_id,
+        t.machine_key,
+        t.component_key,
+        t.component_label,
+        t.previous_status_key,
+        t.current_status_key,
+        t.category,
+        t.lot_id,
+        COALESCE(NULLIF(t.technician, ''), '--') AS technician,
+        COALESCE(NULLIF(t.technician, ''), 'systeme') AS actor,
+        'script'::text AS actor_type,
+        NULL::text AS actor_ip,
+        'POST /api/ingest'::text AS source,
+        'script'::text AS regression_origin,
+        'Script MDT'::text AS source_group
+      FROM report_component_transitions t
+      WHERE t.is_regressed;
     `);
   }
 
@@ -1649,12 +1931,14 @@ const STATUS_LABELS = {
   fr: 'FR',
   en: 'EN',
   absent: 'Absent',
-  not_tested: 'Non teste',
+  not_tested: 'Non testé',
   denied: 'Refuse',
   timeout: 'Timeout',
   scheduled: 'Planifie',
   unknown: '--'
 };
+const INCIDENT_STATUS_KEYS = new Set(['nok', 'timeout', 'denied', 'absent']);
+const RESOLVED_STATUS_KEYS = new Set(['ok']);
 const STATUS_STYLES = {
   ok: { background: '#DDF3E6', color: '#1B4C38' },
   nok: { background: '#F9D9D3', color: '#8D1F12' },
@@ -3549,7 +3833,7 @@ function sanitizeComponents(value) {
     }
     sanitized[cleanKey] = cleanValue;
   }
-  return Object.keys(sanitized).length > 0 ? withManualComponentDefaults(sanitized) : null;
+  return Object.keys(sanitized).length > 0 ? sanitized : null;
 }
 
 function mergeComponentSets(base, override) {
@@ -3655,7 +3939,7 @@ function buildDerivedComponents(body, sources) {
     addStatus('thermal', body.thermal.status);
   }
 
-  return withManualComponentDefaults(Object.keys(derived).length > 0 ? derived : null);
+  return Object.keys(derived).length > 0 ? derived : null;
 }
 
 function safeJsonStringify(value, maxBytes) {
@@ -3812,6 +4096,132 @@ function summarizeComponents(components) {
     summary.total += 1;
   });
   return summary;
+}
+
+function componentLabelFromKey(componentKey) {
+  if (!componentKey) {
+    return '--';
+  }
+  return COMPONENT_LABELS[componentKey] || componentKey;
+}
+
+function normalizeComponentStatusForAudit(componentKey, value) {
+  if (componentKey === 'biosPassword') {
+    return normalizeBiosPasswordStatus(value);
+  }
+  if (componentKey === 'biosLanguage') {
+    return normalizeBiosLanguageStatus(value);
+  }
+  if (componentKey === 'wifiStandard') {
+    return normalizeWifiStandardStatus(value);
+  }
+  return normalizeStatusKey(value);
+}
+
+function parseComponentsSnapshotFromAudit(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return {};
+  }
+  const raw = data.components;
+  if (!raw) {
+    return {};
+  }
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (error) {
+      return {};
+    }
+    return {};
+  }
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw;
+  }
+  return {};
+}
+
+function classifyComponentTransition(fromStatusKey, toStatusKey) {
+  const fromIncident = Boolean(fromStatusKey && INCIDENT_STATUS_KEYS.has(fromStatusKey));
+  const toIncident = Boolean(toStatusKey && INCIDENT_STATUS_KEYS.has(toStatusKey));
+  const corrected = fromIncident && Boolean(toStatusKey && RESOLVED_STATUS_KEYS.has(toStatusKey));
+  const regressed = Boolean(fromStatusKey && RESOLVED_STATUS_KEYS.has(fromStatusKey)) && toIncident;
+  if (corrected) {
+    return {
+      fromIncident,
+      toIncident,
+      corrected: true,
+      regressed: false,
+      changeType: 'corrected'
+    };
+  }
+  if (regressed) {
+    return {
+      fromIncident,
+      toIncident,
+      corrected: false,
+      regressed: true,
+      changeType: 'regressed'
+    };
+  }
+  return {
+    fromIncident,
+    toIncident,
+    corrected: false,
+    regressed: false,
+    changeType: 'updated'
+  };
+}
+
+function extractComponentChangesFromAudit(oldData, newData) {
+  const oldComponents = parseComponentsSnapshotFromAudit(oldData);
+  const newComponents = parseComponentsSnapshotFromAudit(newData);
+  const keys = new Set([
+    ...Object.keys(oldComponents || {}),
+    ...Object.keys(newComponents || {})
+  ]);
+  if (!keys.size) {
+    return [];
+  }
+
+  const rows = [];
+  keys.forEach((componentKey) => {
+    if (!componentKey || HIDDEN_COMPONENTS.has(componentKey)) {
+      return;
+    }
+    const oldRaw = Object.prototype.hasOwnProperty.call(oldComponents, componentKey)
+      ? oldComponents[componentKey]
+      : null;
+    const newRaw = Object.prototype.hasOwnProperty.call(newComponents, componentKey)
+      ? newComponents[componentKey]
+      : null;
+    const fromStatusKey = normalizeComponentStatusForAudit(componentKey, oldRaw);
+    const toStatusKey = normalizeComponentStatusForAudit(componentKey, newRaw);
+
+    if (fromStatusKey === toStatusKey) {
+      return;
+    }
+
+    const transition = classifyComponentTransition(fromStatusKey, toStatusKey);
+    rows.push({
+      componentKey,
+      componentLabel: componentLabelFromKey(componentKey),
+      fromStatus: fromStatusKey || null,
+      toStatus: toStatusKey || null,
+      fromLabel: fromStatusKey && STATUS_LABELS[fromStatusKey] ? STATUS_LABELS[fromStatusKey] : '--',
+      toLabel: toStatusKey && STATUS_LABELS[toStatusKey] ? STATUS_LABELS[toStatusKey] : '--',
+      fromIncident: transition.fromIncident,
+      toIncident: transition.toIncident,
+      corrected: transition.corrected,
+      regressed: transition.regressed,
+      changeType: transition.changeType
+    });
+  });
+
+  rows.sort((a, b) => a.componentLabel.localeCompare(b.componentLabel, 'fr'));
+  return rows;
 }
 
 function formatDateTime(value) {
@@ -3992,6 +4402,78 @@ function formatBatteryHealth(value) {
     return '--';
   }
   return `${Math.round(value)}%`;
+}
+
+function normalizeWifiStandardCode(value) {
+  if (value == null) {
+    return null;
+  }
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+  const cleaned = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const match = cleaned.match(/(?:802(?:[.\s-])?)?11\s*(be|ax|ac|n|g|a|b)\b/i);
+  if (match && match[1]) {
+    return `802.11${match[1].toLowerCase()}`;
+  }
+  if (/\bwi-?fi\s*7\b/.test(cleaned)) return '802.11be';
+  if (/\bwi-?fi\s*6(?:e)?\b/.test(cleaned)) return '802.11ax';
+  if (/\bwi-?fi\s*5\b/.test(cleaned)) return '802.11ac';
+  if (/\bwi-?fi\s*4\b/.test(cleaned)) return '802.11n';
+  if (/\bwi-?fi\s*3\b/.test(cleaned)) return '802.11g';
+  if (/\bwi-?fi\s*2\b/.test(cleaned)) return '802.11a';
+  if (/\bwi-?fi\s*1\b/.test(cleaned)) return '802.11b';
+  return null;
+}
+
+function pickBestWifiStandard(standards) {
+  if (!Array.isArray(standards) || standards.length === 0) {
+    return null;
+  }
+  const rank = {
+    '802.11be': 7,
+    '802.11ax': 6,
+    '802.11ac': 5,
+    '802.11n': 4,
+    '802.11g': 3,
+    '802.11a': 2,
+    '802.11b': 1
+  };
+  let best = null;
+  let bestRank = 0;
+  for (const standard of new Set(standards)) {
+    const currentRank = rank[standard] || 0;
+    if (currentRank > bestRank) {
+      best = standard;
+      bestRank = currentRank;
+    }
+  }
+  return best;
+}
+
+function buildPdfWifiStandardCode(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const payloadWifi =
+    payload.wifi && typeof payload.wifi === 'object' && !Array.isArray(payload.wifi)
+      ? payload.wifi
+      : null;
+  const candidates = [];
+  if (payloadWifi && Array.isArray(payloadWifi.standards)) {
+    candidates.push(...payloadWifi.standards);
+  }
+  if (payloadWifi && Object.prototype.hasOwnProperty.call(payloadWifi, 'standard')) {
+    candidates.push(payloadWifi.standard);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, 'wifiStandard')) {
+    candidates.push(payload.wifiStandard);
+  }
+  const normalizedStandards = candidates
+    .map((value) => normalizeWifiStandardCode(value))
+    .filter(Boolean);
+  return pickBestWifiStandard(normalizedStandards);
 }
 
 function formatMetric(value, unit) {
@@ -4317,6 +4799,7 @@ function drawPdfCard(doc, x, y, width, height, title, options = {}) {
   const radius = Number.isFinite(options.radius) ? options.radius : 12;
   const background = options.background || '#FFFFFF';
   const border = options.border || '#D7E3F0';
+  const variant = options.variant || 'card';
   const titleColor = options.titleColor || '#5D7289';
   const titleSize = Number.isFinite(options.titleSize) ? options.titleSize : 7;
   const paddingX = Number.isFinite(options.paddingX) ? options.paddingX : 14;
@@ -4325,7 +4808,20 @@ function drawPdfCard(doc, x, y, width, height, title, options = {}) {
   const bodyBottomInset = Number.isFinite(options.bodyBottomInset) ? options.bodyBottomInset : 10;
 
   doc.save();
-  doc.roundedRect(x, y, width, height, radius).fillAndStroke(background, border);
+  if (variant === 'section') {
+    if (background && background !== 'transparent') {
+      doc.roundedRect(x, y, width, height, radius).fill(background);
+    }
+    const lineY = y + titleOffsetY + 10;
+    doc
+      .lineWidth(1)
+      .strokeColor(border)
+      .moveTo(x + paddingX, lineY)
+      .lineTo(x + width - paddingX, lineY)
+      .stroke();
+  } else {
+    doc.roundedRect(x, y, width, height, radius).fillAndStroke(background, border);
+  }
   doc
     .fillColor(titleColor)
     .font('Helvetica-Bold')
@@ -4435,60 +4931,398 @@ function drawCompactStatusCard(doc, x, y, width, height, title, rows, options = 
   });
 }
 
+function mergeStatusCandidates(values) {
+  const normalized = (Array.isArray(values) ? values : [])
+    .map((value) => normalizeStatusKey(value))
+    .filter(Boolean);
+  if (!normalized.length) {
+    return 'not_tested';
+  }
+  if (normalized.includes('nok')) {
+    return 'nok';
+  }
+  if (normalized.includes('ok')) {
+    return 'ok';
+  }
+  if (normalized.includes('fr')) {
+    return 'fr';
+  }
+  if (normalized.includes('en')) {
+    return 'en';
+  }
+  if (normalized.includes('not_tested')) {
+    return 'not_tested';
+  }
+  return normalized[0] || 'unknown';
+}
+
+function drawSummaryCards(doc, x, y, width, cards, palette) {
+  const items = Array.isArray(cards) ? cards.filter((card) => card && card.label) : [];
+  if (!items.length) {
+    return 0;
+  }
+  const gap = 8;
+  const cardWidth = (width - gap * (items.length - 1)) / items.length;
+  const cardHeight = 36;
+  items.forEach((card, index) => {
+    const cardX = x + index * (cardWidth + gap);
+    const tones = card.tones || {};
+    doc
+      .roundedRect(cardX, y, cardWidth, cardHeight, 9)
+      .fillAndStroke(tones.background || '#EAF1F7', tones.border || '#BFD4E2');
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(7)
+      .fillColor(tones.labelColor || '#4D687C')
+      .text(String(card.label || '').toUpperCase(), cardX + 9, y + 6, {
+        width: cardWidth - 18,
+        lineBreak: false
+      });
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(11)
+      .fillColor(tones.valueColor || palette.cardValue)
+      .text(safeString(card.value, '--'), cardX + 9, y + 18, {
+        width: cardWidth - 18,
+        lineBreak: false
+      });
+  });
+  return cardHeight;
+}
+
+function drawSectionTable(doc, x, y, width, height, title, rows, options = {}) {
+  const body = drawPdfCard(doc, x, y, width, height, title, options.card || {});
+  const entries = Array.isArray(rows) ? rows.filter((row) => row && row.label) : [];
+  if (!entries.length) {
+    doc.font('Helvetica').fontSize(8).fillColor('#7A8590').text('Aucune donnee.', body.x, body.y + 1, {
+      width: body.width
+    });
+    return;
+  }
+
+  const labelWidth = clampNumber(
+    Number.isFinite(options.labelWidth) ? options.labelWidth : body.width * 0.34,
+    68,
+    Math.max(72, body.width * 0.5)
+  );
+  const valueX = body.x + labelWidth + 6;
+  const valueWidth = Math.max(24, body.width - labelWidth - 6);
+  const labelSize = Number.isFinite(options.labelSize) ? options.labelSize : 7.2;
+  const valueSize = Number.isFinite(options.valueSize) ? options.valueSize : 8.2;
+  const labelColor = options.labelColor || '#5A768C';
+  const valueColor = options.valueColor || '#10273A';
+  const separator = options.separator || '#D8E5EE';
+  const minLineHeight = Number.isFinite(options.minLineHeight) ? options.minLineHeight : 11;
+  const maxY = body.y + body.height;
+  let cursorY = body.y;
+
+  entries.forEach((row) => {
+    const label = safeString(row.label, '--').toUpperCase();
+    const value = safeString(row.value, '--');
+    doc.font('Helvetica').fontSize(valueSize);
+    const valueHeight = doc.heightOfString(value, {
+      width: valueWidth,
+      lineGap: 0.5
+    });
+    const lineHeight = Math.max(minLineHeight, valueHeight + 1.4);
+    if (cursorY + lineHeight > maxY) {
+      return;
+    }
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(labelSize)
+      .fillColor(labelColor)
+      .text(label, body.x, cursorY + 1, {
+        width: labelWidth,
+        lineBreak: false
+      });
+    doc.font('Helvetica').fontSize(valueSize).fillColor(valueColor).text(value, valueX, cursorY, {
+      width: valueWidth,
+      lineGap: 0.5
+    });
+    cursorY += lineHeight + 1.2;
+    if (cursorY + 1 <= maxY) {
+      doc
+        .lineWidth(0.6)
+        .strokeColor(separator)
+        .moveTo(body.x, cursorY)
+        .lineTo(body.x + body.width, cursorY)
+        .stroke();
+      cursorY += 1.2;
+    }
+  });
+}
+
+function drawProductSheet(doc, x, y, width, height, data, palette) {
+  const body = drawPdfCard(doc, x, y, width, height, 'Fiche produit matériel clé', {
+    variant: 'section',
+    background: 'transparent',
+    border: palette.cardBorder,
+    titleColor: palette.cardTitle,
+    titleOffsetY: 2,
+    bodyTopOffset: 17,
+    bodyBottomInset: 2,
+    paddingX: 12
+  });
+  const maxY = body.y + body.height;
+  const modelText = safeString(data.subtitle, '--');
+  doc.font('Helvetica-Bold').fontSize(11).fillColor(palette.cardValue).text(modelText, body.x, body.y, {
+    width: body.width
+  });
+  doc.font('Helvetica').fontSize(8).fillColor('#5E7A8D').text('Configuration principale', body.x, body.y + 14, {
+    width: body.width,
+    lineBreak: false
+  });
+
+  const badgeStyle = { background: '#E3F2F9', color: '#1F4E69' };
+  const badgeValues = [
+    `RAM ${safeString(data.ramTotal, '--')}`,
+    `Slots ${safeString(data.ramSlots, '--')}`,
+    `Stockage ${safeString(data.storageTotal, '--')}`,
+    `Batterie ${safeString(data.batteryHealth, '--')}`
+  ];
+  let badgeX = body.x;
+  let badgeY = body.y + 24;
+  const badgeRight = body.x + body.width;
+  badgeValues.forEach((badge) => {
+    doc.font('Helvetica').fontSize(7.4);
+    const measuredWidth = doc.widthOfString(badge) + 12;
+    if (badgeX + measuredWidth > badgeRight) {
+      badgeX = body.x;
+      badgeY += 13;
+    }
+    drawPill(doc, badgeX, badgeY, badge, badgeStyle, 7.4);
+    badgeX += measuredWidth + 6;
+  });
+
+  const points = [
+    `CPU: ${safeString(data.cpuName, '--')}`,
+    `GPU: ${safeString(data.gpuName, '--')}`,
+    `Disque principal: ${safeString(data.storagePrimary, '--')}`,
+    `Technicien: ${safeString(data.technician, '--')}`
+  ];
+  let pointY = badgeY + 15;
+  points.forEach((point) => {
+    if (pointY + 12 > maxY) {
+      return;
+    }
+    doc.circle(body.x + 2, pointY + 4.5, 1.2).fill('#39BFD0');
+    doc
+      .font('Helvetica')
+      .fontSize(7.8)
+      .fillColor('#27475F')
+      .text(point, body.x + 8, pointY, {
+        width: body.width - 8
+      });
+    pointY = doc.y + 1.2;
+  });
+}
+
 function drawReportPdf(doc, data) {
   const margin = doc.page.margins.left;
   const width = doc.page.width - margin - doc.page.margins.right;
   const pageBottom = doc.page.height - doc.page.margins.bottom;
   const pageWidth = doc.page.width;
   const pageHeight = doc.page.height;
+  const palette = {
+    pageBg: '#F7FBFE',
+    headerBg: '#EAF6FC',
+    headerBorder: '#B8D9E8',
+    headerText: '#0F2A3B',
+    headerSubText: '#355C71',
+    headerStripe: '#2ADAE6',
+    headerGlow: '#3DDCE8',
+    accentPillBg: '#155878',
+    accentPillText: '#E4F9FF',
+    brandText: '#1F708C',
+    title: '#102B3C',
+    subtitle: '#3C667D',
+    cardBorder: '#C9DFEA',
+    cardTitle: '#296D89',
+    cardLabel: '#5C7890',
+    cardValue: '#10273A',
+    summaryNeutralBg: '#EAF2F8',
+    summaryNeutralBorder: '#C6D9E5',
+    summaryNeutralText: '#2C4C61',
+    summaryOkBg: '#E1F5E8',
+    summaryOkBorder: '#B9DEC8',
+    summaryOkText: '#205C43',
+    summaryNokBg: '#FBE8E6',
+    summaryNokBorder: '#E8C1BC',
+    summaryNokText: '#8D2B20',
+    summaryNtBg: '#EDF0F4',
+    summaryNtBorder: '#CED6DF',
+    summaryNtText: '#4F6276',
+    footerText: '#5D7B91'
+  };
 
-  doc.rect(0, 0, pageWidth, pageHeight).fill('#EEF3FA');
+  doc.rect(0, 0, pageWidth, pageHeight).fill(palette.pageBg);
 
   const headerY = 18;
-  const headerHeight = 94;
+  const headerHeight = 76;
+  const badgeWidth = 124;
+  const badgeX = margin + width - badgeWidth - 12;
+  const logoExists = fs.existsSync(BRAND_LOGO_PATH);
+  const logoSize = 56;
+  const logoX = margin + 8;
+  const logoY = headerY + 10;
+  const titleX = logoExists ? logoX + logoSize + 12 : margin + 12;
+  const titleWidth = Math.max(120, badgeX - titleX - 12);
+
   doc.save();
-  doc.roundedRect(margin, headerY, width, headerHeight, 15).fillAndStroke('#11233E', '#1B3A61');
-  doc.roundedRect(margin + width - 150, headerY + 10, 136, 25, 13).fill('#1D67F5');
-  doc.fillColor('#D4E7FF').font('Helvetica-Bold').fontSize(8).text('OPS CONSOLE', margin + 16, headerY + 13, {
+  const headerWash = doc.linearGradient(margin, headerY, margin + width, headerY + headerHeight);
+  headerWash.stop(0, palette.headerBg, 0.88);
+  headerWash.stop(1, '#FFFFFF', 0.68);
+  doc.roundedRect(margin, headerY, width, headerHeight, 11).fillAndStroke(headerWash, palette.headerBorder);
+  doc
+    .lineWidth(2.2)
+    .strokeColor(palette.headerStripe)
+    .moveTo(margin + 6, headerY + headerHeight)
+    .lineTo(margin + width - 6, headerY + headerHeight)
+    .stroke();
+  doc.roundedRect(badgeX, headerY + 10, badgeWidth, 24, 12).fillAndStroke(palette.accentPillBg, '#35B7D0');
+  doc.save();
+  doc.fillOpacity(0.18);
+  doc.circle(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2 + 6).fill(palette.headerGlow);
+  doc.restore();
+
+  if (logoExists) {
+    try {
+      doc.image(BRAND_LOGO_PATH, logoX, logoY, { fit: [logoSize, logoSize], align: 'left', valign: 'top' });
+    } catch (error) {
+      doc.fillColor(palette.headerText).font('Helvetica-Bold').fontSize(8).text('MMA AUTOMATION', margin + 16, headerY + 16, {
+        lineBreak: false
+      });
+    }
+  } else {
+    doc.fillColor(palette.headerText).font('Helvetica-Bold').fontSize(8).text('MMA AUTOMATION', margin + 16, headerY + 16, {
+      lineBreak: false
+    });
+  }
+
+  doc.fillColor(palette.brandText).font('Helvetica-Bold').fontSize(7.2).text('MMA AUTOMATION', titleX, headerY + 9, {
+    width: titleWidth,
     lineBreak: false
   });
-  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(19).text(truncatePdfText(data.title, 56), margin + 16, headerY + 33, {
-    width: width * 0.72
+  doc.fillColor(palette.title).font('Helvetica-Bold').fontSize(14.6).text(`Nom du poste: ${truncatePdfText(data.title, 46)}`, titleX, headerY + 22, {
+    width: titleWidth
   });
-  doc.fillColor('#C2D5EC').font('Helvetica').fontSize(9.2).text(truncatePdfText(data.subtitle, 88), margin + 16, headerY + 61, {
-    width: width * 0.72
-  });
-  doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(8).text('Rapport machine', margin + width - 144, headerY + 17, {
-    width: 124,
+  doc.fillColor(palette.accentPillText).font('Helvetica-Bold').fontSize(7.8).text('Rapport machine', badgeX, headerY + 16, {
+    width: badgeWidth,
     align: 'center'
   });
-  doc.fillColor('#BED3EC').font('Helvetica').fontSize(8).text(`Genere: ${truncatePdfText(data.generatedAt, 32)}`, margin + width - 148, headerY + 45, {
-    width: 132,
+  doc
+    .fillColor(palette.headerSubText)
+    .font('Helvetica-Bold')
+    .fontSize(7.1)
+    .text('Modèle PC', badgeX, headerY + 40, {
+      width: badgeWidth,
+      align: 'right',
+      lineBreak: false
+    });
+  doc.fillColor(palette.headerText).font('Helvetica').fontSize(7.8).text(truncatePdfText(data.subtitle, 34), badgeX, headerY + 49, {
+    width: badgeWidth,
     align: 'right'
+  });
+  doc.fillColor(palette.headerSubText).font('Helvetica').fontSize(7.6).text(`Généré: ${truncatePdfText(data.generatedAt, 32)}`, badgeX, headerY + 61, {
+    width: badgeWidth,
+    align: 'right',
+    lineBreak: false
   });
   doc.restore();
 
-  const statusLabel = (value) => STATUS_LABELS[normalizeStatusKey(value) || 'unknown'];
-  const componentStatus = (key) => {
-    const source = Array.isArray(data.components) ? data.components.find((row) => row && row.key === key) : null;
-    if (!source) {
-      return '--';
+  const diagnosticsRaw = Array.isArray(data.diagnostics) ? data.diagnostics : [];
+  const normalizeDiagLabel = (label) => {
+    const clean = safeString(label, '');
+    const lowered = clean.toLowerCase();
+    if (lowered === 'check disque' || lowered === 'check disk') {
+      return 'Check disk';
     }
-    return resolveComponentStatusDisplay(key, source.status).statusLabel;
+    return clean;
   };
+  const diagnosticsMap = new Map();
+  diagnosticsRaw.forEach((row) => {
+    if (!row || !row.label) {
+      return;
+    }
+    const normalizedLabel = normalizeDiagLabel(row.label);
+    if (!normalizedLabel || diagnosticsMap.has(normalizedLabel)) {
+      return;
+    }
+    diagnosticsMap.set(normalizedLabel, { ...row, label: normalizedLabel });
+  });
+  const diagnosticsOrder = [
+    'Lecture disque',
+    'Ecriture disque',
+    'RAM (WinSAT)',
+    'CPU (WinSAT)',
+    'GPU (WinSAT)',
+    'Ping',
+    'Check disk'
+  ];
+  const diagnosticsRows = diagnosticsOrder
+    .map((label) => diagnosticsMap.get(label))
+    .filter(Boolean);
+
+  const componentRawRows = Array.isArray(data.components) ? data.components : [];
+  const componentMap = new Map();
+  componentRawRows.forEach((row) => {
+    if (!row || !row.key || componentMap.has(row.key)) {
+      return;
+    }
+    componentMap.set(row.key, row.status);
+  });
+  const diagnosticStatus = (label) => {
+    const row = diagnosticsMap.get(label);
+    return row ? row.status : null;
+  };
+  const componentStatus = (key) => (componentMap.has(key) ? componentMap.get(key) : null);
+  const diskStatus = mergeStatusCandidates([
+    componentStatus('fsCheck'),
+    componentStatus('diskReadTest'),
+    componentStatus('diskWriteTest'),
+    diagnosticStatus('Check disk'),
+    diagnosticStatus('Lecture disque'),
+    diagnosticStatus('Ecriture disque')
+  ]);
+  const cpuStatusUnified = mergeStatusCandidates([
+    componentStatus('cpu'),
+    componentStatus('cpuTest'),
+    diagnosticStatus('CPU (WinSAT)')
+  ]);
+  const gpuStatusUnified = mergeStatusCandidates([
+    componentStatus('gpu'),
+    componentStatus('gpuTest'),
+    diagnosticStatus('GPU (WinSAT)')
+  ]);
+  const componentRows = [
+    { key: 'cpuUnified', label: 'CPU OK', status: cpuStatusUnified },
+    { key: 'gpuUnified', label: 'GPU OK', status: gpuStatusUnified },
+    { key: 'diskUnified', label: 'Disque OK', status: diskStatus },
+    { key: 'usb', label: 'Ports USB', status: componentStatus('usb') },
+    { key: 'keyboard', label: 'Clavier', status: componentStatus('keyboard') },
+    { key: 'camera', label: 'Camera', status: componentStatus('camera') },
+    { key: 'pad', label: 'Pave tactile', status: componentStatus('pad') },
+    { key: 'badgeReader', label: 'Lecteur badge', status: componentStatus('badgeReader') },
+    { key: 'biosBattery', label: 'Pile BIOS', status: componentStatus('biosBattery') },
+    { key: 'biosLanguage', label: 'Langue BIOS', status: componentStatus('biosLanguage') },
+    { key: 'biosPassword', label: 'Mot de passe BIOS', status: componentStatus('biosPassword') },
+    {
+      key: 'wifiStandard',
+      label: 'Norme Wi-Fi',
+      status: componentStatus('wifiStandard'),
+      extra: data.wifiStandardCode || null
+    }
+  ].filter((row) => row.status != null);
 
   const identRows = [
     { label: 'Serial', value: data.serialNumber },
     { label: 'MAC', value: data.macPrimary },
-    { label: 'MACs', value: data.macList },
     { label: 'OS', value: data.osVersion },
-    { label: 'IP', value: data.lastIp },
     { label: 'Dernier passage', value: data.lastSeen },
     { label: 'Premier passage', value: data.createdAt }
   ];
-  const hardwareRows = [
-    { label: 'Categorie', value: CATEGORY_LABELS[data.category] || CATEGORY_LABELS.unknown },
-    { label: 'Technicien', value: data.technician },
+  const detailedConfigRows = [
     { label: 'RAM totale', value: data.ramTotal },
     { label: 'Slots RAM', value: data.ramSlots },
     { label: 'CPU', value: data.cpuName },
@@ -4496,47 +5330,57 @@ function drawReportPdf(doc, data) {
     { label: 'GPU', value: data.gpuName },
     { label: 'Stockage total', value: data.storageTotal },
     { label: 'Disque principal', value: data.storagePrimary },
-    { label: 'Batterie', value: data.batteryHealth },
-    { label: 'Camera', value: statusLabel(data.cameraStatus) },
-    { label: 'USB', value: statusLabel(data.usbStatus) },
-    { label: 'Clavier', value: statusLabel(data.keyboardStatus) },
-    { label: 'Pave tactile', value: statusLabel(data.padStatus) },
-    { label: 'Lecteur badge', value: statusLabel(data.badgeReaderStatus) },
-    { label: 'Norme Wi-Fi', value: componentStatus('wifiStandard') },
-    { label: 'Langue BIOS', value: componentStatus('biosLanguage') },
-    { label: 'MDP BIOS', value: componentStatus('biosPassword') }
+    { label: 'Batterie', value: data.batteryHealth }
   ];
 
-  const topY = headerY + headerHeight + 10;
-  let pillX = margin;
-  const summaryStyle = {
-    background: '#E8F1FF',
-    color: '#1D3C66'
-  };
-  pillX += drawPill(doc, pillX, topY, `Categorie: ${CATEGORY_LABELS[data.category] || CATEGORY_LABELS.unknown}`, summaryStyle, 8.5);
-  pillX += 8;
-  pillX += drawPill(doc, pillX, topY, `Tech: ${truncatePdfText(data.technician, 18)}`, {
-    background: '#F0F4FA',
-    color: '#2A405E'
-  }, 8.5);
-  pillX += 8;
-  pillX += drawPill(doc, pillX, topY, `OK ${data.summary.ok || 0}`, {
-    background: '#DFF5EA',
-    color: '#1D6442'
-  });
-  pillX += 8;
-  pillX += drawPill(doc, pillX, topY, `NOK ${data.summary.nok || 0}`, {
-    background: '#FFE3DE',
-    color: '#9D2A1E'
-  }, 8.5);
-  pillX += 8;
-  drawPill(doc, pillX, topY, `NT ${data.summary.other || 0}`, {
-    background: '#EAEFF4',
-    color: '#526173'
-  }, 8.5);
+  const summaryY = headerY + headerHeight + 7;
+  const summaryCards = [
+    {
+      label: 'OK total',
+      value: `${data.summary.ok || 0}`,
+      tones: {
+        background: palette.summaryOkBg,
+        border: palette.summaryOkBorder,
+        labelColor: palette.summaryOkText,
+        valueColor: palette.summaryOkText
+      }
+    },
+    {
+      label: 'NOK total',
+      value: `${data.summary.nok || 0}`,
+      tones: {
+        background: palette.summaryNokBg,
+        border: palette.summaryNokBorder,
+        labelColor: palette.summaryNokText,
+        valueColor: palette.summaryNokText
+      }
+    },
+    {
+      label: 'Non testé',
+      value: `${data.summary.other || 0}`,
+      tones: {
+        background: palette.summaryNtBg,
+        border: palette.summaryNtBorder,
+        labelColor: palette.summaryNtText,
+        valueColor: palette.summaryNtText
+      }
+    },
+    {
+      label: 'Dernier passage',
+      value: data.lastSeen,
+      tones: {
+        background: palette.summaryNeutralBg,
+        border: palette.summaryNeutralBorder,
+        labelColor: palette.summaryNeutralText,
+        valueColor: palette.summaryNeutralText
+      }
+    }
+  ];
+  const summaryHeight = drawSummaryCards(doc, margin, summaryY, width, summaryCards, palette);
 
-  const contentTop = topY + 24;
-  const contentBottom = pageBottom - 18;
+  const footerTop = pageBottom - 22;
+  const contentTop = summaryY + summaryHeight + 7;
+  const contentBottom = footerTop - 8;
   const contentHeight = Math.max(80, contentBottom - contentTop);
   const columnGap = 12;
   const leftWidth = Math.floor(width * 0.56);
@@ -4545,59 +5389,78 @@ function drawReportPdf(doc, data) {
   const rightX = leftX + leftWidth + columnGap;
   const cardGap = 10;
 
-  const leftIdHeight = Math.max(112, Math.floor(contentHeight * 0.24));
-  let leftHardwareHeight = Math.max(210, Math.floor(contentHeight * 0.42));
-  let leftInventoryHeight = contentHeight - leftIdHeight - leftHardwareHeight - cardGap * 2;
-  if (leftInventoryHeight < 80) {
-    const deficit = 80 - leftInventoryHeight;
-    leftHardwareHeight = Math.max(180, leftHardwareHeight - deficit);
-    leftInventoryHeight = contentHeight - leftIdHeight - leftHardwareHeight - cardGap * 2;
+  const leftProductHeight = Math.max(118, Math.floor(contentHeight * 0.2));
+  const leftIdHeight = Math.max(120, Math.floor(contentHeight * 0.2));
+  const leftDetailHeight = Math.max(148, Math.floor(contentHeight * 0.26));
+  let leftInventoryHeight =
+    contentHeight - leftProductHeight - leftIdHeight - leftDetailHeight - cardGap * 3;
+  if (leftInventoryHeight < 78) {
+    const deficit = 78 - leftInventoryHeight;
+    const reduceFromDetail = Math.min(deficit, 18);
+    leftInventoryHeight += reduceFromDetail;
   }
 
-  const rightDiagHeight = Math.floor((contentHeight - cardGap) / 2);
+  const rightDiagHeight = Math.max(168, Math.floor(contentHeight * 0.3));
   const rightCompHeight = contentHeight - cardGap - rightDiagHeight;
 
-  const keyCardStyle = {
+  drawProductSheet(doc, leftX, contentTop, leftWidth, leftProductHeight, data, palette);
+
+  const sectionTableStyle = {
     card: {
-      background: '#FFFFFF',
-      border: '#CEDCED',
-      titleColor: '#5A718D'
+      variant: 'section',
+      background: 'transparent',
+      border: palette.cardBorder,
+      titleColor: palette.cardTitle,
+      titleOffsetY: 2,
+      bodyTopOffset: 17,
+      bodyBottomInset: 2
     },
-    labelColor: '#6A7F96',
-    valueColor: '#10243A'
+    labelColor: palette.cardLabel,
+    valueColor: palette.cardValue
   };
+  drawSectionTable(
+    doc,
+    leftX,
+    contentTop + leftProductHeight + cardGap,
+    leftWidth,
+    leftIdHeight,
+    'Identifiants',
+    identRows,
+    sectionTableStyle
+  );
+  drawSectionTable(
+    doc,
+    leftX,
+    contentTop + leftProductHeight + leftIdHeight + cardGap * 2,
+    leftWidth,
+    leftDetailHeight,
+    'Configuration détaillée',
+    detailedConfigRows,
+    sectionTableStyle
+  );
+  drawSectionTable(
+    doc,
+    leftX,
+    contentTop + leftProductHeight + leftIdHeight + leftDetailHeight + cardGap * 3,
+    leftWidth,
+    Math.max(78, leftInventoryHeight),
+    'Identifiants matériel détaillés',
+    data.inventoryRows || [],
+    sectionTableStyle
+  );
+
   const statusCardStyle = {
     card: {
-      background: '#FFFFFF',
-      border: '#CEDCED',
-      titleColor: '#5A718D'
+      variant: 'section',
+      background: 'transparent',
+      border: palette.cardBorder,
+      titleColor: palette.cardTitle,
+      titleOffsetY: 2,
+      bodyTopOffset: 17,
+      bodyBottomInset: 2
     },
-    textColor: '#10243A'
+    textColor: palette.cardValue
   };
-
-  drawCompactKeyValueCard(doc, leftX, contentTop, leftWidth, leftIdHeight, 'Identifiants', identRows, 1, keyCardStyle);
-  drawCompactKeyValueCard(
-    doc,
-    leftX,
-    contentTop + leftIdHeight + cardGap,
-    leftWidth,
-    leftHardwareHeight,
-    'Materiel clef',
-    hardwareRows,
-    2,
-    keyCardStyle
-  );
-  drawCompactKeyValueCard(
-    doc,
-    leftX,
-    contentTop + leftIdHeight + leftHardwareHeight + cardGap * 2,
-    leftWidth,
-    Math.max(80, leftInventoryHeight),
-    'Identifiants materiel',
-    data.inventoryRows || [],
-    1,
-    keyCardStyle
-  );
 
   drawCompactStatusCard(
     doc,
@@ -4606,7 +5469,7 @@ function drawReportPdf(doc, data) {
     rightWidth,
     rightDiagHeight,
     'Diagnostics',
-    data.diagnostics || [],
+    diagnosticsRows,
     statusCardStyle
   );
   drawCompactStatusCard(
@@ -4615,16 +5478,50 @@ function drawReportPdf(doc, data) {
     contentTop + rightDiagHeight + cardGap,
     rightWidth,
     rightCompHeight,
-    'Etat des composants',
-    data.components || [],
+    'État des composants',
+    componentRows,
     statusCardStyle
   );
 
-  doc.font('Helvetica').fontSize(7).fillColor('#6F8096').text('Rapport atelier - page unique', margin, pageBottom - 10, {
-    width,
-    align: 'right',
-    lineBreak: false
-  });
+  doc
+    .lineWidth(0.8)
+    .strokeColor('#BFD7E4')
+    .moveTo(margin, footerTop)
+    .lineTo(margin + width, footerTop)
+    .stroke();
+  const footerY = footerTop + 4;
+  const footerLeftWidth = Math.floor(width * 0.5);
+  const footerMiddleWidth = Math.floor(width * 0.32);
+  const footerRightWidth = width - footerLeftWidth - footerMiddleWidth;
+  doc.font('Helvetica').fontSize(7).fillColor(palette.footerText).text(
+    `Rapport ID: ${truncatePdfText(safeString(data.id, '--'), 36)}`,
+    margin,
+    footerY,
+    {
+      width: footerLeftWidth,
+      lineBreak: false
+    }
+  );
+  doc.font('Helvetica').fontSize(7).fillColor(palette.footerText).text(
+    `Généré: ${truncatePdfText(safeString(data.generatedAt, '--'), 26)}`,
+    margin + footerLeftWidth,
+    footerY,
+    {
+      width: footerMiddleWidth,
+      align: 'center',
+      lineBreak: false
+    }
+  );
+  doc.font('Helvetica').fontSize(7).fillColor(palette.footerText).text(
+    'Page 1/1',
+    margin + footerLeftWidth + footerMiddleWidth,
+    footerY,
+    {
+      width: footerRightWidth,
+      align: 'right',
+      lineBreak: false
+    }
+  );
 }
 app.get('/', requireAuth, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
@@ -4977,7 +5874,7 @@ app.get('/api/logs', requireAuth, async (req, res) => {
     limit = Math.min(limit, limitMax);
   }
 
-  const allowedTables = new Set(['machines', 'ldap_settings']);
+  const allowedTables = new Set(['machines', 'reports', 'ldap_settings']);
   const allowedActions = new Set(['INSERT', 'UPDATE', 'DELETE']);
 
   const filters = [];
@@ -5059,6 +5956,7 @@ app.get('/api/logs', requireAuth, async (req, res) => {
       const oldData = sanitizeAuditData(row.old_data, false);
       const newData = sanitizeAuditData(row.new_data, false);
       const changedFields = Array.isArray(row.changed_fields) ? row.changed_fields : [];
+      const componentChanges = extractComponentChangesFromAudit(oldData, newData);
       const changes = changedFields.map((field) => ({
         field,
         before: oldData ? oldData[field] : null,
@@ -5078,7 +5976,8 @@ app.get('/api/logs', requireAuth, async (req, res) => {
         requestId: row.request_id,
         source: row.source,
         changedFields,
-        changes
+        changes,
+        componentChanges
       };
     });
 
@@ -5147,6 +6046,7 @@ app.get('/api/logs/:id', requireAuth, async (req, res) => {
       requestId: row.request_id,
       source: row.source,
       changedFields: row.changed_fields || [],
+      componentChanges: extractComponentChangesFromAudit(row.old_data, row.new_data),
       oldData: sanitizeAuditData(row.old_data, includePayload),
       newData: sanitizeAuditData(row.new_data, includePayload)
     };
@@ -6400,28 +7300,6 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
     }
   }
 
-  let canSeeStorageLink = false;
-  try {
-    const user = await refreshLdapPermissions(req);
-    canSeeStorageLink = canDeleteReports(user);
-  } catch (error) {
-    canSeeStorageLink = Boolean(req.session?.user && canDeleteReports(req.session.user));
-  }
-
-  const rawDestination =
-    payload && payload.rawArtifacts && payload.rawArtifacts.destination
-      ? payload.rawArtifacts.destination
-      : null;
-  const alcyoneUrl = canSeeStorageLink
-    ? buildAlcyoneConsoleUrl({
-        reportId: row.id,
-        tagName: row.tag || row.machine_tag || DEFAULT_REPORT_TAG,
-        serialNumber: row.serial_number,
-        macAddress: row.mac_address,
-        machineKey: row.machine_key,
-        rawDestination
-      })
-    : '';
   const lot = normalizeLotFromRow({
     report_lot_id: row.report_lot_id,
     report_lot_supplier: row.report_lot_supplier,
@@ -6472,8 +7350,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       commentedAt: row.commented_at,
       components,
       payload,
-      relatedReports,
-      alcyoneUrl: alcyoneUrl || null
+      relatedReports
     }
   });
 });
@@ -7134,6 +8011,74 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
   }
 });
 
+app.delete('/api/reports/imports/legacy', requireAuth, requireReportDelete, async (req, res) => {
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req, { source: 'DELETE /api/reports/imports/legacy' }));
+
+    const result = await client.query(`
+      WITH deleted_reports AS (
+        DELETE FROM reports
+        WHERE payload IS NOT NULL
+          AND payload <> ''
+          AND safe_jsonb(payload) ? 'legacy'
+        RETURNING id, machine_key
+      ),
+      deleted_progress AS (
+        DELETE FROM lot_progress lp
+        USING deleted_reports dr
+        WHERE lp.report_id = dr.id
+        RETURNING lp.id
+      )
+      SELECT
+        COALESCE((SELECT COUNT(*)::integer FROM deleted_reports), 0) AS deleted_reports,
+        COALESCE((SELECT COUNT(DISTINCT machine_key)::integer FROM deleted_reports), 0) AS impacted_machines,
+        COALESCE((SELECT COUNT(*)::integer FROM deleted_progress), 0) AS deleted_progress
+    `);
+    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+
+    await client.query(`
+      UPDATE lots
+      SET produced_count = COALESCE(progress.count, 0)
+      FROM (
+        SELECT lot_id, COUNT(*)::integer AS count
+        FROM lot_progress
+        GROUP BY lot_id
+      ) progress
+      WHERE progress.lot_id = lots.id
+    `);
+    await client.query(`
+      UPDATE lots
+      SET produced_count = 0
+      WHERE id NOT IN (SELECT DISTINCT lot_id FROM lot_progress)
+    `);
+
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      deletedReports: Number.parseInt(row?.deleted_reports || '0', 10),
+      impactedMachines: Number.parseInt(row?.impacted_machines || '0', 10),
+      deletedLotProgress: Number.parseInt(row?.deleted_progress || '0', 10)
+    });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback legacy import purge', rollbackError);
+      }
+    }
+    console.error('Failed to purge legacy imports', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
 app.delete('/api/reports/:id', requireAuth, requireReportDelete, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
@@ -7438,6 +8383,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     storageTotal: formatTotalStorage(diskInfo, volumeInfo),
     storagePrimary: formatPrimaryDisk(diskInfo, volumeInfo),
     batteryHealth: formatBatteryHealth(row.battery_health),
+    wifiStandardCode: buildPdfWifiStandardCode(payload),
     cameraStatus: row.camera_status,
     usbStatus: row.usb_status,
     keyboardStatus: row.keyboard_status,

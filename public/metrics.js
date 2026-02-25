@@ -23,6 +23,11 @@ const dashboards = {
     from: 'now-30d',
     to: 'now'
   },
+  corrections: {
+    path: '/d/mdt-atelier-corrections/atelier-corrections-incidents',
+    from: 'now-30d',
+    to: 'now'
+  },
   lots: {
     path: '/d/mdt-atelier-lots/atelier-lots-production',
     from: 'now-30d',

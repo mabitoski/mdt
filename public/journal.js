@@ -30,6 +30,17 @@ const tableLabels = {
   ldap_settings: 'Config LDAP'
 };
 
+const componentStatusLabels = {
+  ok: 'OK',
+  nok: 'NOK',
+  fr: 'FR',
+  en: 'EN',
+  absent: 'Absent',
+  not_tested: 'Non teste',
+  denied: 'Refuse',
+  timeout: 'Timeout'
+};
+
 const fieldLabels = {
   machine_key: 'Machine key',
   hostname: 'Nom',
@@ -180,11 +191,54 @@ function formatValue(value, maxLength = 140) {
   }
 }
 
-function renderChangeRows(changes) {
-  if (!Array.isArray(changes) || changes.length === 0) {
-    return '<div class="log-change-empty">Aucun champ modifie.</div>';
+function formatComponentStatus(statusKey) {
+  if (!statusKey) {
+    return '--';
   }
-  return changes
+  return componentStatusLabels[statusKey] || String(statusKey).toUpperCase();
+}
+
+function renderComponentChanges(componentChanges) {
+  if (!Array.isArray(componentChanges) || componentChanges.length === 0) {
+    return '';
+  }
+  const rows = componentChanges
+    .map((change) => {
+      const type = change.changeType || 'updated';
+      const typeLabel =
+        type === 'corrected' ? 'Corrige' : type === 'regressed' ? 'Regression' : 'Mise a jour';
+      const label = change.componentLabel || change.componentKey || '--';
+      const before = formatComponentStatus(change.fromStatus);
+      const after = formatComponentStatus(change.toStatus);
+      return `
+        <div class="log-component-row" data-change-type="${escapeHtml(type)}">
+          <span class="log-component-name">${escapeHtml(label)}</span>
+          <div class="log-component-values">
+            <span class="log-change-before">${escapeHtml(before)}</span>
+            <span class="log-change-arrow">-></span>
+            <span class="log-change-after">${escapeHtml(after)}</span>
+          </div>
+          <span class="log-component-type">${escapeHtml(typeLabel)}</span>
+        </div>
+      `;
+    })
+    .join('');
+  return `
+    <div class="log-component-changes">
+      <p class="log-component-kicker">Transitions composants</p>
+      ${rows}
+    </div>
+  `;
+}
+
+function renderChangeRows(changes, componentChanges = []) {
+  const hasComponentChanges =
+    Array.isArray(componentChanges) && componentChanges.length > 0;
+  const sourceRows = Array.isArray(changes) ? changes : [];
+  const filteredRows = hasComponentChanges
+    ? sourceRows.filter((change) => change && change.field !== 'components')
+    : sourceRows;
+  const baseHtml = filteredRows
     .map((change) => {
       const label = formatFieldName(change.field);
       const before = formatValue(change.before);
@@ -201,6 +255,11 @@ function renderChangeRows(changes) {
       `;
     })
     .join('');
+  const componentHtml = hasComponentChanges ? renderComponentChanges(componentChanges) : '';
+  if (!baseHtml && !componentHtml) {
+    return '<div class="log-change-empty">Aucun champ modifie.</div>';
+  }
+  return `${baseHtml}${componentHtml}`;
 }
 
 function updateLastUpdated() {
@@ -265,7 +324,8 @@ function renderLogs() {
   const rows = state.logs.map((log, index) => {
     const action = log.action || '--';
     const changes = Array.isArray(log.changes) ? log.changes : [];
-    const changeRows = renderChangeRows(changes);
+    const componentChanges = Array.isArray(log.componentChanges) ? log.componentChanges : [];
+    const changeRows = renderChangeRows(changes, componentChanges);
 
     return `
       <article class="log-card" data-id="${escapeHtml(log.id)}">
