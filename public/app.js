@@ -4341,14 +4341,29 @@ function openDetailsDrawer(id, options = {}) {
   updateDrawerNavButtons();
   renderList();
 
-  ensureMachineDetail(targetId, { skipRender: true }).then(() => {
-    if (!isDrawerOpen() || String(state.expandedId || '') !== targetId) {
-      return;
-    }
-    renderDetailsDrawerContent(targetId);
-    updateDrawerNavButtons();
-    renderList();
-  });
+  ensureMachineDetail(targetId, { skipRender: true })
+    .then(() => {
+      if (!isDrawerOpen() || String(state.expandedId || '') !== targetId) {
+        return;
+      }
+      try {
+        renderDetailsDrawerContent(targetId);
+        updateDrawerNavButtons();
+        renderList();
+      } catch (error) {
+        console.error('Failed to render details drawer after fetch', error);
+        if (detailsDrawerBody) {
+          detailsDrawerBody.innerHTML =
+            '<div class="empty">Impossible de charger les details.</div>';
+        }
+      }
+    })
+    .catch((error) => {
+      console.error('Failed to load machine detail', error);
+      if (detailsDrawerBody) {
+        detailsDrawerBody.innerHTML = '<div class="empty">Impossible de charger les details.</div>';
+      }
+    });
 }
 
 function renderList(isScrollUpdate = false) {
@@ -5517,7 +5532,19 @@ async function ensureMachineDetail(id, options = {}) {
   }
   let fetchedMachine = null;
   try {
-    const response = await fetch(`/api/machines/${encodeURIComponent(detailId)}`);
+    const detailUrl = `/api/machines/${encodeURIComponent(detailId)}`;
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller
+      ? window.setTimeout(() => controller.abort(), 15000)
+      : null;
+    let response;
+    try {
+      response = await fetch(detailUrl, controller ? { signal: controller.signal } : undefined);
+    } finally {
+      if (timeoutId != null) {
+        window.clearTimeout(timeoutId);
+      }
+    }
     if (response.status === 401) {
       window.location.href = '/login';
       return;
