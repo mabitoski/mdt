@@ -71,7 +71,8 @@ const state = {
   scrollHoldRaf: null,
   scrollAnchorHold: null,
   scrollAnchorHoldRaf: null,
-  reportsEpoch: 0
+  reportsEpoch: 0,
+  drawerTab: 'identifiants'
 };
 
 const listEl = document.getElementById('machine-list');
@@ -81,6 +82,7 @@ const searchWrap = document.getElementById('search-wrap');
 const searchToggle = document.querySelector('.search-toggle');
 const refreshBtn = document.getElementById('refresh-btn');
 const reportZeroBtn = document.getElementById('report-zero-btn');
+const purgeImportsBtn = document.getElementById('purge-imports-btn');
 const reportZeroModal = document.getElementById('report-zero-modal');
 const reportZeroForm = document.getElementById('report-zero-form');
 const reportZeroError = document.getElementById('report-zero-error');
@@ -134,6 +136,21 @@ const testFiltersEl = document.querySelector('.test-filters');
 const commentFiltersEl = document.querySelector('.comment-filters');
 const resetFiltersBtn = document.getElementById('reset-filters-btn');
 const activeFiltersChip = document.getElementById('active-filters-chip');
+const filterHubEl = document.getElementById('section-filters');
+const filterHubBodyEl = document.getElementById('filter-hub-body');
+const filterToggleBtn = document.getElementById('filter-toggle-btn');
+const kpiTotalEl = document.getElementById('kpi-total');
+const kpiActiveEl = document.getElementById('kpi-active');
+const kpiOkEl = document.getElementById('kpi-ok');
+const kpiNokEl = document.getElementById('kpi-nok');
+const kpiNtEl = document.getElementById('kpi-nt');
+const detailsDrawerShell = document.getElementById('details-drawer-shell');
+const detailsDrawerPanel = document.getElementById('details-drawer-panel');
+const detailsDrawerBody = document.getElementById('details-drawer-body');
+const detailsDrawerTitle = document.getElementById('details-drawer-title');
+const detailsDrawerSub = document.getElementById('details-drawer-sub');
+const drawerPrevBtn = document.getElementById('drawer-prev-btn');
+const drawerNextBtn = document.getElementById('drawer-next-btn');
 const adminLink = document.getElementById('admin-link');
 const lotsLink = document.getElementById('lots-link');
 const commentTimers = new Map();
@@ -246,6 +263,7 @@ const dateFilterLabels = {
 const prefsStorageKey = `mdt-ui-preferences${storageSuffix}`;
 const tagFilterStorageKey = `mdt-tag-filter${storageSuffix}`;
 const tagFilterNameStorageKey = `mdt-tag-filter-names${storageSuffix}`;
+const filterCollapseStorageKey = `mdt-filter-collapse${storageSuffix}`;
 const categoryFilterOptions = new Set(['all', 'laptop', 'desktop', 'unknown']);
 const commentFilterOptions = new Set(['all', 'with', 'without']);
 const quickFilterTypes = new Set(['serial', 'mac', 'tech', 'summary']);
@@ -745,6 +763,16 @@ function invalidateListCache() {
   state.listCache = [];
 }
 
+function refreshActiveDrawerIfNeeded(id) {
+  if (!state.expandedId) {
+    return;
+  }
+  if (String(state.expandedId) !== String(id)) {
+    return;
+  }
+  renderDetailsDrawerContent(String(id));
+}
+
 function dropCachedDetails(items = []) {
   if (!items.length) {
     return;
@@ -845,6 +873,7 @@ async function loadMeta() {
     if (data.permissions && typeof data.permissions.canEditTags === 'boolean') {
       state.canEditTags = data.permissions.canEditTags;
     }
+    updatePurgeImportsVisibility();
     hydrateTagFilterFromNames();
     renderTagFilters();
     renderTechFilters();
@@ -1691,6 +1720,74 @@ function getActiveFilterCount() {
   return count;
 }
 
+function loadFilterCollapsedPreference() {
+  if (!window.localStorage) {
+    return null;
+  }
+  try {
+    const storedValue = localStorage.getItem(filterCollapseStorageKey);
+    if (storedValue === null) {
+      return null;
+    }
+    return storedValue === '1';
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveFilterCollapsedPreference(collapsed) {
+  if (!window.localStorage) {
+    return;
+  }
+  try {
+    localStorage.setItem(filterCollapseStorageKey, collapsed ? '1' : '0');
+  } catch (error) {
+    // Ignore storage errors.
+  }
+}
+
+function updateFilterToggleLabel(count = getActiveFilterCount()) {
+  if (!filterToggleBtn || !filterHubEl) {
+    return;
+  }
+  const collapsed = filterHubEl.classList.contains('is-collapsed');
+  const plural = count > 1 ? 's' : '';
+  const suffix = count > 0 ? ` (${count} actif${plural})` : '';
+  const label = collapsed ? `Afficher les filtres${suffix}` : `Masquer les filtres${suffix}`;
+  filterToggleBtn.textContent = label;
+  filterToggleBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
+function setFilterHubCollapsed(collapsed, { persist = true } = {}) {
+  if (!filterHubEl) {
+    return;
+  }
+  const next = Boolean(collapsed);
+  filterHubEl.classList.toggle('is-collapsed', next);
+  if (filterHubBodyEl) {
+    filterHubBodyEl.setAttribute('aria-hidden', next ? 'true' : 'false');
+  }
+  updateFilterToggleLabel();
+  if (persist) {
+    saveFilterCollapsedPreference(next);
+  }
+}
+
+function initFilterHub() {
+  if (!filterHubEl) {
+    return;
+  }
+  const storedCollapsed = loadFilterCollapsedPreference();
+  const defaultCollapsed = storedCollapsed === null ? true : storedCollapsed;
+  setFilterHubCollapsed(defaultCollapsed, { persist: false });
+  if (filterToggleBtn) {
+    filterToggleBtn.addEventListener('click', () => {
+      const collapsed = filterHubEl.classList.contains('is-collapsed');
+      setFilterHubCollapsed(!collapsed);
+    });
+  }
+}
+
 function updateFilterDockState() {
   const count = getActiveFilterCount();
   if (activeFiltersChip) {
@@ -1701,6 +1798,7 @@ function updateFilterDockState() {
   if (resetFiltersBtn) {
     resetFiltersBtn.disabled = count === 0;
   }
+  updateFilterToggleLabel(count);
 }
 
 function updateSearchCollapse() {
@@ -1865,6 +1963,14 @@ function setLotsLinkVisible(visible) {
   lotsLink.hidden = !visible;
 }
 
+function updatePurgeImportsVisibility() {
+  if (!purgeImportsBtn) {
+    return;
+  }
+  const visible = Boolean(state.legacyMode === 'legacy' && state.canDeleteReport);
+  purgeImportsBtn.hidden = !visible;
+}
+
 function canDeleteReportFromUser(user) {
   if (!user) {
     return false;
@@ -1884,6 +1990,7 @@ async function initAdminLink() {
   }
   setAdminLinkVisible(false);
   setLotsLinkVisible(false);
+  updatePurgeImportsVisibility();
   try {
     const response = await fetch('/api/me');
     if (response.status === 401) {
@@ -1903,12 +2010,14 @@ async function initAdminLink() {
         state.canDeleteReport = true;
         state.canEditTags = true;
         setLotsLinkVisible(true);
+        updatePurgeImportsVisibility();
         renderList();
       }
     }
   } catch (error) {
     setAdminLinkVisible(false);
     setLotsLinkVisible(false);
+    updatePurgeImportsVisibility();
   }
 }
 
@@ -2136,6 +2245,106 @@ function summarizeComponents(components, commentValue = '') {
   if (hasComment) {
     summary.nok += 1;
     summary.total += 1;
+  }
+
+  return summary;
+}
+
+function addSummaryStatus(summary, statusKey) {
+  if (!summary || !statusKey) {
+    return;
+  }
+  if (statusKey === 'ok') {
+    summary.ok += 1;
+  } else if (statusKey === 'nok') {
+    summary.nok += 1;
+  } else {
+    summary.other += 1;
+  }
+  summary.total += 1;
+}
+
+function normalizeSummaryStatusForKey(key, value) {
+  const resolved = resolveStatusDisplay(key, value);
+  const status = resolved && resolved.status ? resolved.status : normalizeStatusKey(value);
+  if (!status) {
+    return null;
+  }
+  if (status === 'fr' || status === 'en') {
+    return 'ok';
+  }
+  return status;
+}
+
+function summarizeDetailForDrawer(detail) {
+  const summary = { ok: 0, nok: 0, other: 0, total: 0 };
+  if (!detail || typeof detail !== 'object') {
+    return summary;
+  }
+
+  const components = resolveDetailComponents(detail);
+  const componentKeys = [
+    'usb',
+    'keyboard',
+    'camera',
+    'pad',
+    'badgeReader',
+    'cpu',
+    'gpu',
+    'biosBattery',
+    'biosLanguage',
+    'biosPassword',
+    'wifiStandard'
+  ];
+  componentKeys.forEach((key) => {
+    const raw = Object.prototype.hasOwnProperty.call(components, key) ? components[key] : 'not_tested';
+    const normalized = normalizeSummaryStatusForKey(key, raw || 'not_tested');
+    if (normalized) {
+      addSummaryStatus(summary, normalized);
+    }
+  });
+
+  const payload = detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const tests =
+    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+      ? payload.tests
+      : null;
+  const diagnosticCandidates = [];
+  if (tests) {
+    diagnosticCandidates.push(
+      tests.diskRead || components.diskReadTest || 'not_tested',
+      tests.diskWrite || components.diskWriteTest || 'not_tested',
+      tests.ram || components.ramTest || 'not_tested',
+      tests.cpu || components.cpuTest || 'not_tested',
+      tests.gpu || components.gpuTest || 'not_tested',
+      tests.networkPing || components.networkPing || 'not_tested'
+    );
+    if (tests.fsCheck || components.fsCheck) {
+      diagnosticCandidates.push(tests.fsCheck || components.fsCheck || 'not_tested');
+    }
+  } else {
+    diagnosticCandidates.push(
+      components.diskReadTest || 'not_tested',
+      components.diskWriteTest || 'not_tested',
+      components.ramTest || 'not_tested',
+      components.cpuTest || 'not_tested',
+      components.gpuTest || 'not_tested',
+      components.networkPing || 'not_tested'
+    );
+    if (components.fsCheck) {
+      diagnosticCandidates.push(components.fsCheck);
+    }
+  }
+  diagnosticCandidates.forEach((value) => {
+    const normalized = normalizeStatusKey(value);
+    if (normalized) {
+      addSummaryStatus(summary, normalized);
+    }
+  });
+
+  const hasComment = typeof detail.comment === 'string' && detail.comment.trim();
+  if (hasComment) {
+    addSummaryStatus(summary, 'nok');
   }
 
   return summary;
@@ -2600,6 +2809,7 @@ async function updatePadStatus(id, status) {
     }
     applyPadStatusUpdate(id, data.status);
     renderList();
+    refreshActiveDrawerIfNeeded(id);
   } catch (error) {
     window.alert("Impossible d'enregistrer le pavé tactile.");
   } finally {
@@ -2628,6 +2838,7 @@ async function updateUsbStatus(id, status) {
     }
     applyUsbStatusUpdate(id, data.status);
     renderList();
+    refreshActiveDrawerIfNeeded(id);
   } catch (error) {
     window.alert("Impossible d'enregistrer l'etat USB.");
   } finally {
@@ -2699,6 +2910,7 @@ async function updateCategory(id, category, button) {
     applyCategoryUpdate(id, data.category || category);
     updateStats();
     renderList();
+    refreshActiveDrawerIfNeeded(id);
   } catch (error) {
     window.alert("Impossible d'enregistrer la categorie.");
   } finally {
@@ -2773,6 +2985,7 @@ async function updateComponentStatus(id, key, status, button) {
     }
     applyComponentStatusUpdate(id, key, data.status);
     renderList();
+    refreshActiveDrawerIfNeeded(id);
   } catch (error) {
     window.alert("Impossible d'enregistrer le statut.");
   } finally {
@@ -3102,11 +3315,77 @@ async function createReportZero(payload) {
 }
 
 function setDeleteButtonsLoading(id, loading) {
-  const buttons = listEl.querySelectorAll(`[data-action="delete-report"][data-id="${id}"]`);
+  const buttons = document.querySelectorAll(`[data-action="delete-report"][data-id="${id}"]`);
   buttons.forEach((button) => {
     button.disabled = loading;
     button.classList.toggle('is-loading', loading);
   });
+}
+
+function setPurgeImportsLoading(loading) {
+  if (!purgeImportsBtn) {
+    return;
+  }
+  purgeImportsBtn.disabled = loading;
+  purgeImportsBtn.classList.toggle('is-loading', loading);
+}
+
+async function deleteLegacyImports() {
+  if (!isLegacyView) {
+    return;
+  }
+  if (!state.canDeleteReport) {
+    window.alert("Pas les droits pour supprimer les imports.");
+    return;
+  }
+
+  const confirmed = window.confirm(
+    'Supprimer tous les rapports importes (CSV) ? Cette action est irreversible.'
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const token = window.prompt('Tape SUPPRIMER IMPORTS pour confirmer la purge');
+  if (token !== 'SUPPRIMER IMPORTS') {
+    window.alert('Suppression annulee.');
+    return;
+  }
+
+  setPurgeImportsLoading(true);
+  try {
+    const response = await fetch('/api/reports/imports/legacy', {
+      method: 'DELETE'
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.alert("Pas les droits pour supprimer les imports.");
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('legacy_delete_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('legacy_delete_failed');
+    }
+
+    closeDetailsDrawer();
+    state.details = {};
+    state.expandedId = null;
+    state.quickCommentId = null;
+    await loadMachines();
+    window.alert(
+      `Suppression terminee : ${data.deletedReports || 0} imports supprimes (${data.impactedMachines || 0} machines).`
+    );
+  } catch (error) {
+    window.alert('Impossible de supprimer les imports.');
+  } finally {
+    setPurgeImportsLoading(false);
+  }
 }
 
 async function deleteReport(id) {
@@ -3136,6 +3415,7 @@ async function deleteReport(id) {
     }
     if (state.expandedId === id) {
       state.expandedId = null;
+      closeDetailsDrawer({ clearSelection: false });
     }
     delete state.details[id];
     await loadMachines();
@@ -3169,9 +3449,7 @@ function applyCommentUpdate(id, comment, commentedAt) {
 }
 
 function setCommentButtonsLoading(id, loading) {
-  const buttons = listEl.querySelectorAll(
-    `[data-action="clear-comment"][data-id="${id}"]`
-  );
+  const buttons = document.querySelectorAll(`[data-action="clear-comment"][data-id="${id}"]`);
   buttons.forEach((button) => {
     button.disabled = loading;
     button.classList.toggle('is-loading', loading);
@@ -3199,6 +3477,9 @@ async function updateComment(id, comment) {
     }
     applyCommentUpdate(id, data.comment, data.commentedAt);
     renderList();
+    if (isDrawerOpen() && String(state.expandedId || '') === String(id)) {
+      renderDetailsDrawerContent(String(id));
+    }
   } catch (error) {
     window.alert("Impossible d'enregistrer le commentaire.");
   } finally {
@@ -3345,25 +3626,55 @@ function getUniqueMachines(list) {
   return unique;
 }
 
-function updateStats() {
-  if (state.stats) {
-    statTotal.textContent = state.stats.total || 0;
-    statLaptop.textContent = state.stats.laptop || 0;
-    statDesktop.textContent = state.stats.desktop || 0;
-    statUnknown.textContent = state.stats.unknown || 0;
-    renderLotMetrics();
+function setTextContent(element, value) {
+  if (!element) {
     return;
   }
-  const uniqueMachines = getUniqueMachines(getBaseFilteredMachines());
-  const total = uniqueMachines.length;
-  const laptop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'laptop').length;
-  const desktop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'desktop').length;
-  const unknown = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'unknown').length;
+  element.textContent = value;
+}
 
-  statTotal.textContent = total;
-  statLaptop.textContent = laptop;
-  statDesktop.textContent = desktop;
-  statUnknown.textContent = unknown;
+function updateWorkspaceKpis(uniqueMachines = []) {
+  let okCount = 0;
+  let nokCount = 0;
+  let ntCount = 0;
+
+  uniqueMachines.forEach((machine) => {
+    const summary = summarizeComponents(machine.components, machine.comment);
+    okCount += summary.ok;
+    nokCount += summary.nok;
+    ntCount += summary.other;
+  });
+
+  const machineCount =
+    (state.stats && Number.isFinite(Number(state.stats.total)) && Number(state.stats.total)) ||
+    (Number.isFinite(state.totalCount) ? state.totalCount : uniqueMachines.length);
+  setTextContent(kpiTotalEl, machineCount);
+  setTextContent(kpiActiveEl, machineCount);
+  setTextContent(kpiOkEl, okCount);
+  setTextContent(kpiNokEl, nokCount);
+  setTextContent(kpiNtEl, ntCount);
+}
+
+function updateStats() {
+  const uniqueMachines = getUniqueMachines(getBaseFilteredMachines());
+  updateWorkspaceKpis(uniqueMachines);
+
+  if (state.stats) {
+    setTextContent(statTotal, state.stats.total || 0);
+    setTextContent(statLaptop, state.stats.laptop || 0);
+    setTextContent(statDesktop, state.stats.desktop || 0);
+    setTextContent(statUnknown, state.stats.unknown || 0);
+  } else {
+    const total = uniqueMachines.length;
+    const laptop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'laptop').length;
+    const desktop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'desktop').length;
+    const unknown = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'unknown').length;
+
+    setTextContent(statTotal, total);
+    setTextContent(statLaptop, laptop);
+    setTextContent(statDesktop, desktop);
+    setTextContent(statUnknown, unknown);
+  }
   renderLotMetrics();
 }
 
@@ -3640,6 +3951,406 @@ function buildReportHistory(detail) {
   `;
 }
 
+function resolveDetailComponents(detail) {
+  const defaults = {
+    biosBattery: 'not_tested',
+    biosLanguage: 'not_tested',
+    biosPassword: 'not_tested',
+    wifiStandard: 'not_tested'
+  };
+  const raw =
+    detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
+      ? detail.components
+      : {};
+  return { ...defaults, ...raw };
+}
+
+function getDrawerMachineSequence() {
+  const useQuickFilter = Boolean(state.quickFilter && state.quickFilter.value);
+  const source = useQuickFilter ? applyFilters() : sortMachines(getBaseFilteredMachines());
+  return getUniqueMachines(Array.isArray(source) ? source : [])
+    .map((machine) => String(machine.id || ''))
+    .filter(Boolean);
+}
+
+function getMachineById(id) {
+  const targetId = id != null ? String(id) : '';
+  if (!targetId) {
+    return null;
+  }
+  return state.machines.find((machine) => String(machine.id) === targetId) || null;
+}
+
+function isDrawerOpen() {
+  return Boolean(detailsDrawerShell && !detailsDrawerShell.hidden);
+}
+
+function updateDrawerNavButtons() {
+  if (!drawerPrevBtn || !drawerNextBtn) {
+    return;
+  }
+  const sequence = getDrawerMachineSequence();
+  const currentId = state.expandedId ? String(state.expandedId) : '';
+  const index = sequence.indexOf(currentId);
+  const hasPrev = index > 0;
+  const hasNext = index >= 0 && index < sequence.length - 1;
+  drawerPrevBtn.disabled = !hasPrev;
+  drawerNextBtn.disabled = !hasNext;
+}
+
+function setDrawerTab(nextTab) {
+  if (!detailsDrawerBody) {
+    return;
+  }
+  const safeTab = typeof nextTab === 'string' && nextTab ? nextTab : 'identifiants';
+  state.drawerTab = safeTab;
+  const tabButtons = detailsDrawerBody.querySelectorAll('.drawer-tab-btn[data-tab]');
+  const tabPanels = detailsDrawerBody.querySelectorAll('.drawer-tab-panel[data-tab-panel]');
+  tabButtons.forEach((button) => {
+    const tab = button.dataset.tab || '';
+    const active = tab === safeTab;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  tabPanels.forEach((panel) => {
+    const tab = panel.dataset.tabPanel || '';
+    const active = tab === safeTab;
+    panel.classList.toggle('is-active', active);
+    panel.hidden = !active;
+  });
+}
+
+function closeDetailsDrawer({ clearSelection = true } = {}) {
+  if (!detailsDrawerShell) {
+    return;
+  }
+  detailsDrawerShell.classList.remove('is-open');
+  document.body.classList.remove('drawer-open');
+  window.setTimeout(() => {
+    if (!detailsDrawerShell.classList.contains('is-open')) {
+      detailsDrawerShell.hidden = true;
+    }
+  }, 170);
+  if (clearSelection && state.expandedId) {
+    state.expandedId = null;
+    state.detailOverrideId = null;
+    renderList();
+  }
+}
+
+function buildDrawerDiagnosticsRows(detail) {
+  const payload =
+    detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const tests =
+    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+      ? payload.tests
+      : null;
+  const winSat =
+    payload && payload.winsat && typeof payload.winsat === 'object' ? payload.winsat : null;
+  const winSpr =
+    winSat && winSat.winSPR && typeof winSat.winSPR === 'object' ? winSat.winSPR : null;
+  const components = resolveDetailComponents(detail);
+  const detailId = detail && detail.id != null ? String(detail.id) : '';
+  const rows = [];
+
+  function addRow(label, status, extra, key) {
+    const statusValue =
+      key && Object.prototype.hasOwnProperty.call(components, key) ? components[key] : status;
+    const statusHtml = key
+      ? renderStatusValue(statusValue, { id: detailId, key })
+      : renderStatusValue(statusValue);
+    const metricHtml = extra ? `<span class="drawer-metric">${escapeHtml(extra)}</span>` : '';
+    rows.push(`
+      <div class="drawer-status-row">
+        <span>${escapeHtml(label)}</span>
+        <div class="drawer-status-stack">${statusHtml}${metricHtml}</div>
+      </div>
+    `);
+  }
+
+  if (tests) {
+    const cpuScore = winSpr && typeof winSpr.CpuScore === 'number' ? winSpr.CpuScore : null;
+    const memScore = winSpr && typeof winSpr.MemoryScore === 'number' ? winSpr.MemoryScore : null;
+    const gfxScore = winSpr
+      ? typeof winSpr.GamingScore === 'number'
+        ? winSpr.GamingScore
+        : typeof winSpr.GraphicsScore === 'number'
+          ? winSpr.GraphicsScore
+          : null
+      : null;
+
+    addRow('Lecture disque', tests.diskRead || components.diskReadTest || 'not_tested', formatMbps(tests.diskReadMBps), 'diskReadTest');
+    addRow('Ecriture disque', tests.diskWrite || components.diskWriteTest || 'not_tested', formatMbps(tests.diskWriteMBps), 'diskWriteTest');
+    addRow('RAM (WinSAT)', tests.ram || components.ramTest || 'not_tested', tests.ramNote || formatWinSatNote(memScore), 'ramTest');
+    addRow('CPU (WinSAT)', tests.cpu || components.cpuTest || 'not_tested', tests.cpuNote || formatWinSatNote(cpuScore), 'cpuTest');
+    addRow('GPU (WinSAT)', tests.gpu || components.gpuTest || 'not_tested', tests.gpuNote || formatWinSatNote(gfxScore), 'gpuTest');
+    addRow('Ping', tests.networkPing || components.networkPing || 'not_tested', tests.networkPingTarget || null, 'networkPing');
+    if (tests.fsCheck || components.fsCheck) {
+      addRow('Check disque', tests.fsCheck || components.fsCheck || 'not_tested', null, 'fsCheck');
+    }
+  } else {
+    addRow('Lecture disque', components.diskReadTest || 'not_tested', null, 'diskReadTest');
+    addRow('Ecriture disque', components.diskWriteTest || 'not_tested', null, 'diskWriteTest');
+    addRow('RAM (WinSAT)', components.ramTest || 'not_tested', null, 'ramTest');
+    addRow('CPU (WinSAT)', components.cpuTest || 'not_tested', null, 'cpuTest');
+    addRow('GPU (WinSAT)', components.gpuTest || 'not_tested', null, 'gpuTest');
+    addRow('Ping', components.networkPing || 'not_tested', null, 'networkPing');
+    if (components.fsCheck) {
+      addRow('Check disque', components.fsCheck, null, 'fsCheck');
+    }
+  }
+
+  return rows.join('');
+}
+
+function buildDrawerDetailHtml(detail) {
+  const detailId = detail && detail.id != null ? String(detail.id) : '';
+  const category = normalizeCategory(detail.category);
+  const title = escapeHtml(formatPrimary(detail));
+  const subtitle = escapeHtml(formatSubtitle(detail));
+  const lot = getMachineLot(detail);
+  const lotLabel = lot ? buildLotLabel(lot) : DEFAULT_LOT_LABEL;
+  const summary = summarizeDetailForDrawer(detail);
+  const components = resolveDetailComponents(detail);
+
+  const payload =
+    detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const cpuInfo = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
+  const gpuInfo = payload && payload.gpu && typeof payload.gpu === 'object' ? payload.gpu : null;
+  const diskInfoRaw = payload ? payload.disks : null;
+  const diskInfo = Array.isArray(diskInfoRaw) ? diskInfoRaw : diskInfoRaw ? [diskInfoRaw] : [];
+  const volumeInfoRaw = payload ? payload.volumes : null;
+  const volumeInfo = Array.isArray(volumeInfoRaw) ? volumeInfoRaw : volumeInfoRaw ? [volumeInfoRaw] : [];
+
+  if (detailsDrawerTitle) {
+    detailsDrawerTitle.textContent = formatPrimary(detail);
+  }
+  if (detailsDrawerSub) {
+    detailsDrawerSub.textContent = `${formatSubtitle(detail)} · ${timeAgo(detail.lastSeen)}`;
+  }
+
+  const deleteButton = state.canDeleteReport
+    ? `<button class="drawer-action-btn is-danger" type="button" data-action="delete-report" data-id="${detailId}">Supprimer</button>`
+    : '';
+
+  const headerHtml = `
+    <div class="drawer-card drawer-header-card">
+      <div class="drawer-header-top">
+        ${buildCategoryBadge(category, detailId, 'detail-category')}
+        <span class="drawer-lot-pill">${escapeHtml(lotLabel)}</span>
+      </div>
+      <h3>${title}</h3>
+      <p>${subtitle}</p>
+      <div class="drawer-header-meta">
+        <span class="summary-chip ok">OK ${summary.ok}</span>
+        <span class="summary-chip nok">NOK ${summary.nok}</span>
+        <span class="summary-chip nt">NT ${summary.other}</span>
+        <span class="drawer-seen">${escapeHtml(formatDateTime(detail.lastSeen))}</span>
+      </div>
+      <div class="drawer-actions">
+        <button class="drawer-action-btn" type="button" data-action="export-pdf" data-id="${detailId}">Telecharger PDF</button>
+        ${deleteButton}
+      </div>
+    </div>
+  `;
+
+  const summaryCardsHtml = `
+    <div class="drawer-summary-grid">
+      <div class="drawer-mini-card"><span>CPU</span><strong>${escapeHtml((cpuInfo && cpuInfo.name) || '--')}</strong></div>
+      <div class="drawer-mini-card"><span>RAM</span><strong>${escapeHtml(formatRam(detail.ramMb))}</strong></div>
+      <div class="drawer-mini-card"><span>Stockage</span><strong>${escapeHtml(formatTotalStorage(diskInfo, volumeInfo))}</strong></div>
+      <div class="drawer-mini-card"><span>GPU</span><strong>${escapeHtml((gpuInfo && gpuInfo.name) || '--')}</strong></div>
+      <div class="drawer-mini-card"><span>Batterie</span><strong>${escapeHtml(formatBatteryHealth(detail.batteryHealth))}</strong></div>
+    </div>
+  `;
+
+  const identifiersPanel = `
+    <div class="drawer-table">
+      <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
+      <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
+      <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
+      <div><span>Premier passage</span><strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong></div>
+      <div><span>Dernier passage</span><strong>${escapeHtml(formatDateTime(detail.lastSeen))}</strong></div>
+    </div>
+  `;
+
+  const diagnosticsPanel = `
+    <div class="drawer-status-list">
+      ${buildDrawerDiagnosticsRows(detail)}
+    </div>
+  `;
+
+  const componentRows = [
+    ['Ports USB', 'usb'],
+    ['Clavier', 'keyboard'],
+    ['Camera', 'camera'],
+    ['Pave tactile', 'pad'],
+    ['Lecteur badge', 'badgeReader'],
+    ['CPU OK', 'cpu'],
+    ['GPU OK', 'gpu']
+  ]
+    .map(
+      ([label, key]) => `
+        <div class="drawer-status-row">
+          <span>${escapeHtml(label)}</span>
+          ${renderStatusValue(components[key] || 'not_tested', { id: detailId, key })}
+        </div>
+      `
+    )
+    .join('');
+
+  const biosRows = [
+    ['Pile BIOS', 'biosBattery'],
+    ['Langue BIOS', 'biosLanguage'],
+    ['Mot de passe BIOS', 'biosPassword'],
+    ['Norme Wi-Fi', 'wifiStandard']
+  ]
+    .map(
+      ([label, key]) => `
+        <div class="drawer-status-row">
+          <span>${escapeHtml(label)}</span>
+          ${renderStatusValue(components[key] || 'not_tested', { id: detailId, key })}
+        </div>
+      `
+    )
+    .join('');
+
+  const commentValue = typeof detail.comment === 'string' ? detail.comment : '';
+  const commentMeta = detail.commentedAt
+    ? `<p class="drawer-note-meta">Derniere modif: ${escapeHtml(formatDateTime(detail.commentedAt))}</p>`
+    : '';
+  const commentsPanel = `
+    <div class="drawer-comment-block">
+      <textarea class="drawer-comment-input" data-comment-id="${detailId}" maxlength="800" placeholder="Ajouter un commentaire">${escapeHtml(
+        commentValue
+      )}</textarea>
+      <div class="drawer-comment-actions">
+        <button class="drawer-action-btn" type="button" data-action="clear-comment" data-id="${detailId}">Effacer</button>
+      </div>
+      ${commentMeta}
+    </div>
+    ${buildReportHistory(detail)}
+  `;
+
+  const tabs = [
+    { id: 'identifiants', title: 'Identifiants', content: identifiersPanel },
+    { id: 'diagnostics', title: 'Diagnostics', content: diagnosticsPanel },
+    { id: 'composants', title: 'Composants', content: `<div class="drawer-status-list">${componentRows}</div>` },
+    { id: 'bios_wifi', title: 'BIOS / Wi-Fi', content: `<div class="drawer-status-list">${biosRows}</div>` },
+    { id: 'commentaires', title: 'Commentaires', content: commentsPanel }
+  ];
+
+  const activeTab = tabs.some((tab) => tab.id === state.drawerTab) ? state.drawerTab : 'identifiants';
+  const tabsNavHtml = tabs
+    .map(
+      (tab) => `
+        <button class="drawer-tab-btn${tab.id === activeTab ? ' is-active' : ''}" type="button" data-tab="${tab.id}" aria-selected="${
+          tab.id === activeTab ? 'true' : 'false'
+        }">
+          ${escapeHtml(tab.title)}
+        </button>
+      `
+    )
+    .join('');
+
+  const tabPanelsHtml = tabs
+    .map(
+      (tab) => `
+        <section class="drawer-tab-panel${tab.id === activeTab ? ' is-active' : ''}" data-tab-panel="${tab.id}"${
+          tab.id === activeTab ? '' : ' hidden'
+        }>
+          ${tab.content}
+        </section>
+      `
+    )
+    .join('');
+
+  return `
+    ${headerHtml}
+    ${summaryCardsHtml}
+    <div class="drawer-tabs">
+      <div class="drawer-tabs-nav">${tabsNavHtml}</div>
+      <div class="drawer-tabs-content">${tabPanelsHtml}</div>
+    </div>
+  `;
+}
+
+function renderDetailsDrawerContent(reportId = null) {
+  if (!detailsDrawerBody || !state.expandedId) {
+    return false;
+  }
+  const targetId = reportId != null ? String(reportId) : String(state.expandedId);
+  const detail = state.details[targetId];
+  if (!detail) {
+    detailsDrawerBody.innerHTML = '<div class="loading">Chargement des details...</div>';
+    return false;
+  }
+  if (detail.error) {
+    detailsDrawerBody.innerHTML = '<div class="empty">Impossible de charger les details.</div>';
+    return false;
+  }
+  detailsDrawerBody.innerHTML = buildDrawerDetailHtml(detail);
+  setDrawerTab(state.drawerTab || 'identifiants');
+  return true;
+}
+
+function openDrawerRelative(step) {
+  const direction = Number(step);
+  if (!Number.isFinite(direction) || !direction || !state.expandedId) {
+    return;
+  }
+  const sequence = getDrawerMachineSequence();
+  const currentIndex = sequence.indexOf(String(state.expandedId));
+  if (currentIndex < 0) {
+    return;
+  }
+  const nextIndex = currentIndex + direction;
+  if (nextIndex < 0 || nextIndex >= sequence.length) {
+    return;
+  }
+  openDetailsDrawer(sequence[nextIndex], { resetTab: false });
+}
+
+function openDetailsDrawer(id, options = {}) {
+  const targetId = id != null ? String(id) : '';
+  if (!targetId || !detailsDrawerShell) {
+    return;
+  }
+  const resetTab = options.resetTab !== false;
+  if (resetTab) {
+    state.drawerTab = 'identifiants';
+  }
+  state.expandedId = targetId;
+  state.detailOverrideId = null;
+
+  const machine = getMachineById(targetId);
+  if (detailsDrawerTitle) {
+    detailsDrawerTitle.textContent = machine ? formatPrimary(machine) : 'Chargement...';
+  }
+  if (detailsDrawerSub) {
+    detailsDrawerSub.textContent = machine
+      ? `${formatSubtitle(machine)} · ${timeAgo(machine.lastSeen)}`
+      : 'Preparation des informations...';
+  }
+  detailsDrawerBody.innerHTML = '<div class="loading">Chargement des details...</div>';
+  detailsDrawerShell.hidden = false;
+  document.body.classList.add('drawer-open');
+  window.requestAnimationFrame(() => {
+    detailsDrawerShell.classList.add('is-open');
+  });
+  updateDrawerNavButtons();
+  renderList();
+
+  ensureMachineDetail(targetId, { skipRender: true }).then(() => {
+    if (!isDrawerOpen() || String(state.expandedId || '') !== targetId) {
+      return;
+    }
+    renderDetailsDrawerContent(targetId);
+    updateDrawerNavButtons();
+    renderList();
+  });
+}
+
 function renderList(isScrollUpdate = false) {
   updateTimeFilterLabel();
   updateStats();
@@ -3804,8 +4515,7 @@ function renderList(isScrollUpdate = false) {
           </div>
         </div>
       `;
-      const expanded = state.expandedId === machine.id;
-      const selected = expanded ? 'selected' : '';
+      const selected = state.expandedId === machine.id ? 'selected' : '';
       const absoluteIndex = startIndex + index;
       const delayClass = delayClasses[absoluteIndex % delayClasses.length];
       const summary = summarizeComponents(machine.components, machine.comment);
@@ -3824,26 +4534,10 @@ function renderList(isScrollUpdate = false) {
               <button class="summary-chip nt" type="button" data-summary="nt">NT --</button>
             </div>
           `;
-      const overrideId =
-        expanded && state.detailOverrideId && state.expandedId === machine.id
-          ? state.detailOverrideId
-          : null;
-      const detailData = expanded
-        ? overrideId
-          ? state.details[overrideId]
-          : state.details[machine.id]
-        : null;
-      const detailHtml = expanded
-        ? detailData && detailData.error
-          ? '<div class="card-detail"><div class="empty">Impossible de charger les details.</div></div>'
-          : detailData
-            ? `<div class="card-detail">${buildDetailHtml(detailData)}</div>`
-            : '<div class="card-detail"><div class="loading">Chargement des details...</div></div>'
-        : '';
-      const toggleLabel = expanded ? 'Masquer les details' : 'Afficher les details';
+      const toggleLabel = 'Voir details';
 
       return `
-        <article class="machine-card ${delayClass} ${selected}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="${expanded}">
+        <article class="machine-card ${delayClass} ${selected}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="false">
           <div class="card-top">
             ${categoryBadge}
             <div class="card-top-right">
@@ -3872,8 +4566,7 @@ function renderList(isScrollUpdate = false) {
               ${commentHtml}
             </div>
           </div>
-          <button class="card-toggle" type="button">${toggleLabel}</button>
-          ${detailHtml}
+          <button class="card-toggle" type="button" data-action="open-drawer" data-id="${machine.id}">${toggleLabel}</button>
         </article>
       `;
     })
@@ -3991,21 +4684,12 @@ function buildDetailHtml(detail) {
         </button>
       `
     : '';
-  const alcyoneLink =
-    detail && detail.alcyoneUrl
-      ? `
-        <a class="detail-action" href="${escapeHtml(detail.alcyoneUrl)}" target="_blank" rel="noopener">
-          Ouvrir Alcyone
-        </a>
-      `
-      : '';
   const actionBar = detailId
     ? `
       <div class="detail-actions">
         <button class="detail-action" type="button" data-action="export-pdf" data-id="${detailId}">
           Telecharger PDF
         </button>
-        ${alcyoneLink}
         ${deleteButton}
       </div>
     `
@@ -4441,7 +5125,7 @@ function buildReportDocument(detail) {
     ? `<pre>${escapeHtml(JSON.stringify(detail.payload, null, 2))}</pre>`
     : '<div class="empty">Payload non disponible.</div>';
 
-  const summary = summarizeComponents(detail.components, detail.comment);
+  const summary = summarizeDetailForDrawer(detail);
   const summaryActive = state.quickFilter && state.quickFilter.type === 'summary';
   const summaryHtml =
     summary.total > 0
@@ -4785,61 +5469,32 @@ async function loadMachines() {
   renderTechnicianOptions();
   updateCommentFilterButtons();
   if (state.expandedId) {
-    await ensureMachineDetail(state.expandedId);
+    await ensureMachineDetail(state.expandedId, { skipRender: true });
+    if (isDrawerOpen()) {
+      renderDetailsDrawerContent();
+      updateDrawerNavButtons();
+    }
   }
 }
 
 function updateExpandedDetailHtml(reportId, preserveScroll = false) {
-  if (!listEl || !state.expandedId) {
-    return false;
-  }
-  const holdTop = preserveScroll ? getScrollTop() : null;
-  const restoreScroll = () => {
-    if (!preserveScroll || holdTop == null) {
-      return;
-    }
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        setScrollTop(holdTop);
-      });
-    });
-  };
-  const safeId =
-    window.CSS && CSS.escape ? CSS.escape(state.expandedId) : String(state.expandedId).replace(/"/g, '\\"');
-  const card = listEl.querySelector(`.machine-card[data-id="${safeId}"]`);
-  if (!card) {
-    return false;
-  }
-  const detailWrap = card.querySelector('.card-detail');
-  if (!detailWrap) {
-    return false;
-  }
-  const detailData = reportId != null ? state.details[String(reportId)] : null;
-  if (detailData && detailData.error) {
-    detailWrap.innerHTML = '<div class="empty">Impossible de charger les details.</div>';
-    restoreScroll();
-    return true;
-  }
-  if (detailData) {
-    detailWrap.innerHTML = buildDetailHtml(detailData);
-    restoreScroll();
-    return true;
-  }
-  detailWrap.innerHTML = '<div class="loading">Chargement des details...</div>';
-  restoreScroll();
-  return true;
+  return renderDetailsDrawerContent(reportId);
 }
 
 async function ensureMachineDetail(id, options = {}) {
   const detailId = id != null ? String(id) : '';
   if (!detailId) {
-    return;
+    return null;
   }
   if (state.details[detailId]) {
     if (!options.skipRender) {
       renderList();
     }
-    return;
+    if (isDrawerOpen() && String(state.expandedId || '') === detailId) {
+      renderDetailsDrawerContent(detailId);
+      updateDrawerNavButtons();
+    }
+    return state.details[detailId];
   }
   if (!options.skipRender) {
     renderList();
@@ -4858,15 +5513,28 @@ async function ensureMachineDetail(id, options = {}) {
     if (!options.skipRender) {
       renderList();
     }
+    if (isDrawerOpen() && String(state.expandedId || '') === detailId) {
+      renderDetailsDrawerContent(detailId);
+      updateDrawerNavButtons();
+    }
+    return state.details[detailId];
   } catch (error) {
     state.details[detailId] = { error: true };
     if (!options.skipRender) {
       renderList();
     }
+    if (isDrawerOpen() && String(state.expandedId || '') === detailId) {
+      renderDetailsDrawerContent(detailId);
+      updateDrawerNavButtons();
+    }
+    return state.details[detailId];
   }
 }
 
 function updateLastUpdated() {
+  if (!lastUpdatedEl) {
+    return;
+  }
   if (!state.lastUpdated) {
     lastUpdatedEl.textContent = 'Derniere mise a jour : --';
     return;
@@ -5011,6 +5679,7 @@ applyLayout();
 updateTimeFilterLabel();
 updateStatFilterCards();
 initSidebarNavigation();
+initFilterHub();
 updateFilterDockState();
 
 if (searchToggle && searchWrap && searchInput) {
@@ -5046,9 +5715,17 @@ if (resetFiltersBtn) {
   });
 }
 
-refreshBtn.addEventListener('click', () => {
-  loadMachines();
-});
+if (refreshBtn) {
+  refreshBtn.addEventListener('click', () => {
+    loadMachines();
+  });
+}
+
+if (purgeImportsBtn) {
+  purgeImportsBtn.addEventListener('click', () => {
+    deleteLegacyImports();
+  });
+}
 
 if (reportZeroBtn) {
   reportZeroBtn.addEventListener('click', () => {
@@ -5269,40 +5946,18 @@ listEl.addEventListener('click', (event) => {
     if (!id) {
       return;
     }
-    const targetId = String(id);
-    const activeEl = document.activeElement;
-    if (activeEl && typeof activeEl.blur === 'function') {
-      activeEl.blur();
-    }
-    if (state.expandedId && state.expandedId !== targetId) {
-      holdScrollTop(6, false);
-    }
-    const isLoaded = state.machines.some((machine) => String(machine.id) === targetId);
-    if (!isLoaded && state.expandedId && state.expandedId !== targetId) {
-      holdCardAnchor(state.expandedId);
-    }
-    if (isLoaded) {
-      state.detailOverrideId = null;
-      state.expandedId = targetId;
-      renderList();
-      ensureMachineDetail(targetId);
+    openDetailsDrawer(String(id), { resetTab: false });
+    return;
+  }
+  const openDrawerBtn = event.target.closest('[data-action="open-drawer"]');
+  if (openDrawerBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = openDrawerBtn.dataset.id;
+    if (!id) {
       return;
     }
-    if (!state.expandedId) {
-      state.expandedId = targetId;
-      renderList();
-      ensureMachineDetail(targetId);
-      return;
-    }
-    state.detailOverrideId = targetId;
-    updateExpandedDetailHtml(targetId, true);
-    ensureMachineDetail(targetId, { skipRender: true }).then(() => {
-      if (state.detailOverrideId === targetId) {
-        if (!updateExpandedDetailHtml(targetId, true)) {
-          renderList();
-        }
-      }
-    });
+    openDetailsDrawer(id);
     return;
   }
   const padBtn = event.target.closest('[data-action="set-pad"]');
@@ -5374,21 +6029,11 @@ listEl.addEventListener('click', (event) => {
   if (!card) {
     return;
   }
-  if (event.target.closest('.card-detail')) {
-    return;
-  }
   const id = card.dataset.id;
   if (!id) {
     return;
   }
-  state.detailOverrideId = null;
-  if (state.expandedId === id) {
-    state.expandedId = null;
-    renderList();
-    return;
-  }
-  state.expandedId = id;
-  ensureMachineDetail(id);
+  openDetailsDrawer(id);
 });
 
 listEl.addEventListener('input', (event) => {
@@ -5422,6 +6067,148 @@ listEl.addEventListener(
   },
   true
 );
+
+if (detailsDrawerShell) {
+  detailsDrawerShell.addEventListener('click', (event) => {
+    const closeBtn = event.target.closest('[data-action="close-drawer"]');
+    if (closeBtn) {
+      event.preventDefault();
+      closeDetailsDrawer();
+      return;
+    }
+
+    const tabBtn = event.target.closest('.drawer-tab-btn[data-tab]');
+    if (tabBtn) {
+      event.preventDefault();
+      const tab = tabBtn.dataset.tab || 'identifiants';
+      setDrawerTab(tab);
+      return;
+    }
+
+    const reportLink = event.target.closest('[data-action="open-report"]');
+    if (reportLink) {
+      event.preventDefault();
+      const id = reportLink.dataset.id;
+      if (id) {
+        openDetailsDrawer(id, { resetTab: false });
+      }
+      return;
+    }
+
+    const cycleBtn = event.target.closest('[data-action="cycle-status"]');
+    if (cycleBtn) {
+      event.preventDefault();
+      const id = cycleBtn.dataset.id;
+      const key = cycleBtn.dataset.key;
+      if (!id || !key) {
+        return;
+      }
+      const nextStatus = nextCycleStatus(key, cycleBtn.dataset.status);
+      updateComponentStatus(id, key, nextStatus, cycleBtn);
+      return;
+    }
+
+    const categoryBtn = event.target.closest('[data-action="cycle-category"]');
+    if (categoryBtn) {
+      event.preventDefault();
+      const id = categoryBtn.dataset.id;
+      if (!id) {
+        return;
+      }
+      const nextValue = nextCategory(categoryBtn.dataset.category);
+      updateCategory(id, nextValue, categoryBtn);
+      return;
+    }
+
+    const exportBtn = event.target.closest('[data-action="export-pdf"]');
+    if (exportBtn) {
+      event.preventDefault();
+      const id = exportBtn.dataset.id;
+      if (!id) {
+        return;
+      }
+      const detail = state.details[id];
+      if (!detail || detail.error) {
+        return;
+      }
+      openReportPdf(detail);
+      return;
+    }
+
+    const clearCommentBtn = event.target.closest('[data-action="clear-comment"]');
+    if (clearCommentBtn) {
+      event.preventDefault();
+      const id = clearCommentBtn.dataset.id;
+      if (!id) {
+        return;
+      }
+      const input = detailsDrawerBody
+        ? detailsDrawerBody.querySelector(`.drawer-comment-input[data-comment-id="${id}"]`)
+        : null;
+      if (input) {
+        input.value = '';
+      }
+      updateComment(id, '');
+      return;
+    }
+
+    const deleteBtn = event.target.closest('[data-action="delete-report"]');
+    if (deleteBtn) {
+      event.preventDefault();
+      const id = deleteBtn.dataset.id;
+      if (id) {
+        deleteReport(id);
+      }
+      return;
+    }
+  });
+
+  detailsDrawerShell.addEventListener('input', (event) => {
+    const input = event.target.closest('.drawer-comment-input');
+    if (!input) {
+      return;
+    }
+    const id = input.dataset.commentId;
+    if (!id) {
+      return;
+    }
+    scheduleCommentSave(id, input.value);
+  });
+
+  detailsDrawerShell.addEventListener(
+    'blur',
+    (event) => {
+      const input = event.target.closest('.drawer-comment-input');
+      if (!input) {
+        return;
+      }
+      const id = input.dataset.commentId;
+      if (!id) {
+        return;
+      }
+      scheduleCommentSave(id, input.value, true);
+    },
+    true
+  );
+}
+
+if (drawerPrevBtn) {
+  drawerPrevBtn.addEventListener('click', () => {
+    openDrawerRelative(-1);
+  });
+}
+
+if (drawerNextBtn) {
+  drawerNextBtn.addEventListener('click', () => {
+    openDrawerRelative(1);
+  });
+}
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && isDrawerOpen()) {
+    closeDetailsDrawer();
+  }
+});
 
 if (patchnoteOkBtn) {
   patchnoteOkBtn.addEventListener('click', () => {
