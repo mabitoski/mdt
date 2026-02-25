@@ -5486,7 +5486,8 @@ async function ensureMachineDetail(id, options = {}) {
   if (!detailId) {
     return null;
   }
-  if (state.details[detailId]) {
+  const cachedDetail = state.details[detailId];
+  if (cachedDetail && !cachedDetail.error) {
     if (!options.skipRender) {
       renderList();
     }
@@ -5494,7 +5495,10 @@ async function ensureMachineDetail(id, options = {}) {
       renderDetailsDrawerContent(detailId);
       updateDrawerNavButtons();
     }
-    return state.details[detailId];
+    return cachedDetail;
+  }
+  if (cachedDetail && cachedDetail.error) {
+    delete state.details[detailId];
   }
   if (!options.skipRender) {
     renderList();
