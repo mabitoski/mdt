@@ -5489,11 +5489,19 @@ async function ensureMachineDetail(id, options = {}) {
   const cachedDetail = state.details[detailId];
   if (cachedDetail && !cachedDetail.error) {
     if (!options.skipRender) {
-      renderList();
+      try {
+        renderList();
+      } catch (error) {
+        console.error('Failed to render list from cached detail', error);
+      }
     }
     if (isDrawerOpen() && String(state.expandedId || '') === detailId) {
-      renderDetailsDrawerContent(detailId);
-      updateDrawerNavButtons();
+      try {
+        renderDetailsDrawerContent(detailId);
+        updateDrawerNavButtons();
+      } catch (error) {
+        console.error('Failed to render drawer from cached detail', error);
+      }
     }
     return cachedDetail;
   }
@@ -5501,8 +5509,13 @@ async function ensureMachineDetail(id, options = {}) {
     delete state.details[detailId];
   }
   if (!options.skipRender) {
-    renderList();
+    try {
+      renderList();
+    } catch (error) {
+      console.error('Failed to render list before detail fetch', error);
+    }
   }
+  let fetchedMachine = null;
   try {
     const response = await fetch(`/api/machines/${encodeURIComponent(detailId)}`);
     if (response.status === 401) {
@@ -5513,26 +5526,46 @@ async function ensureMachineDetail(id, options = {}) {
       throw new Error('detail_failed');
     }
     const data = await response.json();
-    state.details[detailId] = data.machine;
-    if (!options.skipRender) {
-      renderList();
+    fetchedMachine = data && data.machine ? data.machine : null;
+    if (!fetchedMachine) {
+      throw new Error('detail_empty');
     }
-    if (isDrawerOpen() && String(state.expandedId || '') === detailId) {
-      renderDetailsDrawerContent(detailId);
-      updateDrawerNavButtons();
-    }
-    return state.details[detailId];
+    state.details[detailId] = fetchedMachine;
   } catch (error) {
     state.details[detailId] = { error: true };
     if (!options.skipRender) {
-      renderList();
+      try {
+        renderList();
+      } catch (renderError) {
+        console.error('Failed to render list after detail fetch error', renderError);
+      }
     }
     if (isDrawerOpen() && String(state.expandedId || '') === detailId) {
-      renderDetailsDrawerContent(detailId);
-      updateDrawerNavButtons();
+      try {
+        renderDetailsDrawerContent(detailId);
+        updateDrawerNavButtons();
+      } catch (renderError) {
+        console.error('Failed to render drawer after detail fetch error', renderError);
+      }
     }
     return state.details[detailId];
   }
+  if (!options.skipRender) {
+    try {
+      renderList();
+    } catch (error) {
+      console.error('Failed to render list after detail fetch success', error);
+    }
+  }
+  if (isDrawerOpen() && String(state.expandedId || '') === detailId) {
+    try {
+      renderDetailsDrawerContent(detailId);
+      updateDrawerNavButtons();
+    } catch (error) {
+      console.error('Failed to render drawer after detail fetch success', error);
+    }
+  }
+  return fetchedMachine;
 }
 
 function updateLastUpdated() {
