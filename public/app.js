@@ -2265,7 +2265,7 @@ function addSummaryStatus(summary, statusKey) {
 }
 
 function normalizeSummaryStatusForKey(key, value) {
-  const resolved = resolveStatusDisplay(key, value);
+  const resolved = resolveComponentStatusDisplay(key, value);
   const status = resolved && resolved.status ? resolved.status : normalizeStatusKey(value);
   if (!status) {
     return null;
