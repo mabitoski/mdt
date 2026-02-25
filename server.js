@@ -4098,6 +4098,105 @@ function summarizeComponents(components) {
   return summary;
 }
 
+function addSummaryStatus(summary, statusKey) {
+  if (!summary || !statusKey) {
+    return;
+  }
+  if (statusKey === 'ok') {
+    summary.ok += 1;
+  } else if (statusKey === 'nok') {
+    summary.nok += 1;
+  } else {
+    summary.other += 1;
+  }
+  summary.total += 1;
+}
+
+function normalizeSummaryStatusForKey(key, value) {
+  const resolved = resolveComponentStatusDisplay(key, value);
+  const statusKey = resolved && resolved.statusKey ? resolved.statusKey : normalizeStatusKey(value);
+  if (!statusKey) {
+    return null;
+  }
+  if (statusKey === 'fr' || statusKey === 'en') {
+    return 'ok';
+  }
+  return statusKey;
+}
+
+function summarizePdfDetailForReport(components, payload, commentValue = '') {
+  const summary = { ok: 0, nok: 0, other: 0, total: 0 };
+  const mergedComponents = withManualComponentDefaults(
+    components && typeof components === 'object' && !Array.isArray(components) ? components : {}
+  );
+  const componentKeys = [
+    'usb',
+    'keyboard',
+    'camera',
+    'pad',
+    'badgeReader',
+    'cpu',
+    'gpu',
+    'biosBattery',
+    'biosLanguage',
+    'biosPassword',
+    'wifiStandard'
+  ];
+
+  componentKeys.forEach((key) => {
+    const raw = Object.prototype.hasOwnProperty.call(mergedComponents, key)
+      ? mergedComponents[key]
+      : 'not_tested';
+    const normalized = normalizeSummaryStatusForKey(key, raw || 'not_tested');
+    if (normalized) {
+      addSummaryStatus(summary, normalized);
+    }
+  });
+
+  const tests =
+    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+      ? payload.tests
+      : null;
+  const diagnosticCandidates = [];
+  if (tests) {
+    diagnosticCandidates.push(
+      tests.diskRead || mergedComponents.diskReadTest || 'not_tested',
+      tests.diskWrite || mergedComponents.diskWriteTest || 'not_tested',
+      tests.ram || mergedComponents.ramTest || 'not_tested',
+      tests.cpu || mergedComponents.cpuTest || 'not_tested',
+      tests.gpu || mergedComponents.gpuTest || 'not_tested',
+      tests.networkPing || mergedComponents.networkPing || 'not_tested'
+    );
+    if (tests.fsCheck || mergedComponents.fsCheck) {
+      diagnosticCandidates.push(tests.fsCheck || mergedComponents.fsCheck || 'not_tested');
+    }
+  } else {
+    diagnosticCandidates.push(
+      mergedComponents.diskReadTest || 'not_tested',
+      mergedComponents.diskWriteTest || 'not_tested',
+      mergedComponents.ramTest || 'not_tested',
+      mergedComponents.cpuTest || 'not_tested',
+      mergedComponents.gpuTest || 'not_tested',
+      mergedComponents.networkPing || 'not_tested'
+    );
+    if (mergedComponents.fsCheck) {
+      diagnosticCandidates.push(mergedComponents.fsCheck);
+    }
+  }
+  diagnosticCandidates.forEach((value) => {
+    const normalized = normalizeStatusKey(value);
+    if (normalized) {
+      addSummaryStatus(summary, normalized);
+    }
+  });
+
+  if (typeof commentValue === 'string' && commentValue.trim()) {
+    addSummaryStatus(summary, 'nok');
+  }
+
+  return summary;
+}
+
 function componentLabelFromKey(componentKey) {
   if (!componentKey) {
     return '--';
@@ -5315,32 +5414,39 @@ function drawReportPdf(doc, data) {
     }
   ].filter((row) => row.status != null);
 
-  const displayedSummary = { ok: 0, nok: 0, other: 0, total: 0 };
-  const addSummaryStatus = (statusKey) => {
-    if (!statusKey) {
-      return;
+  const summarySource =
+    data && data.summaryForPdf && typeof data.summaryForPdf === 'object' && !Array.isArray(data.summaryForPdf)
+      ? data.summaryForPdf
+      : null;
+  const parseSummaryValue = (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+      return 0;
     }
-    const normalized = statusKey === 'fr' || statusKey === 'en' ? 'ok' : statusKey;
-    if (normalized === 'ok') {
-      displayedSummary.ok += 1;
-    } else if (normalized === 'nok') {
-      displayedSummary.nok += 1;
-    } else {
-      displayedSummary.other += 1;
-    }
-    displayedSummary.total += 1;
+    return Math.round(numeric);
+  };
+  const displayedSummary = {
+    ok: summarySource ? parseSummaryValue(summarySource.ok) : 0,
+    nok: summarySource ? parseSummaryValue(summarySource.nok) : 0,
+    other: summarySource ? parseSummaryValue(summarySource.other) : 0,
+    total: summarySource ? parseSummaryValue(summarySource.total) : 0
   };
 
-  diagnosticsRows.forEach((row) => {
-    addSummaryStatus(normalizeStatusKey(row && row.status));
-  });
-  componentRows.forEach((row) => {
-    if (!row) {
-      return;
-    }
-    const resolved = resolveComponentStatusDisplay(row.key, row.status);
-    addSummaryStatus(resolved && resolved.statusKey ? resolved.statusKey : normalizeStatusKey(row.status));
-  });
+  if (!summarySource) {
+    diagnosticsRows.forEach((row) => {
+      addSummaryStatus(displayedSummary, normalizeStatusKey(row && row.status));
+    });
+    componentRows.forEach((row) => {
+      if (!row) {
+        return;
+      }
+      const resolved = resolveComponentStatusDisplay(row.key, row.status);
+      addSummaryStatus(
+        displayedSummary,
+        resolved && resolved.statusKey ? resolved.statusKey : normalizeStatusKey(row.status)
+      );
+    });
+  }
 
   const identRows = [
     { label: 'Serial', value: data.serialNumber },
@@ -8420,6 +8526,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     inventoryRows: buildInventoryRows(payload),
     components: buildComponentRows(components),
     summary: summarizeComponents(components),
+    summaryForPdf: summarizePdfDetailForReport(components, payload, row.comment || ''),
     generatedAt: formatDateTime(new Date())
   };
 
