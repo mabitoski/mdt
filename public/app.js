@@ -3639,7 +3639,7 @@ function updateWorkspaceKpis(uniqueMachines = []) {
   let ntCount = 0;
 
   uniqueMachines.forEach((machine) => {
-    const summary = summarizeComponents(machine.components, machine.comment);
+    const summary = summarizeDetailForDrawer(machine);
     okCount += summary.ok;
     nokCount += summary.nok;
     ntCount += summary.other;
@@ -3760,7 +3760,7 @@ function getBaseFilteredMachines() {
           return false;
         }
       } else if (state.quickFilter.type === 'summary') {
-        const summary = summarizeComponents(machine.components, machine.comment);
+        const summary = summarizeDetailForDrawer(machine);
         if (state.quickFilter.value === 'ok' && summary.ok <= 0) {
           return false;
         }
@@ -4533,7 +4533,7 @@ function renderList(isScrollUpdate = false) {
       const selected = state.expandedId === machine.id ? 'selected' : '';
       const absoluteIndex = startIndex + index;
       const delayClass = delayClasses[absoluteIndex % delayClasses.length];
-      const summary = summarizeComponents(machine.components, machine.comment);
+      const summary = summarizeDetailForDrawer(machine);
       const summaryActive = state.quickFilter && state.quickFilter.type === 'summary';
       const summaryHtml =
         summary.total > 0
