@@ -4401,7 +4401,15 @@ $diag = [ordered]@{
 if ($clientRunId) { $diag.clientRunId = $clientRunId }
 if ($macSerialKey) { $diag.macSerialKey = $macSerialKey }
 
-$tests = [ordered]@{}
+$tests = [ordered]@{
+  diskRead = 'not_tested'
+  diskWrite = 'not_tested'
+  ramTest = 'not_tested'
+  cpuTest = 'not_tested'
+  gpuTest = 'not_tested'
+  networkPing = 'not_tested'
+  fsCheck = 'not_tested'
+}
 
 if ($cpuExternalStatus) { $tests.cpuStress = $cpuExternalStatus }
 if ($gpuExternalStatus) { $tests.gpuStress = $gpuExternalStatus }
@@ -4704,24 +4712,28 @@ if ($thermalInfo) { $payload.thermal = $thermalInfo }
 if ($tests.Count -gt 0) { $payload.tests = $tests }
 if ($winsatStore) { $payload.winsat = $winsatStore }
 
-$components = @{}
+$components = [ordered]@{
+  biosBattery = 'not_tested'
+  biosLanguage = 'not_tested'
+  biosPassword = 'not_tested'
+  wifiStandard = if ($wifiStandardStatus) { $wifiStandardStatus } else { 'not_tested' }
+  diskReadTest = if ($tests.diskRead) { $tests.diskRead } else { 'not_tested' }
+  diskWriteTest = if ($tests.diskWrite) { $tests.diskWrite } else { 'not_tested' }
+  ramTest = if ($tests.ramTest) { $tests.ramTest } else { 'not_tested' }
+  cpuTest = if ($tests.cpuTest) { $tests.cpuTest } else { 'not_tested' }
+  gpuTest = if ($tests.gpuTest) { $tests.gpuTest } else { 'not_tested' }
+  networkPing = if ($tests.networkPing) { $tests.networkPing } else { 'not_tested' }
+  fsCheck = if ($tests.fsCheck) { $tests.fsCheck } else { 'not_tested' }
+}
 if ($cameraStatus) { $components.camera = $cameraStatus }
 if ($usbStatus) { $components.usb = $usbStatus }
 if ($keyboardStatus) { $components.keyboard = $keyboardStatus }
 if ($padStatus) { $components.pad = $padStatus }
 if ($badgeStatus) { $components.badgeReader = $badgeStatus }
-if ($wifiStandardStatus) { $components.wifiStandard = $wifiStandardStatus }
 if ($diskSmart) { $components.diskSmart = $diskSmart }
-if ($tests.diskRead) { $components.diskReadTest = $tests.diskRead }
-if ($tests.diskWrite) { $components.diskWriteTest = $tests.diskWrite }
-if ($tests.ramTest) { $components.ramTest = $tests.ramTest }
-if ($tests.cpuTest) { $components.cpuTest = $tests.cpuTest }
-if ($tests.gpuTest) { $components.gpuTest = $tests.gpuTest }
 if ($tests.cpuStress) { $components.cpuStress = $tests.cpuStress }
 if ($tests.gpuStress) { $components.gpuStress = $tests.gpuStress }
 if ($tests.network) { $components.networkTest = $tests.network }
-if ($tests.networkPing) { $components.networkPing = $tests.networkPing }
-if ($tests.fsCheck) { $components.fsCheck = $tests.fsCheck }
 if ($tests.memDiag) { $components.memDiag = $tests.memDiag }
 if ($gpuStatus) { $components.gpu = $gpuStatus }
 if ($thermalInfo -and $thermalInfo.status) { $components.thermal = $thermalInfo.status }
