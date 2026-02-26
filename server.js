@@ -4606,12 +4606,14 @@ function formatWinSatNote(score) {
   return 'Excellent';
 }
 
-function buildDiagnosticsRows(payload) {
+function buildDiagnosticsRows(payload, components = null) {
   const rows = [];
   const tests =
     payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
       ? payload.tests
       : null;
+  const componentMap =
+    components && typeof components === 'object' && !Array.isArray(components) ? components : {};
   const winSat =
     payload && payload.winsat && typeof payload.winsat === 'object' ? payload.winsat : null;
   const winSpr =
@@ -4626,9 +4628,14 @@ function buildDiagnosticsRows(payload) {
         ? winSpr.GraphicsScore
         : null
     : null;
-  if (!tests) {
-    return rows;
-  }
+  const pickStatus = (...values) => {
+    for (const value of values) {
+      if (value !== undefined && value !== null && value !== '') {
+        return value;
+      }
+    }
+    return null;
+  };
 
   const addRow = (label, status, extra) => {
     if (status == null && !extra) {
@@ -4637,20 +4644,30 @@ function buildDiagnosticsRows(payload) {
     rows.push({ label, status, extra });
   };
 
-  addRow('Lecture disque', tests.diskRead, formatMbps(tests.diskReadMBps));
-  addRow('Ecriture disque', tests.diskWrite, formatMbps(tests.diskWriteMBps));
-  const ramNote = tests.ramNote || formatWinSatNote(winSatMemScore);
-  const cpuNote = tests.cpuNote || formatWinSatNote(winSatCpuScore);
+  const diskReadStatus = pickStatus(tests && tests.diskRead, componentMap.diskReadTest, 'not_tested');
+  const diskWriteStatus = pickStatus(tests && tests.diskWrite, componentMap.diskWriteTest, 'not_tested');
+  const ramStatus = pickStatus(tests && (tests.ramTest || tests.ram), componentMap.ramTest, 'not_tested');
+  const cpuStatus = pickStatus(tests && (tests.cpuTest || tests.cpu), componentMap.cpuTest, 'not_tested');
+  const gpuStatus = pickStatus(tests && (tests.gpuTest || tests.gpu), componentMap.gpuTest, 'not_tested');
+  const pingStatus = pickStatus(tests && tests.networkPing, componentMap.networkPing, 'not_tested');
+  const ramNote = (tests && tests.ramNote) || formatWinSatNote(winSatMemScore);
+  const cpuNote = (tests && tests.cpuNote) || formatWinSatNote(winSatCpuScore);
+  const gpuScoreSource = tests ? tests.gpuScore : null;
   const gpuNote =
-    tests.gpuNote ||
-    formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : tests.gpuScore);
-  addRow('RAM (WinSAT)', tests.ramTest, ramNote || formatMbps(tests.ramMBps));
-  addRow('CPU (WinSAT)', tests.cpuTest, cpuNote || formatMbps(tests.cpuMBps));
-  addRow('GPU (WinSAT)', tests.gpuTest, gpuNote || formatScore(tests.gpuScore));
-  addRow('CPU (stress)', tests.cpuStress, null);
-  addRow('GPU (stress)', tests.gpuStress, null);
-  addRow('Ping', tests.networkPing, tests.networkPingTarget || null);
-  addRow('Check disque', tests.fsCheck, null);
+    (tests && tests.gpuNote) ||
+    formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : gpuScoreSource);
+  addRow('Lecture disque', diskReadStatus, tests ? formatMbps(tests.diskReadMBps) : null);
+  addRow('Ecriture disque', diskWriteStatus, tests ? formatMbps(tests.diskWriteMBps) : null);
+  addRow('RAM (WinSAT)', ramStatus, ramNote || (tests ? formatMbps(tests.ramMBps) : null));
+  addRow('CPU (WinSAT)', cpuStatus, cpuNote || (tests ? formatMbps(tests.cpuMBps) : null));
+  addRow('GPU (WinSAT)', gpuStatus, gpuNote || (tests ? formatScore(tests.gpuScore) : null));
+  if (tests) {
+    addRow('CPU (stress)', tests.cpuStress, null);
+    addRow('GPU (stress)', tests.gpuStress, null);
+  }
+  addRow('Ping', pingStatus, tests ? tests.networkPingTarget || null : null);
+  const fsCheckStatus = pickStatus(tests && tests.fsCheck, componentMap.fsCheck, null);
+  addRow('Check disque', fsCheckStatus, null);
 
   return rows;
 }
@@ -6780,6 +6797,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
       } catch (error) {
         components = null;
       }
+      components = withManualComponentDefaults(components);
       return {
         id: row.id,
         machineKey: row.machine_key,
@@ -7366,6 +7384,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
   if (!components && machineComponents) {
     components = machineComponents;
   }
+  components = withManualComponentDefaults(components);
 
   try {
     payload = row.payload ? JSON.parse(row.payload) : null;
@@ -8522,7 +8541,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     keyboardStatus: row.keyboard_status,
     padStatus: row.pad_status,
     badgeReaderStatus: row.badge_reader_status,
-    diagnostics: buildDiagnosticsRows(payload),
+    diagnostics: buildDiagnosticsRows(payload, components),
     inventoryRows: buildInventoryRows(payload),
     components: buildComponentRows(components),
     summary: summarizeComponents(components),
