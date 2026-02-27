@@ -4358,7 +4358,17 @@ function mergeHardwarePayload(primary, fallback) {
     return base || null;
   }
 
-  const keys = ['cpu', 'gpu', 'disks', 'volumes'];
+  const keys = [
+    'cpu',
+    'gpu',
+    'disks',
+    'volumes',
+    'autopilot',
+    'autopilotHash',
+    'deviceHardwareData',
+    'device_hardware_data',
+    'hardwareHash'
+  ];
   keys.forEach((key) => {
     if (base[key] == null && fallbackObj[key] != null) {
       base[key] = fallbackObj[key];
@@ -4578,6 +4588,90 @@ function buildPdfWifiStandardCode(payload) {
     .map((value) => normalizeWifiStandardCode(value))
     .filter(Boolean);
   return pickBestWifiStandard(normalizedStandards);
+}
+
+function normalizeAutopilotHashValue(value) {
+  if (value == null) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.replace(/\s+/g, '');
+}
+
+function buildAutopilotHash(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+  const autopilot =
+    payload.autopilot && typeof payload.autopilot === 'object' && !Array.isArray(payload.autopilot)
+      ? payload.autopilot
+      : null;
+  const device =
+    payload.device && typeof payload.device === 'object' && !Array.isArray(payload.device)
+      ? payload.device
+      : null;
+  const inventory =
+    payload.inventory && typeof payload.inventory === 'object' && !Array.isArray(payload.inventory)
+      ? payload.inventory
+      : null;
+  const inventoryAutopilot =
+    inventory &&
+    inventory.autopilot &&
+    typeof inventory.autopilot === 'object' &&
+    !Array.isArray(inventory.autopilot)
+      ? inventory.autopilot
+      : null;
+
+  const candidates = [
+    payload.autopilotHash,
+    payload.deviceHardwareData,
+    payload.device_hardware_data,
+    payload.hardwareHash
+  ];
+
+  if (autopilot) {
+    candidates.push(
+      autopilot.hardwareHash,
+      autopilot.hash,
+      autopilot.deviceHardwareData,
+      autopilot.device_hardware_data,
+      autopilot.blob
+    );
+  }
+  if (device) {
+    candidates.push(device.autopilotHash, device.hardwareHash, device.deviceHardwareData);
+  }
+  if (inventory) {
+    candidates.push(inventory.autopilotHash);
+  }
+  if (inventoryAutopilot) {
+    candidates.push(
+      inventoryAutopilot.hardwareHash,
+      inventoryAutopilot.hash,
+      inventoryAutopilot.deviceHardwareData
+    );
+  }
+
+  const normalized = candidates.map((value) => normalizeAutopilotHashValue(value)).filter(Boolean);
+  if (!normalized.length) {
+    return null;
+  }
+  return normalized.reduce((longest, current) => (current.length > longest.length ? current : longest));
+}
+
+function formatPdfAutopilotHash(hashValue) {
+  const normalized = normalizeAutopilotHashValue(hashValue);
+  if (!normalized) {
+    return null;
+  }
+  const maxLength = 72;
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}... (${normalized.length} chars)`;
 }
 
 function parseMetricNumber(value) {
@@ -5516,6 +5610,7 @@ function drawReportPdf(doc, data) {
 
   const identRows = [
     { label: 'Serial', value: data.serialNumber },
+    { label: 'Hash Autopilot', value: data.autopilotHashDisplay || data.autopilotHash },
     { label: 'MAC', value: data.macPrimary },
     { label: 'OS', value: data.osVersion },
     { label: 'Dernier passage', value: data.lastSeen },
@@ -7446,6 +7541,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
     machinePayload = null;
   }
   payload = mergeHardwarePayload(payload, machinePayload);
+  const autopilotHash = buildAutopilotHash(payload);
 
   const relatedSerial = normalizeSerial(row.serial_number);
   let relatedMac = normalizeMac(row.mac_address);
@@ -7550,6 +7646,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       comment: row.comment,
       commentedAt: row.commented_at,
       components,
+      autopilotHash,
       payload,
       relatedReports
     }
@@ -8549,6 +8646,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     machinePayload = null;
   }
   payload = mergeHardwarePayload(payload, machinePayload);
+  const autopilotHash = buildAutopilotHash(payload);
 
   const macAddresses = normalizeMacList(row.mac_addresses);
   const macList = Array.isArray(macAddresses) ? macAddresses.filter(Boolean) : [];
@@ -8585,6 +8683,8 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     storagePrimary: formatPrimaryDisk(diskInfo, volumeInfo),
     batteryHealth: formatBatteryHealth(row.battery_health),
     wifiStandardCode: buildPdfWifiStandardCode(payload),
+    autopilotHash,
+    autopilotHashDisplay: formatPdfAutopilotHash(autopilotHash),
     cameraStatus: row.camera_status,
     usbStatus: row.usb_status,
     keyboardStatus: row.keyboard_status,

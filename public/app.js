@@ -2451,6 +2451,99 @@ function formatMacSummary(machine) {
   return primary || '--';
 }
 
+function normalizeAutopilotHashValue(value) {
+  if (value == null) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.replace(/\s+/g, '');
+}
+
+function getAutopilotHash(detail) {
+  if (!detail || typeof detail !== 'object') {
+    return null;
+  }
+  const payload =
+    detail.payload && typeof detail.payload === 'object' && !Array.isArray(detail.payload)
+      ? detail.payload
+      : null;
+  const autopilot =
+    payload &&
+    payload.autopilot &&
+    typeof payload.autopilot === 'object' &&
+    !Array.isArray(payload.autopilot)
+      ? payload.autopilot
+      : null;
+  const device =
+    payload && payload.device && typeof payload.device === 'object' && !Array.isArray(payload.device)
+      ? payload.device
+      : null;
+  const inventory =
+    payload &&
+    payload.inventory &&
+    typeof payload.inventory === 'object' &&
+    !Array.isArray(payload.inventory)
+      ? payload.inventory
+      : null;
+  const inventoryAutopilot =
+    inventory &&
+    inventory.autopilot &&
+    typeof inventory.autopilot === 'object' &&
+    !Array.isArray(inventory.autopilot)
+      ? inventory.autopilot
+      : null;
+
+  const candidates = [
+    detail.autopilotHash,
+    payload && payload.autopilotHash,
+    payload && payload.deviceHardwareData,
+    payload && payload.device_hardware_data,
+    payload && payload.hardwareHash
+  ];
+  if (autopilot) {
+    candidates.push(
+      autopilot.hardwareHash,
+      autopilot.hash,
+      autopilot.deviceHardwareData,
+      autopilot.device_hardware_data,
+      autopilot.blob
+    );
+  }
+  if (device) {
+    candidates.push(device.autopilotHash, device.hardwareHash, device.deviceHardwareData);
+  }
+  if (inventory) {
+    candidates.push(inventory.autopilotHash);
+  }
+  if (inventoryAutopilot) {
+    candidates.push(
+      inventoryAutopilot.hardwareHash,
+      inventoryAutopilot.hash,
+      inventoryAutopilot.deviceHardwareData
+    );
+  }
+
+  const normalized = candidates.map((value) => normalizeAutopilotHashValue(value)).filter(Boolean);
+  if (!normalized.length) {
+    return null;
+  }
+  return normalized.reduce((longest, current) => (current.length > longest.length ? current : longest));
+}
+
+function formatAutopilotHashPreview(value, maxLength = 96) {
+  const normalized = normalizeAutopilotHashValue(value);
+  if (!normalized) {
+    return '--';
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}... (${normalized.length})`;
+}
+
 function formatDateTime(value) {
   if (!value) {
     return '--';
@@ -4248,11 +4341,18 @@ function buildDrawerDetailHtml(detail) {
     </div>
   `;
 
+  const autopilotHash = getAutopilotHash(detail);
+  const autopilotHashTitle = autopilotHash || '--';
+  const autopilotHashPreview = formatAutopilotHashPreview(autopilotHash);
+
   const identifiersPanel = `
     <div class="drawer-table">
       <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
       <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
       <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
+      <div><span>Hash Autopilot</span><strong class="drawer-long-value" title="${escapeHtml(autopilotHashTitle)}">${escapeHtml(
+        autopilotHashPreview
+      )}</strong></div>
       <div><span>Premier passage</span><strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong></div>
       <div><span>Dernier passage</span><strong>${escapeHtml(formatDateTime(detail.lastSeen))}</strong></div>
     </div>
@@ -5015,6 +5115,9 @@ function buildDetailHtml(detail) {
 
   const diagnosticsHtml = buildDiagnosticsHtml(detail);
   const historyHtml = buildReportHistory(detail);
+  const autopilotHash = getAutopilotHash(detail);
+  const autopilotHashPreview = formatAutopilotHashPreview(autopilotHash, 120);
+  const autopilotHashTitle = autopilotHash || '--';
 
   return `
     <div class="detail-header">
@@ -5041,6 +5144,12 @@ function buildDetailHtml(detail) {
       <div class="detail-item">
         <span>OS</span>
         <strong>${escapeHtml(detail.osVersion || '--')}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Hash Autopilot</span>
+        <strong class="detail-long-value" title="${escapeHtml(autopilotHashTitle)}">${escapeHtml(
+          autopilotHashPreview
+        )}</strong>
       </div>
       <div class="detail-item">
         <span>Dernier passage</span>
@@ -5096,6 +5205,9 @@ function buildReportDocument(detail) {
   const volumeInfoRaw = payload ? payload.volumes : null;
   const volumeInfo = Array.isArray(volumeInfoRaw) ? volumeInfoRaw : volumeInfoRaw ? [volumeInfoRaw] : [];
   const macAddresses = Array.isArray(detail.macAddresses) ? detail.macAddresses : [];
+  const autopilotHash = getAutopilotHash(detail);
+  const autopilotHashPreview = formatAutopilotHashPreview(autopilotHash, 120);
+  const autopilotHashTitle = autopilotHash || '--';
   const macListHtml = macAddresses.length
     ? `<div class="mac-list">${macAddresses
         .map((mac) => `<span class="mac-chip">${escapeHtml(mac)}</span>`)
@@ -5493,6 +5605,12 @@ function buildReportDocument(detail) {
           <div class="detail-item">
             <span>OS</span>
             <strong>${escapeHtml(detail.osVersion || '--')}</strong>
+          </div>
+          <div class="detail-item">
+            <span>Hash Autopilot</span>
+            <strong class="detail-long-value" title="${escapeHtml(autopilotHashTitle)}">${escapeHtml(
+              autopilotHashPreview
+            )}</strong>
           </div>
           <div class="detail-item">
             <span>IP</span>

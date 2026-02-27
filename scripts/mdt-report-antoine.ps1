@@ -64,7 +64,7 @@ param(
   [switch]$FailTaskSequenceOnError
 )
 
-$scriptVersion = '1.7.7'
+$scriptVersion = '1.7.8'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -3022,6 +3022,47 @@ function Invoke-WinsatCapture {
   return @{ status = $status; mbps = $null }
 }
 
+function Invoke-WinsatAssessmentWithXml {
+  param(
+    [string]$AssessmentKey,
+    [string[]]$Arguments,
+    [int]$TimeoutSec
+  )
+
+  $safeKey = if ($AssessmentKey) { [regex]::Replace($AssessmentKey, '[^A-Za-z0-9_-]', '_') } else { 'assessment' }
+  $runToken = if ($clientRunId) { $clientRunId } else { [guid]::NewGuid().ToString() }
+  $outputDir = $null
+  if ($script:WinSatLogDir) {
+    $outputDir = $script:WinSatLogDir
+  } elseif ($env:TEMP) {
+    $outputDir = Join-Path $env:TEMP 'mdt-fusion\\winsat'
+  } else {
+    $outputDir = $PSScriptRoot
+  }
+
+  $outputXmlPath = $null
+  if ($outputDir) {
+    try {
+      Ensure-Directory -Path $outputDir | Out-Null
+      $outputXmlPath = Join-Path $outputDir ("{0}.Assessment.{1}.WinSAT.xml" -f $safeKey, $runToken)
+    } catch {
+      $outputXmlPath = $null
+    }
+  }
+
+  $capture = Invoke-WinsatCapture -Arguments $Arguments -TimeoutSec $TimeoutSec -OutputXmlPath $outputXmlPath
+  $parsed = $null
+  if ($outputXmlPath -and (Test-Path -Path $outputXmlPath)) {
+    $parsed = Get-WinsatFromXmlFile -Path $outputXmlPath
+  }
+
+  return [ordered]@{
+    status = if ($capture) { $capture.status } else { $null }
+    xmlPath = $outputXmlPath
+    winsat = $parsed
+  }
+}
+
 function Invoke-ExternalTest {
   param(
     [string]$Path,
@@ -3648,6 +3689,53 @@ function Get-WifiStandardStatus {
     $result.status = 'not_tested'
   }
   return $result
+}
+
+function Get-AutopilotHardwareHash {
+  $result = [ordered]@{
+    status = 'not_tested'
+    value = $null
+    source = 'mdm_dmmap'
+  }
+
+  try {
+    $queryPlans = @(
+      @{ className = 'MDM_DevDetail_Ext01'; filter = "InstanceID='Ext' AND ParentID='./DevDetail'"; source = 'mdm_dmmap_filtered' },
+      @{ className = 'MDM_DevDetail_Ext01'; filter = $null; source = 'mdm_dmmap' },
+      @{ className = 'MDM_DevDetailExt01'; filter = "InstanceID='Ext' AND ParentID='./DevDetail'"; source = 'mdm_dmmap_alt_filtered' },
+      @{ className = 'MDM_DevDetailExt01'; filter = $null; source = 'mdm_dmmap_alt' }
+    )
+
+    foreach ($plan in $queryPlans) {
+      $records = Get-CimInstanceSafe -Namespace 'root/cimv2/mdm/dmmap' -ClassName $plan.className -Filter $plan.filter
+      if (-not $records -or $records.Count -eq 0) {
+        continue
+      }
+      foreach ($record in $records) {
+        if (-not $record) { continue }
+        $rawValue = $null
+        try {
+          $rawValue = $record.DeviceHardwareData
+        } catch {
+          $rawValue = $null
+        }
+        if ($rawValue -eq $null) { continue }
+        $cleanValue = ([string]$rawValue).Trim()
+        if (-not $cleanValue) { continue }
+        $result.status = 'ok'
+        $result.value = ($cleanValue -replace '\s+', '')
+        $result.source = $plan.source
+        return $result
+      }
+    }
+
+    $result.source = 'empty_value'
+    return $result
+  } catch {
+    Write-Log "Autopilot hash query failed: $($_.Exception.Message)" 'WARN'
+    $result.source = 'query_error'
+    return $result
+  }
 }
 
 function Get-BiosLanguageStatus {
@@ -4363,6 +4451,8 @@ $badgeStatus = $null
 $wifiStandardInfo = $null
 $wifiStandardStatus = 'not_tested'
 $wifiStandardValue = $null
+$autopilotHashInfo = $null
+$autopilotHashValue = $null
 $cameraTestStatus = $null
 $cameraTestOutputDir = $null
 
@@ -4445,6 +4535,15 @@ if ($wifiStandardInfo -and $wifiStandardInfo.standard) {
   $wifiStandardValue = $wifiStandardInfo.standard
 }
 Write-Log ("Wi-Fi standard status={0} standard={1}" -f $wifiStandardStatus, $wifiStandardValue)
+
+$autopilotHashInfo = Get-AutopilotHardwareHash
+if ($autopilotHashInfo -and $autopilotHashInfo.value) {
+  $autopilotHashValue = $autopilotHashInfo.value
+}
+$autopilotHashLen = if ($autopilotHashValue) { $autopilotHashValue.Length } else { 0 }
+$autopilotHashSource = if ($autopilotHashInfo -and $autopilotHashInfo.source) { $autopilotHashInfo.source } else { 'unknown' }
+$autopilotHashStatus = if ($autopilotHashInfo -and $autopilotHashInfo.status) { $autopilotHashInfo.status } else { 'not_tested' }
+Write-Log ("Autopilot hash status={0} length={1} source={2}" -f $autopilotHashStatus, $autopilotHashLen, $autopilotHashSource)
 
 $diskSmart = $null
 $diskInventory = Get-DiskInventory
@@ -4749,6 +4848,55 @@ if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
   }
 }
 
+$winsatDriveArg = if ($driveLetter) { $driveLetter.TrimEnd(':') } else { 'C' }
+if ($tests.ramTest -ne 'ok' -or $tests.ramMBps -eq $null) {
+  Write-Log 'WinSAT memory fallback run (winsat mem).' 'WARN'
+  $memFallback = Invoke-WinsatAssessmentWithXml -AssessmentKey 'Mem' -Arguments @('mem') -TimeoutSec $MemTestTimeoutSec
+  $memFallbackBandwidth = $null
+  if ($memFallback -and $memFallback.winsat -and $memFallback.winsat.memory -and $memFallback.winsat.memory.bandwidthMBps -ne $null) {
+    $memFallbackBandwidth = $memFallback.winsat.memory.bandwidthMBps
+  }
+  Write-Log ("WinSAT memory fallback status={0} bandwidth={1} xml={2}" -f $memFallback.status, $memFallbackBandwidth, $memFallback.xmlPath)
+  if ($memFallbackBandwidth -ne $null) {
+    $tests.ramTest = 'ok'
+    $tests.ramMBps = [math]::Round($memFallbackBandwidth, 1)
+  } elseif ($memFallback.status -eq 'ok' -and $tests.ramTest -eq 'not_tested') {
+    $tests.ramTest = 'ok'
+  }
+}
+
+if ($tests.diskRead -ne 'ok' -or $tests.diskReadMBps -eq $null) {
+  Write-Log ("WinSAT disk read fallback run (drive={0})." -f $winsatDriveArg) 'WARN'
+  $diskReadFallback = Invoke-WinsatAssessmentWithXml -AssessmentKey 'DiskRead' -Arguments @('disk', '-seq', '-read', '-drive', $winsatDriveArg) -TimeoutSec $DiskTestTimeoutSec
+  $diskReadMbps = $null
+  if ($diskReadFallback -and $diskReadFallback.winsat -and $diskReadFallback.winsat.disk -and $diskReadFallback.winsat.disk.seqReadMBps -ne $null) {
+    $diskReadMbps = $diskReadFallback.winsat.disk.seqReadMBps
+  }
+  Write-Log ("WinSAT disk read fallback status={0} mbps={1} xml={2}" -f $diskReadFallback.status, $diskReadMbps, $diskReadFallback.xmlPath)
+  if ($diskReadMbps -ne $null) {
+    $tests.diskRead = 'ok'
+    $tests.diskReadMBps = [math]::Round($diskReadMbps, 1)
+  } elseif ($diskReadFallback.status -eq 'ok' -and $tests.diskRead -eq 'not_tested') {
+    $tests.diskRead = 'ok'
+  }
+}
+
+if ($tests.diskWrite -ne 'ok' -or $tests.diskWriteMBps -eq $null) {
+  Write-Log ("WinSAT disk write fallback run (drive={0})." -f $winsatDriveArg) 'WARN'
+  $diskWriteFallback = Invoke-WinsatAssessmentWithXml -AssessmentKey 'DiskWrite' -Arguments @('disk', '-seq', '-write', '-drive', $winsatDriveArg) -TimeoutSec $DiskTestTimeoutSec
+  $diskWriteMbps = $null
+  if ($diskWriteFallback -and $diskWriteFallback.winsat -and $diskWriteFallback.winsat.disk -and $diskWriteFallback.winsat.disk.seqWriteMBps -ne $null) {
+    $diskWriteMbps = $diskWriteFallback.winsat.disk.seqWriteMBps
+  }
+  Write-Log ("WinSAT disk write fallback status={0} mbps={1} xml={2}" -f $diskWriteFallback.status, $diskWriteMbps, $diskWriteFallback.xmlPath)
+  if ($diskWriteMbps -ne $null) {
+    $tests.diskWrite = 'ok'
+    $tests.diskWriteMBps = [math]::Round($diskWriteMbps, 1)
+  } elseif ($diskWriteFallback.status -eq 'ok' -and $tests.diskWrite -eq 'not_tested') {
+    $tests.diskWrite = 'ok'
+  }
+}
+
 if ($formalStatus -and $formalStatus -ne 'ok') {
   if (-not $tests.diskRead -or $tests.diskRead -eq 'not_tested') { $tests.diskRead = $formalStatus }
   if (-not $tests.diskWrite -or $tests.diskWrite -eq 'not_tested') { $tests.diskWrite = $formalStatus }
@@ -4886,12 +5034,18 @@ if ($biosLanguageInfo -and $biosLanguageInfo.value) { $payload.biosLanguage = $b
 if ($biosPasswordInfo -and $biosPasswordInfo.status) { $payload.biosPasswordStatus = $biosPasswordInfo.status }
 if ($biosPasswordInfo -and $biosPasswordInfo.isSet -ne $null) { $payload.biosPasswordSet = [bool]$biosPasswordInfo.isSet }
 if ($biosBatteryInfo -and $biosBatteryInfo.status) { $payload.biosBatteryStatus = $biosBatteryInfo.status }
+if ($autopilotHashValue) { $payload.autopilotHash = $autopilotHashValue }
 if ($wifiStandardStatus) {
   $payload.wifi = [ordered]@{
     status = $wifiStandardStatus
     standard = $wifiStandardValue
     standards = if ($wifiStandardInfo -and $wifiStandardInfo.standards) { @($wifiStandardInfo.standards) } else { @() }
   }
+}
+$payload.autopilot = [ordered]@{
+  status = $autopilotHashStatus
+  hardwareHash = $autopilotHashValue
+  source = $autopilotHashSource
 }
 if ($diskInventory) {
   $diskList = @($diskInventory)
@@ -4907,6 +5061,7 @@ if ($batteryInventory -and $batteryInventory.Count -gt 0) { $inventory.battery =
 if ($physicalMediaInventory -and $physicalMediaInventory.Count -gt 0) { $inventory.disks = $physicalMediaInventory }
 if ($memorySerials -and $memorySerials.Count -gt 0) { $inventory.memory = $memorySerials }
 if ($baseboardInventory) { $inventory.baseboard = $baseboardInventory }
+if ($autopilotHashValue) { $inventory.autopilotHash = $autopilotHashValue }
 if ($inventory.Count -gt 0) { $payload.inventory = $inventory }
 
 
