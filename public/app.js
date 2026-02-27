@@ -2544,6 +2544,106 @@ function formatAutopilotHashPreview(value, maxLength = 96) {
   return `${normalized.slice(0, maxLength)}... (${normalized.length})`;
 }
 
+function copyTextToClipboard(text) {
+  if (text == null) {
+    return Promise.reject(new Error('empty_text'));
+  }
+  const value = String(text);
+  if (!value.trim()) {
+    return Promise.reject(new Error('empty_text'));
+  }
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    return navigator.clipboard.writeText(value);
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.top = '0';
+      textarea.style.left = '-9999px';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+      const copied = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      if (!copied) {
+        reject(new Error('copy_failed'));
+        return;
+      }
+      resolve();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function setCopyButtonState(button, label, stateClass = '') {
+  if (!button) {
+    return;
+  }
+  if (!button.dataset.defaultLabel) {
+    button.dataset.defaultLabel = button.textContent ? button.textContent.trim() : 'Copier';
+  }
+  button.textContent = label;
+  button.classList.remove('is-success', 'is-error');
+  if (stateClass) {
+    button.classList.add(stateClass);
+  }
+}
+
+function resetCopyButtonState(button) {
+  if (!button) {
+    return;
+  }
+  if (button._copyStateTimer) {
+    window.clearTimeout(button._copyStateTimer);
+  }
+  setCopyButtonState(button, button.dataset.defaultLabel || 'Copier');
+}
+
+function copyAutopilotHashForReport(id, button) {
+  const targetId = id != null ? String(id) : '';
+  if (!targetId || !button) {
+    return;
+  }
+
+  const detail = state.details[targetId] || getMachineById(targetId);
+  const hash = getAutopilotHash(detail);
+  if (!hash) {
+    setCopyButtonState(button, 'Indispo', 'is-error');
+    button._copyStateTimer = window.setTimeout(() => {
+      resetCopyButtonState(button);
+    }, 1500);
+    return;
+  }
+
+  if (button._copyStateTimer) {
+    window.clearTimeout(button._copyStateTimer);
+  }
+  button.disabled = true;
+  setCopyButtonState(button, 'Copie...');
+
+  copyTextToClipboard(hash)
+    .then(() => {
+      button.disabled = false;
+      setCopyButtonState(button, 'Copie', 'is-success');
+      button._copyStateTimer = window.setTimeout(() => {
+        resetCopyButtonState(button);
+      }, 1500);
+    })
+    .catch((error) => {
+      console.error('Unable to copy autopilot hash', error);
+      button.disabled = false;
+      setCopyButtonState(button, 'Erreur', 'is-error');
+      button._copyStateTimer = window.setTimeout(() => {
+        resetCopyButtonState(button);
+      }, 1500);
+    });
+}
+
 function formatDateTime(value) {
   if (!value) {
     return '--';
@@ -4344,15 +4444,19 @@ function buildDrawerDetailHtml(detail) {
   const autopilotHash = getAutopilotHash(detail);
   const autopilotHashTitle = autopilotHash || '--';
   const autopilotHashPreview = formatAutopilotHashPreview(autopilotHash);
+  const canCopyAutopilotHash = Boolean(autopilotHash && detailId);
+  const autopilotCopyButton = canCopyAutopilotHash
+    ? `<button class="drawer-copy-btn" type="button" data-action="copy-autopilot-hash" data-id="${detailId}" title="Copier le hash complet">Copier</button>`
+    : '';
 
   const identifiersPanel = `
     <div class="drawer-table">
       <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
       <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
       <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
-      <div><span>Hash Autopilot</span><strong class="drawer-long-value" title="${escapeHtml(autopilotHashTitle)}">${escapeHtml(
-        autopilotHashPreview
-      )}</strong></div>
+      <div><span>Hash Autopilot</span><div class="drawer-long-row"><strong class="drawer-long-value" title="${escapeHtml(
+        autopilotHashTitle
+      )}">${escapeHtml(autopilotHashPreview)}</strong>${autopilotCopyButton}</div></div>
       <div><span>Premier passage</span><strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong></div>
       <div><span>Dernier passage</span><strong>${escapeHtml(formatDateTime(detail.lastSeen))}</strong></div>
     </div>
@@ -5118,6 +5222,10 @@ function buildDetailHtml(detail) {
   const autopilotHash = getAutopilotHash(detail);
   const autopilotHashPreview = formatAutopilotHashPreview(autopilotHash, 120);
   const autopilotHashTitle = autopilotHash || '--';
+  const canCopyAutopilotHash = Boolean(autopilotHash && detailId);
+  const autopilotCopyButton = canCopyAutopilotHash
+    ? `<button class="hash-copy-btn" type="button" data-action="copy-autopilot-hash" data-id="${detailId}" title="Copier le hash complet">Copier</button>`
+    : '';
 
   return `
     <div class="detail-header">
@@ -5147,9 +5255,12 @@ function buildDetailHtml(detail) {
       </div>
       <div class="detail-item">
         <span>Hash Autopilot</span>
-        <strong class="detail-long-value" title="${escapeHtml(autopilotHashTitle)}">${escapeHtml(
-          autopilotHashPreview
-        )}</strong>
+        <div class="detail-hash-actions">
+          <strong class="detail-long-value" title="${escapeHtml(autopilotHashTitle)}">${escapeHtml(
+            autopilotHashPreview
+          )}</strong>
+          ${autopilotCopyButton}
+        </div>
       </div>
       <div class="detail-item">
         <span>Dernier passage</span>
@@ -6291,6 +6402,17 @@ listEl.addEventListener('click', (event) => {
     openReportPdf(detail);
     return;
   }
+  const copyHashBtn = event.target.closest('[data-action="copy-autopilot-hash"]');
+  if (copyHashBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = copyHashBtn.dataset.id;
+    if (!id) {
+      return;
+    }
+    copyAutopilotHashForReport(id, copyHashBtn);
+    return;
+  }
   const card = event.target.closest('.machine-card');
   if (!card) {
     return;
@@ -6398,6 +6520,17 @@ if (detailsDrawerShell) {
         return;
       }
       openReportPdf(detail);
+      return;
+    }
+
+    const copyHashBtn = event.target.closest('[data-action="copy-autopilot-hash"]');
+    if (copyHashBtn) {
+      event.preventDefault();
+      const id = copyHashBtn.dataset.id;
+      if (!id) {
+        return;
+      }
+      copyAutopilotHashForReport(id, copyHashBtn);
       return;
     }
 
