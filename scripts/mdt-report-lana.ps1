@@ -851,13 +851,13 @@ function Get-WinsatFromDataStore {
         try { $kind = $node.GetAttribute('kind') } catch { }
         $value = Convert-WinsatNumber $node.InnerText
         if (-not $kind) { continue }
-        if ($kind -match 'Sequential\\s+Read|Séquentielles\\s+Lire') {
+        if ($kind -match 'Sequential\s+Read|Séquentielles\s+Lire') {
           Update-MaxValue -Target $winsat.disk -Key 'seqReadMBps' -Value $value
-        } elseif ($kind -match 'Sequential\\s+Write|Séquentielles\\s+Ecriture|Séquentielles\\s+Écriture') {
+        } elseif ($kind -match 'Sequential\s+Write|Séquentielles\s+Ecriture|Séquentielles\s+Écriture') {
           Update-MaxValue -Target $winsat.disk -Key 'seqWriteMBps' -Value $value
-        } elseif ($kind -match 'Random\\s+Read|Aléatoires\\s+Lire') {
+        } elseif ($kind -match 'Random\s+Read|Aléatoires\s+Lire') {
           Update-MaxValue -Target $winsat.disk -Key 'randReadMBps' -Value $value
-        } elseif ($kind -match 'Random\\s+Write|Aléatoires\\s+Ecriture|Aléatoires\\s+Écriture') {
+        } elseif ($kind -match 'Random\s+Write|Aléatoires\s+Ecriture|Aléatoires\s+Écriture') {
           Update-MaxValue -Target $winsat.disk -Key 'randWriteMBps' -Value $value
         }
       }
@@ -968,13 +968,13 @@ function Get-WinsatFromXmlFile {
       try { $kind = $node.GetAttribute('kind') } catch { }
       $value = Convert-WinsatNumber $node.InnerText
       if (-not $kind) { continue }
-      if ($kind -match 'Sequential\\s+Read|Séquentielles\\s+Lire') {
+      if ($kind -match 'Sequential\s+Read|Séquentielles\s+Lire') {
         Update-MaxValue -Target $winsat.disk -Key 'seqReadMBps' -Value $value
-      } elseif ($kind -match 'Sequential\\s+Write|Séquentielles\\s+Ecriture|Séquentielles\\s+Écriture') {
+      } elseif ($kind -match 'Sequential\s+Write|Séquentielles\s+Ecriture|Séquentielles\s+Écriture') {
         Update-MaxValue -Target $winsat.disk -Key 'seqWriteMBps' -Value $value
-      } elseif ($kind -match 'Random\\s+Read|Aléatoires\\s+Lire') {
+      } elseif ($kind -match 'Random\s+Read|Aléatoires\s+Lire') {
         Update-MaxValue -Target $winsat.disk -Key 'randReadMBps' -Value $value
-      } elseif ($kind -match 'Random\\s+Write|Aléatoires\\s+Ecriture|Aléatoires\\s+Écriture') {
+      } elseif ($kind -match 'Random\s+Write|Aléatoires\s+Ecriture|Aléatoires\s+Écriture') {
         Update-MaxValue -Target $winsat.disk -Key 'randWriteMBps' -Value $value
       }
     }
@@ -1023,13 +1023,13 @@ function Get-WinsatDiskFromXml {
       try { $kind = $node.GetAttribute('kind') } catch { }
       $value = Convert-WinsatNumber $node.InnerText
       if (-not $kind) { continue }
-      if ($kind -match 'Sequential\\s+Read|Séquentielles\\s+Lire') {
+      if ($kind -match 'Sequential\s+Read|Séquentielles\s+Lire') {
         $disk['seqReadMBps'] = $value
-      } elseif ($kind -match 'Sequential\\s+Write|Séquentielles\\s+Ecriture|Séquentielles\\s+Écriture') {
+      } elseif ($kind -match 'Sequential\s+Write|Séquentielles\s+Ecriture|Séquentielles\s+Écriture') {
         $disk['seqWriteMBps'] = $value
-      } elseif ($kind -match 'Random\\s+Read|Aléatoires\\s+Lire') {
+      } elseif ($kind -match 'Random\s+Read|Aléatoires\s+Lire') {
         $disk['randReadMBps'] = $value
-      } elseif ($kind -match 'Random\\s+Write|Aléatoires\\s+Ecriture|Aléatoires\\s+Écriture') {
+      } elseif ($kind -match 'Random\s+Write|Aléatoires\s+Ecriture|Aléatoires\s+Écriture') {
         $disk['randWriteMBps'] = $value
       }
     }
