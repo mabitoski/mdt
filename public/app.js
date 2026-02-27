@@ -2035,10 +2035,63 @@ function normalizeStatusKey(value) {
     if (value === 0) {
       return 'nok';
     }
+  }
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) {
     return null;
   }
-  const key = String(value).trim().toLowerCase();
-  return statusLabels[key] ? key : null;
+  if (statusLabels[raw]) {
+    return raw;
+  }
+
+  const cleaned = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (statusLabels[cleaned]) {
+    return cleaned;
+  }
+  if (
+    cleaned.includes('not tested') ||
+    cleaned.includes('not_tested') ||
+    cleaned.includes('non teste') ||
+    cleaned.includes('non testee') ||
+    cleaned.includes('pas teste') ||
+    cleaned.includes('not run')
+  ) {
+    return 'not_tested';
+  }
+  if (
+    cleaned.includes('absent') ||
+    cleaned.includes('missing') ||
+    cleaned.includes('not present') ||
+    cleaned.includes('non present') ||
+    cleaned.includes('not detected') ||
+    cleaned.includes('indisponible')
+  ) {
+    return 'absent';
+  }
+  if (
+    cleaned.includes('nok') ||
+    cleaned.includes('ko') ||
+    cleaned.includes('fail') ||
+    cleaned.includes('error') ||
+    cleaned.includes('not ok') ||
+    cleaned.includes('defaillant') ||
+    cleaned.includes('defectueux') ||
+    cleaned.includes('not working')
+  ) {
+    return 'nok';
+  }
+  if (
+    cleaned === 'ok' ||
+    cleaned.includes('good') ||
+    cleaned.includes('present') ||
+    cleaned.includes('working') ||
+    cleaned.includes('fonction') ||
+    cleaned.includes('disponible') ||
+    cleaned.endsWith(' ok')
+  ) {
+    return 'ok';
+  }
+  return null;
 }
 
 function normalizeBiosLanguageKey(value) {
@@ -2282,6 +2335,11 @@ function summarizeDetailForDrawer(detail) {
     return summary;
   }
 
+  const payload = detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const tests =
+    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+      ? payload.tests
+      : null;
   const components = resolveDetailComponents(detail);
   const componentKeys = [
     'usb',
@@ -2297,18 +2355,13 @@ function summarizeDetailForDrawer(detail) {
     'wifiStandard'
   ];
   componentKeys.forEach((key) => {
-    const raw = Object.prototype.hasOwnProperty.call(components, key) ? components[key] : 'not_tested';
+    const raw = resolveUnifiedComponentStatus(key, components, tests);
     const normalized = normalizeSummaryStatusForKey(key, raw || 'not_tested');
     if (normalized) {
       addSummaryStatus(summary, normalized);
     }
   });
 
-  const payload = detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
-  const tests =
-    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
-      ? payload.tests
-      : null;
   const diagnosticCandidates = [];
   if (tests) {
     diagnosticCandidates.push(
@@ -3961,7 +4014,35 @@ function resolveDetailComponents(detail) {
     detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
       ? detail.components
       : {};
-  return { ...defaults, ...raw };
+  const merged = { ...defaults, ...raw };
+  const topLevelFallbacks = {
+    camera: detail && detail.cameraStatus,
+    usb: detail && detail.usbStatus,
+    keyboard: detail && detail.keyboardStatus,
+    pad: detail && detail.padStatus,
+    badgeReader: detail && detail.badgeReaderStatus
+  };
+  Object.entries(topLevelFallbacks).forEach(([key, value]) => {
+    if (!Object.prototype.hasOwnProperty.call(merged, key) && value != null && value !== '') {
+      merged[key] = value;
+    }
+  });
+  return merged;
+}
+
+function resolveUnifiedComponentStatus(key, components, tests = null) {
+  const source =
+    components && typeof components === 'object' && !Array.isArray(components) ? components : {};
+  if (key === 'cpu') {
+    return source.cpu || (tests && (tests.cpu || tests.cpuTest)) || source.cpuTest || 'not_tested';
+  }
+  if (key === 'gpu') {
+    return source.gpu || (tests && (tests.gpu || tests.gpuTest)) || source.gpuTest || 'not_tested';
+  }
+  if (Object.prototype.hasOwnProperty.call(source, key)) {
+    return source[key];
+  }
+  return 'not_tested';
 }
 
 function getDrawerMachineSequence() {
@@ -4114,6 +4195,10 @@ function buildDrawerDetailHtml(detail) {
 
   const payload =
     detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const tests =
+    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+      ? payload.tests
+      : null;
   const cpuInfo = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
   const gpuInfo = payload && payload.gpu && typeof payload.gpu === 'object' ? payload.gpu : null;
   const diskInfoRaw = payload ? payload.disks : null;
@@ -4192,7 +4277,7 @@ function buildDrawerDetailHtml(detail) {
       ([label, key]) => `
         <div class="drawer-status-row">
           <span>${escapeHtml(label)}</span>
-          ${renderStatusValue(components[key] || 'not_tested', { id: detailId, key })}
+          ${renderStatusValue(resolveUnifiedComponentStatus(key, components, tests), { id: detailId, key })}
         </div>
       `
     )

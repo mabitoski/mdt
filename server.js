@@ -3927,6 +3927,8 @@ function buildDerivedComponents(body, sources) {
     addStatus('ramTest', tests.ramTest);
     addStatus('cpuTest', tests.cpuTest);
     addStatus('gpuTest', tests.gpuTest);
+    addStatus('cpu', tests.cpuTest || tests.cpu);
+    addStatus('gpu', tests.gpuTest || tests.gpu);
     addStatus('cpuStress', tests.cpuStress);
     addStatus('gpuStress', tests.gpuStress);
     addStatus('networkTest', tests.network);
@@ -4065,7 +4067,10 @@ function normalizeStatusKey(value) {
     }
   }
   const key = String(value).trim().toLowerCase();
-  return STATUS_LABELS[key] ? key : null;
+  if (STATUS_LABELS[key]) {
+    return key;
+  }
+  return normalizeStatus(value);
 }
 
 function summarizeComponents(components) {

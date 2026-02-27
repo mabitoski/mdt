@@ -60,7 +60,8 @@ param(
   [string]$ReportTag = $env:MDT_REPORT_TAG,
   [string]$ReportTagId = $env:MDT_REPORT_TAG_ID,
   [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
-  [switch]$SkipRawUpload
+  [switch]$SkipRawUpload,
+  [switch]$FailTaskSequenceOnError
 )
 
 $scriptVersion = '1.7.7'
@@ -75,12 +76,36 @@ if (-not $NetworkPingTarget) {
 }
 
 if (-not $LogPath) {
-  $LogPath = Join-Path $PSScriptRoot 'mdt-report.log'
+  $baseLogDir = $null
+  if ($env:_SMSTSLogPath -and (Test-Path -Path $env:_SMSTSLogPath)) {
+    $baseLogDir = $env:_SMSTSLogPath
+  } elseif ($env:TEMP) {
+    $baseLogDir = $env:TEMP
+  } elseif ($env:WINDIR) {
+    $baseLogDir = Join-Path $env:WINDIR 'Temp'
+  } elseif ($PSScriptRoot) {
+    $baseLogDir = $PSScriptRoot
+  } else {
+    $baseLogDir = (Get-Location).Path
+  }
+  $LogPath = Join-Path $baseLogDir 'mdt-report.log'
+}
+
+try {
+  $logDir = Split-Path $LogPath -Parent
+  if ($logDir -and -not (Test-Path -Path $logDir)) {
+    New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+  }
+  New-Item -Path $LogPath -ItemType File -Force | Out-Null
+} catch {
 }
 
 if (-not $Technician) { $Technician = 'Antoine' }
 if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
   $SkipRawUpload = $true
+}
+if (-not $PSBoundParameters.ContainsKey('FailTaskSequenceOnError') -and $env:MDT_FAIL_TS_ON_REPORT_ERROR -eq '1') {
+  $FailTaskSequenceOnError = $true
 }
 if (-not $PSBoundParameters.ContainsKey('SkipGpuAssessment') -and $env:MDT_SKIP_GPU_ASSESSMENT -eq '1') {
   $SkipGpuAssessment = $true
@@ -3494,12 +3519,58 @@ function Get-WifiStandardRank {
   }
 }
 
+function Get-WifiStandardCandidatesFromText {
+  param([string]$Text)
+
+  $candidates = @()
+  if (-not $Text) { return $candidates }
+
+  $linePatterns = @(
+    '(?im)^\s*(?:radio\s*type|type\s+de\s+radio)\s*:\s*(?<value>.+)$',
+    '(?im)^\s*(?:radio\s*types?\s*supported|types?\s+de\s+radio\s+pris\s+en\s+charge)\s*:\s*(?<value>.+)$'
+  )
+  foreach ($pattern in $linePatterns) {
+    $matches = [regex]::Matches($Text, $pattern)
+    foreach ($match in $matches) {
+      $lineValue = $match.Groups['value'].Value
+      if (-not $lineValue) { continue }
+      $standardMatches = [regex]::Matches($lineValue, '(?i)(?:802[\.\-\s]*11|11)\s*(be|ax|ac|n|g|a|b)\b')
+      foreach ($standardMatch in $standardMatches) {
+        $candidate = "802.11$($standardMatch.Groups[1].Value.ToLowerInvariant())"
+        if ($candidate -and ($candidates -notcontains $candidate)) {
+          $candidates += $candidate
+        }
+      }
+      $singleCandidate = Get-WifiStandardCode -Value $lineValue
+      if ($singleCandidate -and ($candidates -notcontains $singleCandidate)) {
+        $candidates += $singleCandidate
+      }
+    }
+  }
+
+  if (-not $candidates -or $candidates.Count -eq 0) {
+    $allMatches = [regex]::Matches($Text, '(?i)(?:802[\.\-\s]*11|11)\s*(be|ax|ac|n|g|a|b)\b')
+    foreach ($standardMatch in $allMatches) {
+      $candidate = "802.11$($standardMatch.Groups[1].Value.ToLowerInvariant())"
+      if ($candidate -and ($candidates -notcontains $candidate)) {
+        $candidates += $candidate
+      }
+    }
+    $fallback = Get-WifiStandardCode -Value $Text
+    if ($fallback -and ($candidates -notcontains $fallback)) {
+      $candidates += $fallback
+    }
+  }
+
+  return $candidates
+}
+
 function Get-WifiStandardStatus {
   $result = [ordered]@{
     status = 'not_tested'
     standard = $null
     standards = @()
-    source = 'netsh'
+    source = 'netsh_interfaces'
   }
 
   $netsh = Get-Command netsh -ErrorAction SilentlyContinue
@@ -3521,41 +3592,23 @@ function Get-WifiStandardStatus {
     return $result
   }
 
-  $candidates = @()
-  $linePatterns = @(
-    '(?im)^\s*(?:radio\s*type|type\s+de\s+radio)\s*:\s*(?<value>.+)$',
-    '(?im)^\s*(?:radio\s*types?\s*supported|types?\s+de\s+radio\s+pris\s+en\s+charge)\s*:\s*(?<value>.+)$'
-  )
-  foreach ($pattern in $linePatterns) {
-    $matches = [regex]::Matches($output, $pattern)
-    foreach ($match in $matches) {
-      $lineValue = $match.Groups['value'].Value
-      if (-not $lineValue) { continue }
-      $standardMatches = [regex]::Matches($lineValue, '(?i)(?:802[\.\-\s]*11|11)\s*(be|ax|ac|n|g|a|b)\b')
-      foreach ($standardMatch in $standardMatches) {
-        $candidate = "802.11$($standardMatch.Groups[1].Value.ToLowerInvariant())"
-        if ($candidate -and ($candidates -notcontains $candidate)) {
-          $candidates += $candidate
-        }
-      }
-      $singleCandidate = Get-WifiStandardCode -Value $lineValue
-      if ($singleCandidate -and ($candidates -notcontains $singleCandidate)) {
-        $candidates += $singleCandidate
-      }
-    }
-  }
+  $candidates = Get-WifiStandardCandidatesFromText -Text $output
 
   if (-not $candidates -or $candidates.Count -eq 0) {
-    $allMatches = [regex]::Matches($output, '(?i)(?:802[\.\-\s]*11|11)\s*(be|ax|ac|n|g|a|b)\b')
-    foreach ($standardMatch in $allMatches) {
-      $candidate = "802.11$($standardMatch.Groups[1].Value.ToLowerInvariant())"
-      if ($candidate -and ($candidates -notcontains $candidate)) {
-        $candidates += $candidate
-      }
+    $driversOutput = $null
+    try {
+      $driversOutput = (& $netsh.Source wlan show drivers 2>&1 | Out-String).Trim()
+    } catch {
+      Write-Log "Wi-Fi driver fallback failed: $($_.Exception.Message)" 'WARN'
     }
-    $fallback = Get-WifiStandardCode -Value $output
-    if ($fallback -and ($candidates -notcontains $fallback)) {
-      $candidates += $fallback
+    if ($driversOutput) {
+      $driverCandidates = Get-WifiStandardCandidatesFromText -Text $driversOutput
+      if ($driverCandidates -and $driverCandidates.Count -gt 0) {
+        $candidates = $driverCandidates
+        $result.source = 'netsh_drivers'
+      } else {
+        $output = "$output`n$driversOutput"
+      }
     }
   }
 
@@ -3593,6 +3646,162 @@ function Get-WifiStandardStatus {
     $result.status = 'nok'
   } else {
     $result.status = 'not_tested'
+  }
+  return $result
+}
+
+function Get-BiosLanguageStatus {
+  param([object]$BiosInfo)
+
+  $result = [ordered]@{
+    status = 'not_tested'
+    value = $null
+    source = $null
+  }
+
+  $candidates = @()
+  if ($BiosInfo) {
+    if ($BiosInfo.CurrentLanguage) {
+      $candidates += [string]$BiosInfo.CurrentLanguage
+    }
+    if ($BiosInfo.ListOfLanguages) {
+      foreach ($language in @($BiosInfo.ListOfLanguages)) {
+        if ($language) { $candidates += [string]$language }
+      }
+    }
+  }
+  try {
+    $culture = Get-Culture
+    if ($culture -and $culture.Name) {
+      $candidates += [string]$culture.Name
+    }
+  } catch { }
+
+  foreach ($candidate in $candidates) {
+    $raw = ([string]$candidate).Trim()
+    if (-not $raw) { continue }
+    $normalized = $raw.ToLowerInvariant()
+
+    if (
+      $normalized -match '(^|[^a-z])fr($|[^a-z])' -or
+      $normalized -match 'fr[-_]?fr' -or
+      $normalized -match 'french' -or
+      $normalized -match 'francais' -or
+      $normalized -match 'français'
+    ) {
+      $result.status = 'fr'
+      $result.value = 'FR'
+      $result.source = $raw
+      return $result
+    }
+    if (
+      $normalized -match '(^|[^a-z])en($|[^a-z])' -or
+      $normalized -match 'en[-_]?us' -or
+      $normalized -match 'en[-_]?gb' -or
+      $normalized -match 'english' -or
+      $normalized -match 'anglais'
+    ) {
+      $result.status = 'en'
+      $result.value = 'EN'
+      $result.source = $raw
+      return $result
+    }
+  }
+
+  return $result
+}
+
+function Get-BiosPasswordStatus {
+  param([object]$ComputerSystem)
+
+  $result = [ordered]@{
+    status = 'not_tested'
+    isSet = $null
+    source = $null
+  }
+
+  if (-not $ComputerSystem) { return $result }
+
+  $sources = @()
+  $statusValues = @()
+  if (
+    $ComputerSystem.PSObject.Properties.Name -contains 'PowerOnPasswordStatus' -and
+    $ComputerSystem.PowerOnPasswordStatus -ne $null
+  ) {
+    $statusValues += @{ key = 'PowerOnPasswordStatus'; value = $ComputerSystem.PowerOnPasswordStatus }
+  }
+  if (
+    $ComputerSystem.PSObject.Properties.Name -contains 'AdminPasswordStatus' -and
+    $ComputerSystem.AdminPasswordStatus -ne $null
+  ) {
+    $statusValues += @{ key = 'AdminPasswordStatus'; value = $ComputerSystem.AdminPasswordStatus }
+  }
+
+  $hasEnabled = $false
+  $hasDisabled = $false
+  foreach ($entry in $statusValues) {
+    $numeric = $null
+    if (-not [int]::TryParse([string]$entry.value, [ref]$numeric)) {
+      continue
+    }
+    if ($numeric -eq 1) {
+      $hasEnabled = $true
+      $sources += "$($entry.key)=1"
+    } elseif ($numeric -eq 0) {
+      $hasDisabled = $true
+      $sources += "$($entry.key)=0"
+    } elseif ($numeric -eq 2 -or $numeric -eq 3) {
+      $sources += "$($entry.key)=$numeric"
+    }
+  }
+
+  if ($hasEnabled) {
+    $result.status = 'nok'
+    $result.isSet = $true
+  } elseif ($hasDisabled) {
+    $result.status = 'ok'
+    $result.isSet = $false
+  }
+  if ($sources.Count -gt 0) {
+    $result.source = $sources -join ', '
+  }
+  return $result
+}
+
+function Get-BiosBatteryStatus {
+  $result = [ordered]@{
+    status = 'not_tested'
+    source = 'unknown'
+    note = $null
+  }
+
+  $startTime = (Get-Date).AddDays(-30)
+  try {
+    $events = Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $startTime } -MaxEvents 800 -ErrorAction Stop
+    $alert = $events | Where-Object {
+      ($_.LevelDisplayName -in @('Critical', 'Error', 'Warning')) -and
+      $_.Message -and
+      $_.Message -match '(?i)(cmos|rtc|bios)\s*(battery|pile)|(battery|pile)\s*(cmos|rtc|bios)'
+    } | Select-Object -First 1
+    if ($alert) {
+      $result.status = 'nok'
+      $result.source = 'eventlog'
+      $result.note = 'cmos_or_rtc_alert_detected'
+      return $result
+    }
+    $result.status = 'ok'
+    $result.source = 'eventlog'
+    $result.note = 'no_cmos_or_rtc_alert_last_30d'
+    return $result
+  } catch {
+    Write-Log "BIOS battery check via event log failed: $($_.Exception.Message)" 'WARN'
+  }
+
+  $portableBattery = Get-CimInstanceSafe -ClassName 'Win32_Battery' | Select-Object -First 1
+  if ($portableBattery) {
+    $result.status = 'ok'
+    $result.source = 'win32_battery'
+    $result.note = 'portable_battery_detected'
   }
   return $result
 }
@@ -4057,8 +4266,7 @@ $forceStress = -not $SkipStressScript
 $testLoops = 0
 $skipWinsatLive = $false
 if (-not $forceStress -and $TestMode -eq 'quick' -and $winsatStore) {
-  $skipWinsatLive = $true
-  Write-Log 'WinSAT datastore present; skipping live WinSAT tests.' 'INFO'
+  Write-Log 'WinSAT datastore present; keeping live WinSAT tests enabled.' 'INFO'
 }
 if ($forceStress) {
   $testLoops = [math]::Max($StressLoops, 2)
@@ -4089,12 +4297,29 @@ if (-not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
 }
 
 $system = Get-CimInstanceSafe -ClassName 'Win32_ComputerSystem'
-$vendor = ($system | Select-Object -First 1).Manufacturer
-$model = ($system | Select-Object -First 1).Model
+$systemInfo = $system | Select-Object -First 1
+$vendor = $systemInfo.Manufacturer
+$model = $systemInfo.Model
 
 $baseboard = Get-CimInstanceSafe -ClassName 'Win32_BaseBoard' | Select-Object -First 1
 $baseboardInventory = Get-BaseboardInventory
 $biosInfo = Get-CimInstanceSafe -ClassName 'Win32_BIOS' | Select-Object -First 1
+$biosLanguageInfo = [ordered]@{
+  status = 'not_tested'
+  value = $null
+  source = 'manual_only'
+}
+$biosPasswordInfo = [ordered]@{
+  status = 'not_tested'
+  isSet = $null
+  source = 'manual_only'
+}
+$biosBatteryInfo = [ordered]@{
+  status = 'not_tested'
+  source = 'manual_only'
+  note = $null
+}
+Write-Log 'BIOS language/password/battery set to not_tested (manual-only fields).'
 
 $hostname = $env:COMPUTERNAME
 $macAddress = Get-PrimaryMac
@@ -4525,11 +4750,11 @@ if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
 }
 
 if ($formalStatus -and $formalStatus -ne 'ok') {
-  if (-not $tests.diskRead) { $tests.diskRead = $formalStatus }
-  if (-not $tests.diskWrite) { $tests.diskWrite = $formalStatus }
-  if (-not $tests.ramTest) { $tests.ramTest = $formalStatus }
-  if (-not $tests.cpuTest) { $tests.cpuTest = $formalStatus }
-  if (-not $tests.gpuTest) { $tests.gpuTest = $formalStatus }
+  if (-not $tests.diskRead -or $tests.diskRead -eq 'not_tested') { $tests.diskRead = $formalStatus }
+  if (-not $tests.diskWrite -or $tests.diskWrite -eq 'not_tested') { $tests.diskWrite = $formalStatus }
+  if (-not $tests.ramTest -or $tests.ramTest -eq 'not_tested') { $tests.ramTest = $formalStatus }
+  if (-not $tests.cpuTest -or $tests.cpuTest -eq 'not_tested') { $tests.cpuTest = $formalStatus }
+  if (-not $tests.gpuTest -or $tests.gpuTest -eq 'not_tested') { $tests.gpuTest = $formalStatus }
 }
 
 if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
@@ -4541,6 +4766,25 @@ if ($tests.cpuTest -ne 'ok' -and $winsatRoots.Count -gt 0) {
       if ($tests.cpuMBps -eq $null -and $cpuFallback.maxMBps -ne $null) { $tests.cpuMBps = $cpuFallback.maxMBps }
     }
   }
+}
+
+if ($tests.cpuTest -eq 'not_tested') {
+  Write-Log 'CPU still not_tested after WinSAT parse; running cpuformal fallback.' 'WARN'
+  $cpuOnlyTest = Invoke-WinsatCapture -Arguments @('cpuformal') -TimeoutSec $CpuTestTimeoutSec
+  if ($cpuOnlyTest -and $cpuOnlyTest.status) {
+    if ($cpuOnlyTest.status -eq 'ok') {
+      $tests.cpuTest = 'ok'
+      Write-Log 'CPU fallback cpuformal succeeded.'
+    } elseif ($cpuOnlyTest.status -ne 'not_tested') {
+      $tests.cpuTest = $cpuOnlyTest.status
+      Write-Log ("CPU fallback cpuformal status={0}" -f $cpuOnlyTest.status) 'WARN'
+    }
+  }
+}
+
+if ($tests.cpuTest -eq 'not_tested' -and $formalTest -and $formalTest.status -eq 'ok') {
+  $tests.cpuTest = 'ok'
+  Write-Log 'CPU marked ok because WinSAT formal completed successfully.' 'INFO'
 }
 
 if (-not $tests.cpuNote -and $winsatCpuScore -ne $null) {
@@ -4637,6 +4881,11 @@ if ($padStatus) { $payload.padStatus = $padStatus }
 if ($badgeStatus) { $payload.badgeReaderStatus = $badgeStatus }
 if ($wifiStandardStatus) { $payload.wifiStandardStatus = $wifiStandardStatus }
 if ($wifiStandardValue) { $payload.wifiStandard = $wifiStandardValue }
+if ($biosLanguageInfo -and $biosLanguageInfo.status) { $payload.biosLanguageStatus = $biosLanguageInfo.status }
+if ($biosLanguageInfo -and $biosLanguageInfo.value) { $payload.biosLanguage = $biosLanguageInfo.value }
+if ($biosPasswordInfo -and $biosPasswordInfo.status) { $payload.biosPasswordStatus = $biosPasswordInfo.status }
+if ($biosPasswordInfo -and $biosPasswordInfo.isSet -ne $null) { $payload.biosPasswordSet = [bool]$biosPasswordInfo.isSet }
+if ($biosBatteryInfo -and $biosBatteryInfo.status) { $payload.biosBatteryStatus = $biosBatteryInfo.status }
 if ($wifiStandardStatus) {
   $payload.wifi = [ordered]@{
     status = $wifiStandardStatus
@@ -4674,6 +4923,9 @@ $payload.bios = [ordered]@{
   vendor = $biosInfo.Manufacturer
   version = $biosInfo.SMBIOSBIOSVersion
   releaseDate = $biosReleaseDate
+  language = if ($biosLanguageInfo -and $biosLanguageInfo.value) { $biosLanguageInfo.value } else { $null }
+  passwordStatus = if ($biosPasswordInfo) { $biosPasswordInfo.status } else { $null }
+  batteryStatus = if ($biosBatteryInfo) { $biosBatteryInfo.status } else { $null }
   bootMode = $bootMode
   secureBoot = $secureBoot
   fastStartup = $fastStartup
@@ -4713,9 +4965,9 @@ if ($tests.Count -gt 0) { $payload.tests = $tests }
 if ($winsatStore) { $payload.winsat = $winsatStore }
 
 $components = [ordered]@{
-  biosBattery = 'not_tested'
-  biosLanguage = 'not_tested'
-  biosPassword = 'not_tested'
+  biosBattery = if ($biosBatteryInfo -and $biosBatteryInfo.status) { $biosBatteryInfo.status } else { 'not_tested' }
+  biosLanguage = if ($biosLanguageInfo -and $biosLanguageInfo.status) { $biosLanguageInfo.status } else { 'not_tested' }
+  biosPassword = if ($biosPasswordInfo -and $biosPasswordInfo.status) { $biosPasswordInfo.status } else { 'not_tested' }
   wifiStandard = if ($wifiStandardStatus) { $wifiStandardStatus } else { 'not_tested' }
   diskReadTest = if ($tests.diskRead) { $tests.diskRead } else { 'not_tested' }
   diskWriteTest = if ($tests.diskWrite) { $tests.diskWrite } else { 'not_tested' }
@@ -4735,7 +4987,8 @@ if ($tests.cpuStress) { $components.cpuStress = $tests.cpuStress }
 if ($tests.gpuStress) { $components.gpuStress = $tests.gpuStress }
 if ($tests.network) { $components.networkTest = $tests.network }
 if ($tests.memDiag) { $components.memDiag = $tests.memDiag }
-if ($gpuStatus) { $components.gpu = $gpuStatus }
+if ($tests.cpuTest) { $components.cpu = $tests.cpuTest }
+if ($gpuStatus) { $components.gpu = $gpuStatus } elseif ($tests.gpuTest) { $components.gpu = $tests.gpuTest }
 if ($thermalInfo -and $thermalInfo.status) { $components.thermal = $thermalInfo.status }
 
 if ($components.Count -gt 0) {
@@ -4819,10 +5072,14 @@ try {
   if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
     Write-Log $_.ErrorDetails.Message 'ERROR'
   }
-  Write-Error $_
-  Complete-Progress
-  Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
-  exit 1
+  if ($FailTaskSequenceOnError) {
+    Write-Error $_
+    Complete-Progress
+    Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
+    exit 1
+  }
+  Write-Log 'Ingest failed but task sequence failure is disabled; continuing deployment.' 'WARN'
+  $ingestOk = $false
 }
 
 if ($ingestOk -and $artifactRunDir -and $nonOkTests -and $nonOkTests.Count -gt 0) {
