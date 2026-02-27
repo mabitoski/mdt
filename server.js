@@ -4358,7 +4358,17 @@ function mergeHardwarePayload(primary, fallback) {
     return base || null;
   }
 
-  const keys = ['cpu', 'gpu', 'disks', 'volumes'];
+  const keys = [
+    'cpu',
+    'gpu',
+    'disks',
+    'volumes',
+    'autopilot',
+    'autopilotHash',
+    'deviceHardwareData',
+    'device_hardware_data',
+    'hardwareHash'
+  ];
   keys.forEach((key) => {
     if (base[key] == null && fallbackObj[key] != null) {
       base[key] = fallbackObj[key];
@@ -4580,11 +4590,113 @@ function buildPdfWifiStandardCode(payload) {
   return pickBestWifiStandard(normalizedStandards);
 }
 
-function formatMetric(value, unit) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
+function normalizeAutopilotHashValue(value) {
+  if (value == null) {
     return null;
   }
-  const rounded = value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+  const trimmed = String(value).trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.replace(/\s+/g, '');
+}
+
+function buildAutopilotHash(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+  const autopilot =
+    payload.autopilot && typeof payload.autopilot === 'object' && !Array.isArray(payload.autopilot)
+      ? payload.autopilot
+      : null;
+  const device =
+    payload.device && typeof payload.device === 'object' && !Array.isArray(payload.device)
+      ? payload.device
+      : null;
+  const inventory =
+    payload.inventory && typeof payload.inventory === 'object' && !Array.isArray(payload.inventory)
+      ? payload.inventory
+      : null;
+  const inventoryAutopilot =
+    inventory &&
+    inventory.autopilot &&
+    typeof inventory.autopilot === 'object' &&
+    !Array.isArray(inventory.autopilot)
+      ? inventory.autopilot
+      : null;
+
+  const candidates = [
+    payload.autopilotHash,
+    payload.deviceHardwareData,
+    payload.device_hardware_data,
+    payload.hardwareHash
+  ];
+
+  if (autopilot) {
+    candidates.push(
+      autopilot.hardwareHash,
+      autopilot.hash,
+      autopilot.deviceHardwareData,
+      autopilot.device_hardware_data,
+      autopilot.blob
+    );
+  }
+  if (device) {
+    candidates.push(device.autopilotHash, device.hardwareHash, device.deviceHardwareData);
+  }
+  if (inventory) {
+    candidates.push(inventory.autopilotHash);
+  }
+  if (inventoryAutopilot) {
+    candidates.push(
+      inventoryAutopilot.hardwareHash,
+      inventoryAutopilot.hash,
+      inventoryAutopilot.deviceHardwareData
+    );
+  }
+
+  const normalized = candidates.map((value) => normalizeAutopilotHashValue(value)).filter(Boolean);
+  if (!normalized.length) {
+    return null;
+  }
+  return normalized.reduce((longest, current) => (current.length > longest.length ? current : longest));
+}
+
+function formatPdfAutopilotHash(hashValue) {
+  const normalized = normalizeAutopilotHashValue(hashValue);
+  if (!normalized) {
+    return null;
+  }
+  const maxLength = 72;
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}... (${normalized.length} chars)`;
+}
+
+function parseMetricNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(',', '.');
+    if (!normalized) {
+      return null;
+    }
+    const numeric = Number(normalized);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+  return null;
+}
+
+function formatMetric(value, unit) {
+  const numeric = parseMetricNumber(value);
+  if (numeric == null) {
+    return null;
+  }
+  const rounded = numeric % 1 === 0 ? numeric.toFixed(0) : numeric.toFixed(1);
   return `${rounded} ${unit}`;
 }
 
@@ -4661,8 +4773,22 @@ function buildDiagnosticsRows(payload, components = null) {
   const gpuNote =
     (tests && tests.gpuNote) ||
     formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : gpuScoreSource);
-  addRow('Lecture disque', diskReadStatus, tests ? formatMbps(tests.diskReadMBps) : null);
-  addRow('Ecriture disque', diskWriteStatus, tests ? formatMbps(tests.diskWriteMBps) : null);
+  const diskReadMetric = formatMbps(
+    tests && tests.diskReadMBps != null
+      ? tests.diskReadMBps
+      : winSat && winSat.disk && winSat.disk.seqReadMBps != null
+        ? winSat.disk.seqReadMBps
+        : null
+  );
+  const diskWriteMetric = formatMbps(
+    tests && tests.diskWriteMBps != null
+      ? tests.diskWriteMBps
+      : winSat && winSat.disk && winSat.disk.seqWriteMBps != null
+        ? winSat.disk.seqWriteMBps
+        : null
+  );
+  addRow('Lecture disque', diskReadStatus, diskReadMetric);
+  addRow('Ecriture disque', diskWriteStatus, diskWriteMetric);
   addRow('RAM (WinSAT)', ramStatus, ramNote || (tests ? formatMbps(tests.ramMBps) : null));
   addRow('CPU (WinSAT)', cpuStatus, cpuNote || (tests ? formatMbps(tests.cpuMBps) : null));
   addRow('GPU (WinSAT)', gpuStatus, gpuNote || (tests ? formatScore(tests.gpuScore) : null));
@@ -5036,18 +5162,30 @@ function drawCompactStatusCard(doc, x, y, width, height, title, rows, options = 
   entries.forEach((row, index) => {
     const lineY = body.y + index * rowHeight;
     const { statusKey, statusLabel } = resolveComponentStatusDisplay(row.key, row.status);
-    const extra = row.extra ? ` ${truncatePdfText(row.extra, 16)}` : '';
-    let pillText = truncatePdfText(`${statusLabel}${extra}`.trim(), 24);
+    const extraText = row.extra ? truncatePdfText(String(row.extra), 16) : '';
+    let pillText = truncatePdfText(`${statusLabel}`.trim(), 16);
     doc.font('Helvetica').fontSize(labelFontSize).fillColor(textColor).text(truncatePdfText(row.label, labelMaxLength), body.x, lineY + 1.4, {
       width: labelWidth
     });
     doc.font('Helvetica').fontSize(pillFontSize);
     let pillWidth = doc.widthOfString(pillText) + 12;
     if (pillWidth > body.width * 0.44) {
-      pillText = truncatePdfText(pillText, 14);
+      pillText = truncatePdfText(pillText, 10);
       pillWidth = doc.widthOfString(pillText) + 12;
     }
     const pillX = body.x + body.width - pillWidth;
+    if (extraText) {
+      const extraX = body.x + labelWidth + 4;
+      const extraWidth = pillX - extraX - 4;
+      if (extraWidth > 16) {
+        const extraFontSize = clampNumber(pillFontSize - 0.2, 5.8, 7.6);
+        doc.font('Helvetica').fontSize(extraFontSize).fillColor('#5D6B78').text(extraText, extraX, lineY + 1.8, {
+          width: extraWidth,
+          align: 'right',
+          lineBreak: false
+        });
+      }
+    }
     drawPill(doc, pillX, lineY + 1, pillText, STATUS_STYLES[statusKey] || STATUS_STYLES.unknown, pillFontSize);
   });
 }
@@ -5472,6 +5610,7 @@ function drawReportPdf(doc, data) {
 
   const identRows = [
     { label: 'Serial', value: data.serialNumber },
+    { label: 'Hash Autopilot', value: data.autopilotHashDisplay || data.autopilotHash },
     { label: 'MAC', value: data.macPrimary },
     { label: 'OS', value: data.osVersion },
     { label: 'Dernier passage', value: data.lastSeen },
@@ -7402,6 +7541,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
     machinePayload = null;
   }
   payload = mergeHardwarePayload(payload, machinePayload);
+  const autopilotHash = buildAutopilotHash(payload);
 
   const relatedSerial = normalizeSerial(row.serial_number);
   let relatedMac = normalizeMac(row.mac_address);
@@ -7506,6 +7646,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       comment: row.comment,
       commentedAt: row.commented_at,
       components,
+      autopilotHash,
       payload,
       relatedReports
     }
@@ -8505,6 +8646,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     machinePayload = null;
   }
   payload = mergeHardwarePayload(payload, machinePayload);
+  const autopilotHash = buildAutopilotHash(payload);
 
   const macAddresses = normalizeMacList(row.mac_addresses);
   const macList = Array.isArray(macAddresses) ? macAddresses.filter(Boolean) : [];
@@ -8541,6 +8683,8 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     storagePrimary: formatPrimaryDisk(diskInfo, volumeInfo),
     batteryHealth: formatBatteryHealth(row.battery_health),
     wifiStandardCode: buildPdfWifiStandardCode(payload),
+    autopilotHash,
+    autopilotHashDisplay: formatPdfAutopilotHash(autopilotHash),
     cameraStatus: row.camera_status,
     usbStatus: row.usb_status,
     keyboardStatus: row.keyboard_status,
