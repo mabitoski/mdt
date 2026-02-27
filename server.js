@@ -4580,11 +4580,29 @@ function buildPdfWifiStandardCode(payload) {
   return pickBestWifiStandard(normalizedStandards);
 }
 
+function parseMetricNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(',', '.');
+    if (!normalized) {
+      return null;
+    }
+    const numeric = Number(normalized);
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+  return null;
+}
+
 function formatMetric(value, unit) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
+  const numeric = parseMetricNumber(value);
+  if (numeric == null) {
     return null;
   }
-  const rounded = value % 1 === 0 ? value.toFixed(0) : value.toFixed(1);
+  const rounded = numeric % 1 === 0 ? numeric.toFixed(0) : numeric.toFixed(1);
   return `${rounded} ${unit}`;
 }
 
@@ -4661,8 +4679,22 @@ function buildDiagnosticsRows(payload, components = null) {
   const gpuNote =
     (tests && tests.gpuNote) ||
     formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : gpuScoreSource);
-  addRow('Lecture disque', diskReadStatus, tests ? formatMbps(tests.diskReadMBps) : null);
-  addRow('Ecriture disque', diskWriteStatus, tests ? formatMbps(tests.diskWriteMBps) : null);
+  const diskReadMetric = formatMbps(
+    tests && tests.diskReadMBps != null
+      ? tests.diskReadMBps
+      : winSat && winSat.disk && winSat.disk.seqReadMBps != null
+        ? winSat.disk.seqReadMBps
+        : null
+  );
+  const diskWriteMetric = formatMbps(
+    tests && tests.diskWriteMBps != null
+      ? tests.diskWriteMBps
+      : winSat && winSat.disk && winSat.disk.seqWriteMBps != null
+        ? winSat.disk.seqWriteMBps
+        : null
+  );
+  addRow('Lecture disque', diskReadStatus, diskReadMetric);
+  addRow('Ecriture disque', diskWriteStatus, diskWriteMetric);
   addRow('RAM (WinSAT)', ramStatus, ramNote || (tests ? formatMbps(tests.ramMBps) : null));
   addRow('CPU (WinSAT)', cpuStatus, cpuNote || (tests ? formatMbps(tests.cpuMBps) : null));
   addRow('GPU (WinSAT)', gpuStatus, gpuNote || (tests ? formatScore(tests.gpuScore) : null));
@@ -5036,18 +5068,30 @@ function drawCompactStatusCard(doc, x, y, width, height, title, rows, options = 
   entries.forEach((row, index) => {
     const lineY = body.y + index * rowHeight;
     const { statusKey, statusLabel } = resolveComponentStatusDisplay(row.key, row.status);
-    const extra = row.extra ? ` ${truncatePdfText(row.extra, 16)}` : '';
-    let pillText = truncatePdfText(`${statusLabel}${extra}`.trim(), 24);
+    const extraText = row.extra ? truncatePdfText(String(row.extra), 16) : '';
+    let pillText = truncatePdfText(`${statusLabel}`.trim(), 16);
     doc.font('Helvetica').fontSize(labelFontSize).fillColor(textColor).text(truncatePdfText(row.label, labelMaxLength), body.x, lineY + 1.4, {
       width: labelWidth
     });
     doc.font('Helvetica').fontSize(pillFontSize);
     let pillWidth = doc.widthOfString(pillText) + 12;
     if (pillWidth > body.width * 0.44) {
-      pillText = truncatePdfText(pillText, 14);
+      pillText = truncatePdfText(pillText, 10);
       pillWidth = doc.widthOfString(pillText) + 12;
     }
     const pillX = body.x + body.width - pillWidth;
+    if (extraText) {
+      const extraX = body.x + labelWidth + 4;
+      const extraWidth = pillX - extraX - 4;
+      if (extraWidth > 16) {
+        const extraFontSize = clampNumber(pillFontSize - 0.2, 5.8, 7.6);
+        doc.font('Helvetica').fontSize(extraFontSize).fillColor('#5D6B78').text(extraText, extraX, lineY + 1.8, {
+          width: extraWidth,
+          align: 'right',
+          lineBreak: false
+        });
+      }
+    }
     drawPill(doc, pillX, lineY + 1, pillText, STATUS_STYLES[statusKey] || STATUS_STYLES.unknown, pillFontSize);
   });
 }
