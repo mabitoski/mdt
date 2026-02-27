@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Patchnotes</title>
+    <meta name="description" content="Historique des patchnotes MDT." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/env.js?v=20250108a"></script>
+    <link rel="stylesheet" href="/styles.css?v=20260120a" />
+  </head>
+  <body>
+    <div class="aura" aria-hidden="true"></div>
+    <main class="app">
+      <header class="admin-hero">
+        <div class="admin-hero-copy">
+          <p class="hero-kicker">MDT Patchnotes</p>
+          <h1>Historique des patchnotes</h1>
+          <p class="hero-sub">Consulte les notes de version recentes si besoin.</p>
+        </div>
+        <div class="admin-hero-actions">
+          <a class="admin-secondary" href="/">Retour au tableau</a>
+          <a class="logout-btn" href="/logout">Deconnexion</a>
+        </div>
+      </header>
+
+      <section class="patchnotes-board">
+        <div class="patchnotes-list" id="patchnote-list" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <script src="/patchnotes.js?v=20260115h" defer></script>
+  </body>
+</html>

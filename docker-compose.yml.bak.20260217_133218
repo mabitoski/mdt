@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: mdt
+      POSTGRES_USER: mdt
+      POSTGRES_PASSWORD: mdt
+    volumes:
+      - mdt-db:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  mdt-web:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      DATABASE_URL: "postgres://mdt:mdt@postgres:5432/mdt"
+      COOKIE_SECURE: "0"
+      SESSION_SECRET: "change-me"
+      ALLOW_LOCAL_ADMIN: "1"
+      LOCAL_ADMIN_USER: "${LOCAL_ADMIN_USER:-admin}"
+      LOCAL_ADMIN_PASSWORD: "${LOCAL_ADMIN_PASSWORD:-}"
+      VAULT_URL: "${VAULT_URL:-}"
+      VAULT_AUTH_PATH: "${VAULT_AUTH_PATH:-/auth/service}"
+      VAULT_AUTH_TOKEN: "${VAULT_AUTH_TOKEN:-}"
+      VAULT_AUTH_SCOPES: "${VAULT_AUTH_SCOPES:-read}"
+      VAULT_BEARER_TOKEN: "${VAULT_BEARER_TOKEN:-}"
+      VAULT_SECRET_PATH: "${VAULT_SECRET_PATH:-}"
+      VAULT_SECRET_USER_FIELD: "${VAULT_SECRET_USER_FIELD:-username}"
+      VAULT_SECRET_PASSWORD_FIELD: "${VAULT_SECRET_PASSWORD_FIELD:-password}"
+      VAULT_CACHE_TTL_SEC: "${VAULT_CACHE_TTL_SEC:-300}"
+      VAULT_TIMEOUT_MS: "${VAULT_TIMEOUT_MS:-4000}"
+      SUGGESTION_EMAIL_ENABLED: "${SUGGESTION_EMAIL_ENABLED:-1}"
+      SUGGESTION_EMAIL_TO: "${SUGGESTION_EMAIL_TO:-jordan.turck@marl-ds.com}"
+      SUGGESTION_EMAIL_FROM: "${SUGGESTION_EMAIL_FROM:-noreply.marl.ds@gmail.com}"
+      SUGGESTION_SMTP_USER: "${SUGGESTION_SMTP_USER:-noreply.marl.ds@gmail.com}"
+      SUGGESTION_SMTP_HOST: "${SUGGESTION_SMTP_HOST:-smtp.gmail.com}"
+      SUGGESTION_SMTP_PORT: "${SUGGESTION_SMTP_PORT:-587}"
+      SUGGESTION_SMTP_SECURE: "${SUGGESTION_SMTP_SECURE:-0}"
+      SUGGESTION_SMTP_TIMEOUT_MS: "${SUGGESTION_SMTP_TIMEOUT_MS:-10000}"
+      SUGGESTION_VAULT_SECRET_PATH: "${SUGGESTION_VAULT_SECRET_PATH:-/secrets/app passbolt noreply.marl.ds@gmail.com}"
+      SUGGESTION_VAULT_USER_FIELD: "${SUGGESTION_VAULT_USER_FIELD:-username}"
+      SUGGESTION_VAULT_PASSWORD_FIELD: "${SUGGESTION_VAULT_PASSWORD_FIELD:-password}"
+      OBJECT_STORAGE_ENDPOINT: "${OBJECT_STORAGE_ENDPOINT:-http://10.1.10.28:9000}"
+      OBJECT_STORAGE_BUCKET: "${OBJECT_STORAGE_BUCKET:-alcyone-archive}"
+      OBJECT_STORAGE_ACCESS_KEY: "${OBJECT_STORAGE_ACCESS_KEY:-codexminio}"
+      OBJECT_STORAGE_SECRET_KEY: "${OBJECT_STORAGE_SECRET_KEY:-semngIYo36sZq27tixYVXeFF}"
+      OBJECT_STORAGE_PREFIX: "${OBJECT_STORAGE_PREFIX:-run}"
+      OBJECT_STORAGE_CONSOLE_URL: "${OBJECT_STORAGE_CONSOLE_URL:-https://alcyone.local}"
+      OBJECT_STORAGE_BROWSER_PATH: "${OBJECT_STORAGE_BROWSER_PATH:-/browser}"
+      OBJECT_STORAGE_RENAME_ON_TAG: "${OBJECT_STORAGE_RENAME_ON_TAG:-1}"
+      INGEST_RATE_LIMIT: "${INGEST_RATE_LIMIT:-2000}"
+      LDAP_URL: "ldaps://vega.nova.local:636"
+      LDAP_SEARCH_BASE: "OU=USERS,OU=TIER2,DC=nova,DC=local"
+      LDAP_BIND_DN: "CN=svc-hydra,OU=SERVICES,OU=TIER1,DC=nova,DC=local"
+      LDAP_BIND_PASSWORD: "${LDAP_BIND_PASSWORD}"
+      NODE_EXTRA_CA_CERTS: "/app/certs/nova-ca.pem"
+    volumes:
+      - ./certs:/app/certs:ro
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+volumes:
+  mdt-db:

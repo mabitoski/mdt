@@ -1,0 +1,541 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 120
+              },
+              {
+                "color": "red",
+                "value": 260
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND r.last_seen >= date_trunc('week', NOW()) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), exploded AS (SELECT lower(COALESCE(e.value,'')) AS status FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE) SELECT COUNT(*) FILTER (WHERE status IN ('nok','timeout','denied','absent'))::integer AS value FROM exploded;",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidents semaine",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "red",
+                "value": 170
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND r.last_seen >= date_trunc('week', NOW()) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), machine_incidents AS (SELECT l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY l.machine_key) SELECT COUNT(*) FILTER (WHERE incidents > 0)::integer AS value FROM machine_incidents;",
+          "refId": "A"
+        }
+      ],
+      "title": "Postes incidents semaine",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 6
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*)::integer AS value FROM lots WHERE is_paused = false AND produced_count < target_count;",
+          "refId": "A"
+        }
+      ],
+      "title": "Lots actifs",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 70,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH daily_latest AS (SELECT DISTINCT ON (r.machine_key, date_trunc('day', r.last_seen)) date_trunc('day', r.last_seen) AS day, r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND r.last_seen >= date_trunc('week', NOW()) ORDER BY r.machine_key, date_trunc('day', r.last_seen), r.last_seen DESC, r.created_at DESC, r.id DESC) SELECT day AS \"time\", COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM daily_latest d LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(d.components)) AS e(key, value) ON TRUE GROUP BY day ORDER BY day;",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidents par jour (semaine en cours)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 5,
+      "options": {
+        "orientation": "auto",
+        "showValue": "always",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND r.last_seen >= date_trunc('week', NOW()) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), exploded AS (SELECT CASE e.key WHEN 'keyboard' THEN 'Clavier' WHEN 'camera' THEN 'Camera' WHEN 'usb' THEN 'USB' WHEN 'pad' THEN 'Pave tactile' WHEN 'badgeReader' THEN 'Lecteur badge' WHEN 'biosBattery' THEN 'Pile BIOS' WHEN 'biosLanguage' THEN 'Langue BIOS' WHEN 'biosPassword' THEN 'Mot de passe BIOS' WHEN 'wifiStandard' THEN 'Norme Wi-Fi' ELSE e.key END AS metric, lower(COALESCE(e.value,'')) AS status FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE) SELECT metric, COUNT(*) FILTER (WHERE status IN ('nok','timeout','denied','absent'))::integer AS value FROM exploded GROUP BY metric HAVING COUNT(*) FILTER (WHERE status IN ('nok','timeout','denied','absent')) > 0 ORDER BY value DESC;",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidents par composant (semaine)",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "displayMode": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (SELECT DISTINCT ON (r.machine_key) r.machine_key, COALESCE(NULLIF(r.technician,''), '--') AS technicien, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND r.last_seen >= date_trunc('week', NOW()) ORDER BY r.machine_key, r.last_seen DESC, r.created_at DESC, r.id DESC), counted AS (SELECT technicien, l.machine_key, COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM latest l LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(l.components)) AS e(key, value) ON TRUE GROUP BY technicien, l.machine_key) SELECT technicien AS \"Technicien\", COUNT(*)::integer AS \"Postes\", COUNT(*) FILTER (WHERE incidents > 0)::integer AS \"Postes incidents\", SUM(incidents)::integer AS \"Incidents\" FROM counted GROUP BY technicien ORDER BY \"Incidents\" DESC, \"Postes incidents\" DESC;",
+          "refId": "A"
+        }
+      ],
+      "title": "Incidents par technicien (semaine)",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 18,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH weekly_latest AS (SELECT DISTINCT ON (r.machine_key, date_trunc('week', r.last_seen)) date_trunc('week', r.last_seen) AS week_start, r.machine_key, r.components FROM reports r WHERE COALESCE(r.machine_key,'') <> '' AND r.last_seen >= NOW() - INTERVAL '12 weeks' ORDER BY r.machine_key, date_trunc('week', r.last_seen), r.last_seen DESC, r.created_at DESC, r.id DESC) SELECT week_start AS \"time\", COUNT(*) FILTER (WHERE lower(COALESCE(e.value,'')) IN ('nok','timeout','denied','absent'))::integer AS incidents FROM weekly_latest w LEFT JOIN LATERAL jsonb_each_text(safe_jsonb(w.components)) AS e(key, value) ON TRUE GROUP BY week_start ORDER BY week_start;",
+          "refId": "A"
+        }
+      ],
+      "title": "Evolution hebdomadaire incidents (12 semaines)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 50
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "id": 401,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*)::integer AS value FROM report_component_transitions t WHERE t.is_corrected AND t.last_seen >= date_trunc('week', NOW());",
+          "refId": "A"
+        }
+      ],
+      "title": "Corrections semaine",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "mdt-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 24
+      },
+      "id": 402,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.5",
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "mdt-postgres"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('day', t.last_seen) AS \"time\", COUNT(*)::integer AS corriges FROM report_component_transitions t WHERE t.is_corrected AND t.last_seen >= date_trunc('week', NOW()) GROUP BY 1 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "title": "Corrections par jour (semaine en cours)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "light",
+  "tags": [
+    "atelier",
+    "hebdo",
+    "incidents"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Atelier hebdomadaire",
+  "uid": "mdt-atelier-weekly",
+  "version": 2,
+  "weekStart": ""
+}

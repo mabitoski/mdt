@@ -8,3 +8,14 @@ server.log
 *.db-wal
 *.db-shm
 .DS_Store
+__pycache__/
+*.pyc
+Offline Test/
+Offline Tests/
+certs/
+deploy_webhook.py
+webhook_secret
+
+# Local artifacts
+scripts/keyboard_conf/
+scripts/*.lnk

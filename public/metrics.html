@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Metrics atelier</title>
+    <meta
+      name="description"
+      content="Suivi des problemes postes et progression des lots via un dashboard Grafana integre."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/env.js?v=20250108a"></script>
+    <link rel="stylesheet" href="/styles.css?v=20260225b" />
+  </head>
+  <body class="dashboard-page admin-page metrics-page">
+    <div class="aura" aria-hidden="true"></div>
+    <main class="app app-shell">
+      <aside class="left-sidebar" aria-label="Navigation metrics">
+        <div class="sidebar-head">
+          <div class="sidebar-brand" aria-label="Identite du site">
+            <img class="sidebar-brand-logo" src="/logo.png?v=20260225b" alt="MMA Automation" />
+            <div class="sidebar-brand-copy">
+              <span class="sidebar-brand-name">MMA Automation</span>
+              <span class="sidebar-brand-tag">Ops Platform</span>
+            </div>
+          </div>
+          <h1 class="sidebar-title">Metrics qualite</h1>
+          <p class="sidebar-sub">
+            Vue analytique des lots et des problemes machines avec un dashboard temps reel.
+          </p>
+        </div>
+        <nav class="sidebar-nav" aria-label="Sections metrics">
+          <a class="sidebar-nav-btn is-active" href="#section-metrics-head">Vue globale</a>
+          <a class="sidebar-nav-btn" href="#section-insights">Indicateurs</a>
+          <a class="sidebar-nav-btn" href="#section-grafana">Dashboard live</a>
+        </nav>
+        <div class="sidebar-links" aria-label="Navigation pages">
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Navigation</p>
+            <a class="admin-link" href="/">Tableau de bord</a>
+            <a class="admin-link" href="/admin">Admin</a>
+            <a class="admin-link" href="/lots">Lots</a>
+            <a class="admin-link is-current" href="/metrics">Metrics</a>
+            <a class="admin-link" href="/legacy-imports">Imports</a>
+          </div>
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Suivi</p>
+            <a class="admin-link" href="/patchnotes">Patchnotes</a>
+            <a class="admin-link journal-link" href="/journal">Journal</a>
+          </div>
+          <div class="sidebar-link-group sidebar-link-group--session">
+            <p class="sidebar-link-title">Session</p>
+            <a class="logout-btn" href="/logout">Deconnexion</a>
+          </div>
+          <span class="dev-badge" aria-hidden="true">DEV</span>
+        </div>
+        <p class="sidebar-note">
+          Les panels sont provisionnes automatiquement depuis la base PostgreSQL de production.
+        </p>
+      </aside>
+
+      <section class="workspace">
+        <header class="admin-hero" id="section-metrics-head">
+          <div class="admin-hero-copy">
+            <p class="hero-kicker">Monitoring</p>
+            <h1>Supervision qualite parc</h1>
+            <p class="hero-sub">
+              Unifie les metrics de defauts composants, progression par lot et top machines a corriger.
+            </p>
+          </div>
+          <div class="admin-hero-actions">
+            <a class="admin-secondary" href="/" target="_self">Retour au tableau</a>
+            <a class="admin-secondary" id="open-grafana-btn" href="#" target="_blank" rel="noopener">
+              Ouvrir Grafana
+            </a>
+            <button class="admin-secondary" id="reload-grafana-btn" type="button">Recharger</button>
+          </div>
+        </header>
+
+        <section class="metrics-grid" id="section-insights">
+          <article class="metrics-stat">
+            <p class="metrics-stat-label">Etat service</p>
+            <strong class="metrics-stat-value" id="metrics-service-status">Initialisation...</strong>
+            <p class="metrics-stat-sub">Disponibilite de l'embed Grafana</p>
+          </article>
+          <article class="metrics-stat">
+            <p class="metrics-stat-label">Datasource</p>
+            <strong class="metrics-stat-value">PostgreSQL</strong>
+            <p class="metrics-stat-sub">Lecture directe de la base applicative</p>
+          </article>
+          <article class="metrics-stat">
+            <p class="metrics-stat-label">Dashboard</p>
+            <strong class="metrics-stat-value">Atelier qualite parc</strong>
+            <p class="metrics-stat-sub">Lots, composants, tendances, top incidents</p>
+          </article>
+          <article class="metrics-stat">
+            <p class="metrics-stat-label">Refresh auto</p>
+            <strong class="metrics-stat-value">30s</strong>
+            <p class="metrics-stat-sub">Mise a jour continue pour le pilotage</p>
+          </article>
+        </section>
+
+        <section class="grafana-shell" id="section-grafana">
+          <div class="grafana-toolbar">
+            <div>
+              <p class="admin-kicker">Dashboard integre</p>
+              <h2>Problemes postes et suivi lots</h2>
+            </div>
+            <a id="open-grafana-inline" class="admin-secondary" href="#" target="_blank" rel="noopener">
+              Ouvrir en plein ecran
+            </a>
+          </div>
+          <div class="metrics-dashboard-tabs" id="metrics-dashboard-tabs">
+            <button class="metrics-dashboard-tab is-active" type="button" data-dashboard="overview">
+              Vue globale
+            </button>
+            <button class="metrics-dashboard-tab" type="button" data-dashboard="corrections">
+              Corrections
+            </button>
+            <button class="metrics-dashboard-tab" type="button" data-dashboard="lots">
+              Vue lots
+            </button>
+            <button class="metrics-dashboard-tab" type="button" data-dashboard="types">
+              Type de poste
+            </button>
+            <button class="metrics-dashboard-tab" type="button" data-dashboard="weekly">
+              Semaine
+            </button>
+          </div>
+          <p class="grafana-hint" id="grafana-hint">
+            Chargement du dashboard...
+          </p>
+          <iframe
+            id="grafana-frame"
+            class="grafana-frame"
+            title="Dashboard Grafana"
+            loading="lazy"
+            referrerpolicy="no-referrer"
+          ></iframe>
+        </section>
+      </section>
+    </main>
+
+    <script src="/metrics.js?v=20260225c" defer></script>
+  </body>
+</html>

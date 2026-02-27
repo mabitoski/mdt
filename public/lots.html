@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lots MDT</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/env.js?v=20250108a"></script>
+    <link rel="stylesheet" href="/styles.css?v=20260225b" />
+  </head>
+  <body class="dashboard-page admin-page lots-page">
+    <div class="aura" aria-hidden="true"></div>
+    <main class="app app-shell">
+      <aside class="left-sidebar" aria-label="Navigation lots">
+        <div class="sidebar-head">
+          <div class="sidebar-brand" aria-label="Identite du site">
+            <img class="sidebar-brand-logo" src="/logo.png?v=20260225b" alt="MMA Automation" />
+            <div class="sidebar-brand-copy">
+              <span class="sidebar-brand-name">MMA Automation</span>
+              <span class="sidebar-brand-tag">Ops Platform</span>
+            </div>
+          </div>
+          <h1 class="sidebar-title">Pilotage lots</h1>
+          <p class="sidebar-sub">
+            Page dediee pour creer, prioriser, mettre en pause et assigner les techniciens aux lots.
+          </p>
+        </div>
+        <nav class="sidebar-nav" aria-label="Sections lots">
+          <a class="sidebar-nav-btn is-active" href="#section-lots-head">Vue generale</a>
+          <a class="sidebar-nav-btn" href="#section-lot-create">Creation lot</a>
+          <a class="sidebar-nav-btn" href="#section-lot-list">Assignations</a>
+        </nav>
+        <div class="sidebar-links" aria-label="Navigation pages">
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Navigation</p>
+            <a class="admin-link" href="/">Tableau de bord</a>
+            <a class="admin-link" href="/admin">Admin</a>
+            <a class="admin-link" href="/metrics">Metrics</a>
+            <a class="admin-link" href="/legacy-imports">Imports</a>
+          </div>
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Suivi</p>
+            <a class="admin-link" href="/patchnotes">Patchnotes</a>
+            <a class="admin-link journal-link" href="/journal">Journal</a>
+          </div>
+          <div class="sidebar-link-group sidebar-link-group--session">
+            <p class="sidebar-link-title">Session</p>
+            <a class="logout-btn" href="/logout">Deconnexion</a>
+          </div>
+          <span class="dev-badge" aria-hidden="true">DEV</span>
+        </div>
+        <p class="sidebar-note">
+          Le technicien assigne a un lot incremente automatiquement ce lot lors des nouveaux reports.
+        </p>
+      </aside>
+
+      <section class="workspace">
+        <header class="admin-hero" id="section-lots-head">
+          <div class="admin-hero-copy">
+            <p class="hero-kicker">Production</p>
+            <h1>Gestion dediee des lots</h1>
+            <p class="hero-sub">
+              Cree un lot, configure sa priorite et assigne des techniciens pour orienter automatiquement
+              l'incrementation de production.
+            </p>
+          </div>
+          <div class="admin-hero-actions">
+            <a class="admin-secondary" href="/">Retour au tableau</a>
+            <a class="admin-secondary" href="/admin">Parametres admin</a>
+          </div>
+        </header>
+
+        <section class="admin-panel">
+          <div class="admin-card" id="section-lot-create">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Nouveau lot</p>
+                <h2>Creer un lot de production</h2>
+                <p class="admin-sub">
+                  Renseigne fournisseur, numero de lot et nombre de pieces pour demarrer le suivi.
+                </p>
+              </div>
+            </div>
+            <form class="admin-form" id="lot-create-form">
+              <div class="admin-grid">
+                <label class="admin-field">
+                  <span>Fournisseur</span>
+                  <input type="text" id="lot-supplier" autocomplete="off" maxlength="96" required />
+                </label>
+                <label class="admin-field">
+                  <span>Numero de lot</span>
+                  <input type="text" id="lot-number" autocomplete="off" maxlength="96" required />
+                </label>
+                <label class="admin-field">
+                  <span>Nombre de pieces</span>
+                  <input type="number" id="lot-target-count" min="1" step="1" required />
+                </label>
+                <label class="admin-field">
+                  <span>Priorite (1 = plus urgent)</span>
+                  <input type="number" id="lot-priority" min="1" step="1" value="100" />
+                </label>
+              </div>
+              <div class="admin-actions">
+                <button type="submit" class="admin-primary" id="lot-create-submit">Creer le lot</button>
+                <button type="button" class="admin-secondary" id="lot-reload">Recharger</button>
+              </div>
+              <div class="admin-feedback" id="lot-feedback" role="status"></div>
+            </form>
+          </div>
+
+          <div class="admin-card" id="section-lot-list">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Assignations</p>
+                <h2>Lots actifs et equipes</h2>
+                <p class="admin-sub">
+                  Assigne ou retire des techniciens par lot. Le matching se fait sur le nom du technicien.
+                </p>
+              </div>
+            </div>
+            <div class="lot-list" id="lot-list"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/admin.js?v=20260223c" defer></script>
+  </body>
+</html>
