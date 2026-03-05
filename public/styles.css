@@ -2561,6 +2561,24 @@ button.badge:focus-visible {
   cursor: wait;
 }
 
+.detail-item.detail-barcode-row {
+  grid-column: 1 / -1;
+}
+
+.detail-barcode-wrap {
+  border: 1px solid rgba(15, 30, 46, 0.12);
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 8px;
+}
+
+.detail-barcode-wrap img {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  height: auto;
+}
+
 .detail-item strong.status-pill {
   font-size: 0.75rem;
   font-weight: 600;
@@ -5396,6 +5414,24 @@ body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table strong.dra
 body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-long-row {
   display: grid;
   gap: 6px;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-barcode-row {
+  grid-column: 1 / -1;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-barcode-wrap {
+  border: 1px solid rgba(15, 30, 46, 0.12);
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 8px;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-barcode-wrap img {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  height: auto;
 }
 
 body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-copy-btn {

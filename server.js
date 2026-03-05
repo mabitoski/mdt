@@ -15,6 +15,7 @@ const session = require('express-session');
 const LdapAuth = require('ldapauth-fork');
 const PDFDocument = require('pdfkit');
 const { Pool } = require('pg');
+const bwipjs = require('bwip-js');
 
 const app = express();
 app.disable('x-powered-by');
@@ -28,6 +29,10 @@ const SESSION_SECRET =
   process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const SESSION_NAME = process.env.SESSION_NAME || 'mdt.sid';
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
+const FORCE_HTTPS = process.env.FORCE_HTTPS === '1';
+const FORCE_HTTPS_HEALTHCHECK_BYPASS = process.env.FORCE_HTTPS_HEALTHCHECK_BYPASS !== '0';
+const FORCE_HTTPS_REDIRECT_CODE = Number.parseInt(process.env.FORCE_HTTPS_REDIRECT_CODE || '308', 10);
+const HTTPS_PUBLIC_ORIGIN = (process.env.HTTPS_PUBLIC_ORIGIN || '').trim();
 const ALLOW_LOCAL_ADMIN = process.env.ALLOW_LOCAL_ADMIN !== '0';
 const LOCAL_ADMIN_USER = process.env.LOCAL_ADMIN_USER || 'admin';
 const LOCAL_ADMIN_PASSWORD = process.env.LOCAL_ADMIN_PASSWORD || '';
@@ -2019,7 +2024,7 @@ function getAllowedComponentStatuses(key) {
   return COMPONENT_ALLOWED_STATUSES[key] || DEFAULT_COMPONENT_STATUSES;
 }
 
-app.set('trust proxy', process.env.TRUST_PROXY === '1');
+app.set('trust proxy', process.env.TRUST_PROXY === '1' || FORCE_HTTPS);
 app.use(express.json({ limit: JSON_LIMIT }));
 app.use(express.urlencoded({ extended: false, limit: '16kb' }));
 app.use((req, res, next) => {
@@ -2027,6 +2032,49 @@ app.use((req, res, next) => {
   req.requestId = headerId || generateRequestId();
   res.setHeader('X-Request-Id', req.requestId);
   next();
+});
+app.use((req, res, next) => {
+  if (!FORCE_HTTPS) {
+    return next();
+  }
+  if (
+    FORCE_HTTPS_HEALTHCHECK_BYPASS &&
+    req.method === 'GET' &&
+    (req.path === '/api/health' || req.path === '/health')
+  ) {
+    return next();
+  }
+  const forwardedProto = cleanString(req.get('x-forwarded-proto'), 32);
+  const requestIsSecure =
+    req.secure ||
+    req.protocol === 'https' ||
+    (forwardedProto ? forwardedProto.split(',')[0].trim().toLowerCase() === 'https' : false);
+  if (requestIsSecure) {
+    return next();
+  }
+
+  const redirectPath = req.originalUrl || req.url || '/';
+  const safePath = redirectPath.startsWith('/') ? redirectPath : '/';
+  let redirectTarget = '';
+  if (HTTPS_PUBLIC_ORIGIN) {
+    try {
+      const parsed = new URL(HTTPS_PUBLIC_ORIGIN);
+      redirectTarget = `${parsed.origin}${safePath}`;
+    } catch (error) {
+      redirectTarget = '';
+    }
+  }
+  if (!redirectTarget) {
+    const host = cleanString(req.get('host'), 255);
+    if (!host) {
+      return res.status(400).json({ ok: false, error: 'invalid_host' });
+    }
+    redirectTarget = `https://${host}${safePath}`;
+  }
+  return res.redirect(
+    [301, 302, 307, 308].includes(FORCE_HTTPS_REDIRECT_CODE) ? FORCE_HTTPS_REDIRECT_CODE : 308,
+    redirectTarget
+  );
 });
 app.use(
   session({
@@ -2037,7 +2085,7 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: 'lax',
-      secure: COOKIE_SECURE
+      secure: COOKIE_SECURE || FORCE_HTTPS
     }
   })
 );
@@ -5963,6 +6011,34 @@ app.use(express.static(PUBLIC_DIR, { extensions: ['html'], index: false }));
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true });
+});
+
+app.get('/api/barcode/serial/:serial.png', requireAuth, async (req, res) => {
+  const serialValue = cleanString(req.params.serial, 128);
+  if (!serialValue) {
+    return res.status(400).json({ ok: false, error: 'invalid_serial' });
+  }
+  try {
+    const imageBuffer = await bwipjs.toBuffer({
+      bcid: 'code128',
+      text: serialValue,
+      scale: 2,
+      height: 10,
+      includetext: true,
+      textxalign: 'center',
+      textsize: 11,
+      backgroundcolor: 'FFFFFF'
+    });
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'private, max-age=600');
+    return res.send(imageBuffer);
+  } catch (error) {
+    console.error('Barcode generation failed', {
+      error: error && error.message ? error.message : String(error),
+      requestId: req.requestId
+    });
+    return res.status(400).json({ ok: false, error: 'barcode_generation_failed' });
+  }
 });
 
 app.get('/api/me', requireAuth, (req, res) => {

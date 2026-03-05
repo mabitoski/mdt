@@ -4448,6 +4448,10 @@ function buildDrawerDetailHtml(detail) {
   const autopilotCopyButton = canCopyAutopilotHash
     ? `<button class="drawer-copy-btn" type="button" data-action="copy-autopilot-hash" data-id="${detailId}" title="Copier le hash complet">Copier</button>`
     : '';
+  const serialValue = detail.serialNumber ? String(detail.serialNumber).trim() : '';
+  const serialBarcodeSrc = serialValue
+    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png`
+    : '';
 
   const identifiersPanel = `
     <div class="drawer-table">
@@ -4457,6 +4461,13 @@ function buildDrawerDetailHtml(detail) {
       <div><span>Hash Autopilot</span><div class="drawer-long-row"><strong class="drawer-long-value" title="${escapeHtml(
         autopilotHashTitle
       )}">${escapeHtml(autopilotHashPreview)}</strong>${autopilotCopyButton}</div></div>
+      <div class="drawer-barcode-row"><span>Code-barres serial</span>${
+        serialBarcodeSrc
+          ? `<div class="drawer-barcode-wrap"><img src="${serialBarcodeSrc}" alt="Code-barres ${escapeHtml(
+              serialValue
+            )}" loading="lazy" /></div>`
+          : '<strong>--</strong>'
+      }</div>
       <div><span>Premier passage</span><strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong></div>
       <div><span>Dernier passage</span><strong>${escapeHtml(formatDateTime(detail.lastSeen))}</strong></div>
     </div>
@@ -5226,6 +5237,10 @@ function buildDetailHtml(detail) {
   const autopilotCopyButton = canCopyAutopilotHash
     ? `<button class="hash-copy-btn" type="button" data-action="copy-autopilot-hash" data-id="${detailId}" title="Copier le hash complet">Copier</button>`
     : '';
+  const serialValue = detail.serialNumber ? String(detail.serialNumber).trim() : '';
+  const serialBarcodeSrc = serialValue
+    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png`
+    : '';
 
   return `
     <div class="detail-header">
@@ -5261,6 +5276,16 @@ function buildDetailHtml(detail) {
           )}</strong>
           ${autopilotCopyButton}
         </div>
+      </div>
+      <div class="detail-item detail-barcode-row">
+        <span>Code-barres serial</span>
+        ${
+          serialBarcodeSrc
+            ? `<div class="detail-barcode-wrap"><img src="${serialBarcodeSrc}" alt="Code-barres ${escapeHtml(
+                serialValue
+              )}" loading="lazy" /></div>`
+            : '<strong>--</strong>'
+        }
       </div>
       <div class="detail-item">
         <span>Dernier passage</span>
