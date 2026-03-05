@@ -19,11 +19,12 @@ services:
       PORT: 3000
       DATABASE_URL: "postgres://mdt:mdt@postgres:5432/mdt"
       COOKIE_SECURE: "0"
-      FORCE_HTTPS: "${FORCE_HTTPS:-0}"
+      FORCE_HTTPS: "${FORCE_HTTPS:-1}"
       FORCE_HTTPS_REDIRECT_CODE: "${FORCE_HTTPS_REDIRECT_CODE:-308}"
       FORCE_HTTPS_HEALTHCHECK_BYPASS: "${FORCE_HTTPS_HEALTHCHECK_BYPASS:-1}"
-      HTTPS_PUBLIC_ORIGIN: "${HTTPS_PUBLIC_ORIGIN:-}"
-      TRUST_PROXY: "${TRUST_PROXY:-0}"
+      FORCE_HTTPS_ALLOW_HTTP_INGEST: "${FORCE_HTTPS_ALLOW_HTTP_INGEST:-1}"
+      HTTPS_PUBLIC_ORIGIN: "${HTTPS_PUBLIC_ORIGIN:-https://10.1.10.27}"
+      TRUST_PROXY: "${TRUST_PROXY:-1}"
       SESSION_SECRET: "change-me"
       ALLOW_LOCAL_ADMIN: "1"
       LOCAL_ADMIN_USER: "${LOCAL_ADMIN_USER:-admin}"
@@ -93,6 +94,22 @@ services:
       - postgres
     restart: unless-stopped
 
+  web-https:
+    image: caddy:2.8.4
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/etc/caddy/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - mdt-web
+    restart: unless-stopped
+
 volumes:
   mdt-db:
   grafana-data:
+  caddy-data:
+  caddy-config:

@@ -31,6 +31,7 @@ const SESSION_NAME = process.env.SESSION_NAME || 'mdt.sid';
 const COOKIE_SECURE = process.env.COOKIE_SECURE === '1';
 const FORCE_HTTPS = process.env.FORCE_HTTPS === '1';
 const FORCE_HTTPS_HEALTHCHECK_BYPASS = process.env.FORCE_HTTPS_HEALTHCHECK_BYPASS !== '0';
+const FORCE_HTTPS_ALLOW_HTTP_INGEST = process.env.FORCE_HTTPS_ALLOW_HTTP_INGEST !== '0';
 const FORCE_HTTPS_REDIRECT_CODE = Number.parseInt(process.env.FORCE_HTTPS_REDIRECT_CODE || '308', 10);
 const HTTPS_PUBLIC_ORIGIN = (process.env.HTTPS_PUBLIC_ORIGIN || '').trim();
 const ALLOW_LOCAL_ADMIN = process.env.ALLOW_LOCAL_ADMIN !== '0';
@@ -2035,6 +2036,9 @@ app.use((req, res, next) => {
 });
 app.use((req, res, next) => {
   if (!FORCE_HTTPS) {
+    return next();
+  }
+  if (FORCE_HTTPS_ALLOW_HTTP_INGEST && req.path === '/api/ingest') {
     return next();
   }
   if (
