@@ -5390,6 +5390,10 @@ body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table div {
   gap: 2px;
 }
 
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table .drawer-lot-field {
+  grid-column: 1 / -1;
+}
+
 body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table span {
   font-size: 0.66rem;
   letter-spacing: 0.12em;
@@ -5414,6 +5418,29 @@ body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table strong.dra
 body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-long-row {
   display: grid;
   gap: 6px;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-lot-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-lot-select {
+  width: 100%;
+  min-height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 30, 46, 0.16);
+  background: #ffffff;
+  color: #1f3a52;
+  padding: 7px 10px;
+  font-size: 0.8rem;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-lot-select:disabled {
+  opacity: 0.74;
+  cursor: wait;
 }
 
 body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-barcode-row {
@@ -5549,6 +5576,10 @@ body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-note-meta {
 
   body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-summary-grid,
   body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table {
+    grid-template-columns: 1fr;
+  }
+
+  body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-lot-editor {
     grid-template-columns: 1fr;
   }
 }

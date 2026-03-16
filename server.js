@@ -571,6 +571,72 @@ async function registerLotProgress(
   };
 }
 
+async function syncLotProducedCounts(client) {
+  await client.query(`
+    UPDATE lots
+    SET produced_count = COALESCE(progress.count, 0)
+    FROM (
+      SELECT lot_id, COUNT(*)::integer AS count
+      FROM lot_progress
+      GROUP BY lot_id
+    ) progress
+    WHERE progress.lot_id = lots.id
+  `);
+  await client.query(`
+    UPDATE lots
+    SET produced_count = 0
+    WHERE id NOT IN (SELECT DISTINCT lot_id FROM lot_progress)
+  `);
+}
+
+async function replaceMachineLotProgress(
+  client,
+  {
+    lot = null,
+    machineKey = null,
+    reportId = null,
+    technician = null,
+    source = 'manual-lot-update'
+  } = {}
+) {
+  if (!machineKey) {
+    return { counted: false, lot: lot || null };
+  }
+
+  await client.query('DELETE FROM lot_progress WHERE machine_key = $1', [machineKey]);
+
+  let counted = false;
+  if (lot && lot.id && !parseBooleanFlag(lot.is_paused, false)) {
+    const insertResult = await client.query(
+      `
+        INSERT INTO lot_progress (
+          lot_id,
+          machine_key,
+          report_id,
+          technician,
+          source,
+          is_double_check,
+          counted_at
+        )
+        VALUES ($1, $2, $3, $4, $5, false, NOW())
+        ON CONFLICT (lot_id, machine_key) DO NOTHING
+        RETURNING lot_id
+      `,
+      [lot.id, machineKey, normalizeUuid(reportId), technician || null, source]
+    );
+    counted = Boolean(insertResult.rowCount);
+  }
+
+  await syncLotProducedCounts(client);
+
+  if (lot && lot.id) {
+    const refreshedLot = await getLotById(client, lot.id);
+    return { counted, lot: refreshedLot || lot };
+  }
+
+  return { counted, lot: null };
+}
+
 async function backfillReportsFromMachines() {
   try {
     const reportCount = await pool.query('SELECT COUNT(*) AS count FROM reports');
@@ -3903,6 +3969,115 @@ function mergeComponentSets(base, override) {
   return Object.keys(merged).length > 0 ? merged : null;
 }
 
+const DISK_READ_OK_MIN_MBPS = 400;
+const DISK_WRITE_OK_MIN_MBPS = 350;
+
+function getPayloadTests(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+  return payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+    ? payload.tests
+    : null;
+}
+
+function getPayloadWinSatDisk(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+  const winsat =
+    payload.winsat && typeof payload.winsat === 'object' && !Array.isArray(payload.winsat)
+      ? payload.winsat
+      : null;
+  return winsat && winsat.disk && typeof winsat.disk === 'object' && !Array.isArray(winsat.disk)
+    ? winsat.disk
+    : null;
+}
+
+function resolveDiskMetricValue(payload, testMetricKey, winsatMetricKey) {
+  const tests = getPayloadTests(payload);
+  const winsatDisk = getPayloadWinSatDisk(payload);
+  const candidates = [
+    tests ? tests[testMetricKey] : null,
+    winsatDisk ? winsatDisk[winsatMetricKey] : null
+  ];
+  for (const candidate of candidates) {
+    const numeric = parseMetricNumber(candidate);
+    if (numeric != null) {
+      return Math.round(numeric * 10) / 10;
+    }
+  }
+  return null;
+}
+
+function evaluateDiskMetricStatus(metricValue, fallbackValue, minimumMbps) {
+  if (metricValue != null) {
+    return metricValue >= minimumMbps ? 'ok' : 'nok';
+  }
+  return normalizeStatus(fallbackValue);
+}
+
+function resolveAuthoritativeDiskTests(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+  const tests = getPayloadTests(payload);
+  const diskReadMBps = resolveDiskMetricValue(payload, 'diskReadMBps', 'seqReadMBps');
+  const diskWriteMBps = resolveDiskMetricValue(payload, 'diskWriteMBps', 'seqWriteMBps');
+  const hasDiskReadSource = diskReadMBps != null || (tests && tests.diskRead != null);
+  const hasDiskWriteSource = diskWriteMBps != null || (tests && tests.diskWrite != null);
+  if (!hasDiskReadSource && !hasDiskWriteSource) {
+    return null;
+  }
+  return {
+    diskRead: hasDiskReadSource
+      ? evaluateDiskMetricStatus(
+          diskReadMBps,
+          tests ? tests.diskRead : null,
+          DISK_READ_OK_MIN_MBPS
+        ) || 'not_tested'
+      : null,
+    diskWrite: hasDiskWriteSource
+      ? evaluateDiskMetricStatus(
+          diskWriteMBps,
+          tests ? tests.diskWrite : null,
+          DISK_WRITE_OK_MIN_MBPS
+        ) || 'not_tested'
+      : null,
+    diskReadMBps,
+    diskWriteMBps
+  };
+}
+
+function applyAuthoritativeDiskTests(payload) {
+  const diskTests = resolveAuthoritativeDiskTests(payload);
+  if (!diskTests) {
+    return null;
+  }
+  const currentTests = getPayloadTests(payload);
+  const shouldWriteTests = Boolean(
+    currentTests || diskTests.diskReadMBps != null || diskTests.diskWriteMBps != null
+  );
+  if (!shouldWriteTests) {
+    return diskTests;
+  }
+  const nextTests = currentTests ? { ...currentTests } : {};
+  if (diskTests.diskRead) {
+    nextTests.diskRead = diskTests.diskRead;
+  }
+  if (diskTests.diskWrite) {
+    nextTests.diskWrite = diskTests.diskWrite;
+  }
+  if (diskTests.diskReadMBps != null) {
+    nextTests.diskReadMBps = diskTests.diskReadMBps;
+  }
+  if (diskTests.diskWriteMBps != null) {
+    nextTests.diskWriteMBps = diskTests.diskWriteMBps;
+  }
+  payload.tests = nextTests;
+  return diskTests;
+}
+
 function buildDerivedComponents(body, sources) {
   const derived = {};
   const addStatus = (key, value) => {
@@ -3971,11 +4146,15 @@ function buildDerivedComponents(body, sources) {
   );
   addStatus('diskSmart', pickFirstFromSources(sources, ['diskSmart', 'smartDisk', 'smart']));
 
+  const diskTests = resolveAuthoritativeDiskTests(body);
+  if (diskTests) {
+    addStatus('diskReadTest', diskTests.diskRead);
+    addStatus('diskWriteTest', diskTests.diskWrite);
+  }
+
   const tests =
     body && typeof body.tests === 'object' && !Array.isArray(body.tests) ? body.tests : null;
   if (tests) {
-    addStatus('diskReadTest', tests.diskRead);
-    addStatus('diskWriteTest', tests.diskWrite);
     addStatus('ramTest', tests.ramTest);
     addStatus('cpuTest', tests.cpuTest);
     addStatus('gpuTest', tests.gpuTest);
@@ -4214,11 +4393,12 @@ function summarizePdfDetailForReport(components, payload, commentValue = '') {
     payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
       ? payload.tests
       : null;
+  const diskTests = resolveAuthoritativeDiskTests(payload);
   const diagnosticCandidates = [];
   if (tests) {
     diagnosticCandidates.push(
-      tests.diskRead || mergedComponents.diskReadTest || 'not_tested',
-      tests.diskWrite || mergedComponents.diskWriteTest || 'not_tested',
+      (diskTests && diskTests.diskRead) || mergedComponents.diskReadTest || tests.diskRead || 'not_tested',
+      (diskTests && diskTests.diskWrite) || mergedComponents.diskWriteTest || tests.diskWrite || 'not_tested',
       tests.ram || mergedComponents.ramTest || 'not_tested',
       tests.cpu || mergedComponents.cpuTest || 'not_tested',
       tests.gpu || mergedComponents.gpuTest || 'not_tested',
@@ -4781,6 +4961,7 @@ function buildDiagnosticsRows(payload, components = null) {
     payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
       ? payload.tests
       : null;
+  const diskTests = resolveAuthoritativeDiskTests(payload);
   const componentMap =
     components && typeof components === 'object' && !Array.isArray(components) ? components : {};
   const winSat =
@@ -4813,8 +4994,18 @@ function buildDiagnosticsRows(payload, components = null) {
     rows.push({ label, status, extra });
   };
 
-  const diskReadStatus = pickStatus(tests && tests.diskRead, componentMap.diskReadTest, 'not_tested');
-  const diskWriteStatus = pickStatus(tests && tests.diskWrite, componentMap.diskWriteTest, 'not_tested');
+  const diskReadStatus = pickStatus(
+    diskTests && diskTests.diskRead,
+    componentMap.diskReadTest,
+    tests && tests.diskRead,
+    'not_tested'
+  );
+  const diskWriteStatus = pickStatus(
+    diskTests && diskTests.diskWrite,
+    componentMap.diskWriteTest,
+    tests && tests.diskWrite,
+    'not_tested'
+  );
   const ramStatus = pickStatus(tests && (tests.ramTest || tests.ram), componentMap.ramTest, 'not_tested');
   const cpuStatus = pickStatus(tests && (tests.cpuTest || tests.cpu), componentMap.cpuTest, 'not_tested');
   const gpuStatus = pickStatus(tests && (tests.gpuTest || tests.gpu), componentMap.gpuTest, 'not_tested');
@@ -4826,18 +5017,22 @@ function buildDiagnosticsRows(payload, components = null) {
     (tests && tests.gpuNote) ||
     formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : gpuScoreSource);
   const diskReadMetric = formatMbps(
-    tests && tests.diskReadMBps != null
-      ? tests.diskReadMBps
-      : winSat && winSat.disk && winSat.disk.seqReadMBps != null
-        ? winSat.disk.seqReadMBps
-        : null
+    diskTests && diskTests.diskReadMBps != null
+      ? diskTests.diskReadMBps
+      : tests && tests.diskReadMBps != null
+        ? tests.diskReadMBps
+        : winSat && winSat.disk && winSat.disk.seqReadMBps != null
+          ? winSat.disk.seqReadMBps
+          : null
   );
   const diskWriteMetric = formatMbps(
-    tests && tests.diskWriteMBps != null
-      ? tests.diskWriteMBps
-      : winSat && winSat.disk && winSat.disk.seqWriteMBps != null
-        ? winSat.disk.seqWriteMBps
-        : null
+    diskTests && diskTests.diskWriteMBps != null
+      ? diskTests.diskWriteMBps
+      : tests && tests.diskWriteMBps != null
+        ? tests.diskWriteMBps
+        : winSat && winSat.disk && winSat.disk.seqWriteMBps != null
+          ? winSat.disk.seqWriteMBps
+          : null
   );
   addRow('Lecture disque', diskReadStatus, diskReadMetric);
   addRow('Ecriture disque', diskWriteStatus, diskWriteMetric);
@@ -6019,9 +6214,16 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/barcode/serial/:serial.png', requireAuth, async (req, res) => {
   const serialValue = cleanString(req.params.serial, 128);
+  const modelValue = cleanString(req.query?.model, 96);
   if (!serialValue) {
     return res.status(400).json({ ok: false, error: 'invalid_serial' });
   }
+  const labelParts = [];
+  if (modelValue) {
+    labelParts.push(modelValue);
+  }
+  labelParts.push(serialValue);
+  const barcodeLabel = cleanString(labelParts.join(' - '), 160) || serialValue;
   try {
     const imageBuffer = await bwipjs.toBuffer({
       bcid: 'code128',
@@ -6029,6 +6231,7 @@ app.get('/api/barcode/serial/:serial.png', requireAuth, async (req, res) => {
       scale: 2,
       height: 10,
       includetext: true,
+      alttext: barcodeLabel,
       textxalign: 'center',
       textsize: 11,
       backgroundcolor: 'FFFFFF'
@@ -6540,6 +6743,8 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
   if (!body || typeof body !== 'object') {
     return res.status(400).json({ ok: false, error: 'invalid_payload' });
   }
+
+  applyAuthoritativeDiskTests(body);
 
   const hostname = cleanString(pickFirst(body, ['hostname', 'computerName', 'name']), 64);
   let macAddress = normalizeMac(pickFirst(body, ['macAddress', 'mac', 'mac_address']));
@@ -7989,6 +8194,118 @@ app.put('/api/reports/:id/category', requireAuth, async (req, res) => {
   }
 });
 
+app.put('/api/machines/:id/lot', requireTagEdit, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const lotKeys = ['lotId', 'lot_id', 'batchId', 'batch_id'];
+  const rawLotValue = lotKeys.reduce((value, key) => {
+    if (value !== undefined) {
+      return value;
+    }
+    return Object.prototype.hasOwnProperty.call(body, key) ? body[key] : undefined;
+  }, undefined);
+  const lotValueText = rawLotValue == null ? '' : String(rawLotValue).trim();
+  const nextLotId = lotValueText ? normalizeUuid(lotValueText) : null;
+  if (lotValueText && !nextLotId) {
+    return res.status(400).json({ ok: false, error: 'invalid_lot_id' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+
+    const reportResult = await client.query(
+      `
+        SELECT id, machine_key, technician, lot_id
+        FROM reports
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [id]
+    );
+    const reportRow = reportResult.rows && reportResult.rows[0] ? reportResult.rows[0] : null;
+    if (!reportRow) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    if (reportRow.machine_key) {
+      await client.query(
+        `
+          SELECT machine_key, lot_id
+          FROM machines
+          WHERE machine_key = $1
+          FOR UPDATE
+        `,
+        [reportRow.machine_key]
+      );
+    }
+
+    const nextLot = nextLotId ? await getLotById(client, nextLotId, { forUpdate: true }) : null;
+    if (nextLotId && !nextLot) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'lot_not_found' });
+    }
+
+    if (reportRow.machine_key) {
+      await client.query('UPDATE reports SET lot_id = $1 WHERE machine_key = $2', [
+        nextLotId,
+        reportRow.machine_key
+      ]);
+      await client.query('UPDATE machines SET lot_id = $1 WHERE machine_key = $2', [
+        nextLotId,
+        reportRow.machine_key
+      ]);
+    } else {
+      await client.query('UPDATE reports SET lot_id = $1 WHERE id = $2', [nextLotId, id]);
+    }
+
+    const lotProgress = await replaceMachineLotProgress(client, {
+      lot: nextLot,
+      machineKey: reportRow.machine_key || null,
+      reportId: id,
+      technician: reportRow.technician || null,
+      source: 'manual-lot-update'
+    });
+
+    const lotRows = await listLotsWithAssignments(client);
+    const lots = lotRows.map((row) => mapLotRowForResponse(row)).filter(Boolean);
+    const activeLot = lots.find(
+      (lot) => lot && !lot.isPaused && Number.isFinite(lot.targetCount) && lot.producedCount < lot.targetCount
+    ) || null;
+
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      machineKey: reportRow.machine_key || null,
+      lot: normalizeLotFromRow(lotProgress && lotProgress.lot ? lotProgress.lot : nextLot),
+      lotCounted: Boolean(lotProgress && lotProgress.counted),
+      lots,
+      activeLotId: activeLot ? activeLot.id : null
+    });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback lot update', rollbackError);
+      }
+    }
+    console.error('Failed to update machine lot', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
 app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
@@ -8778,7 +9095,11 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     generatedAt: formatDateTime(new Date())
   };
 
-  const filename = `rapport-atelier-${sanitizeFilename(title)}.pdf`;
+  const downloadBaseName = safeString(
+    row.serial_number || row.hostname || row.mac_address || macList[0],
+    `Machine ${row.id}`
+  );
+  const filename = `rapport-atelier-${sanitizeFilename(downloadBaseName)}.pdf`;
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Cache-Control', 'no-store');

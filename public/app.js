@@ -1452,6 +1452,42 @@ function renderReportZeroLotOptions() {
   }
 }
 
+function buildLotAssignmentOptions(currentLot = null) {
+  const currentLotId = normalizeLotId(currentLot && currentLot.id ? currentLot.id : '');
+  const lotMap = new Map();
+  if (currentLot && currentLotId) {
+    lotMap.set(currentLotId, currentLot);
+  }
+  const lots = Array.isArray(state.lots) ? state.lots : [];
+  lots.forEach((lot) => {
+    const lotId = normalizeLotId(lot && lot.id ? lot.id : '');
+    if (!lotId) {
+      return;
+    }
+    if (!lotMap.has(lotId)) {
+      lotMap.set(lotId, lot);
+    }
+  });
+  const ranked = rankLots(Array.from(lotMap.values()), currentLotId || normalizeLotId(state.activeLotId || ''));
+  const options = ['<option value="">Aucun lot</option>'];
+  ranked.forEach((lot) => {
+    if (!lot || !lot.id) {
+      return;
+    }
+    const lotId = normalizeLotId(lot.id);
+    const produced = Number.isFinite(lot.producedCount) ? lot.producedCount : 0;
+    const target = Number.isFinite(lot.targetCount) ? lot.targetCount : 0;
+    const paused = lot.isPaused ? ' [PAUSE]' : '';
+    const selected = currentLotId && currentLotId === lotId ? ' selected' : '';
+    options.push(
+      `<option value="${escapeHtml(lot.id)}"${selected}>${escapeHtml(buildLotLabel(lot))} (${produced}/${target})${escapeHtml(
+        paused
+      )}</option>`
+    );
+  });
+  return options.join('');
+}
+
 function updateTechFilterButtons() {
   if (!techFiltersEl) {
     return;
@@ -1949,6 +1985,21 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function sanitizeDownloadFilename(value, fallback = 'report') {
+  const raw = value == null ? '' : String(value).trim();
+  const normalized = raw.normalize('NFKD').replace(/[^\w.-]+/g, '-');
+  const trimmed = normalized.replace(/-+/g, '-').replace(/^[-.]+|[-.]+$/g, '');
+  return trimmed ? trimmed.slice(0, 80) : fallback;
+}
+
+function buildPdfDownloadFilename(detail) {
+  const baseName = sanitizeDownloadFilename(
+    (detail && (detail.serialNumber || detail.hostname || detail.macAddress || detail.id)) || '',
+    'report'
+  );
+  return `rapport-atelier-${baseName}.pdf`;
+}
+
 function setAdminLinkVisible(visible) {
   if (!adminLink) {
     return;
@@ -2365,8 +2416,8 @@ function summarizeDetailForDrawer(detail) {
   const diagnosticCandidates = [];
   if (tests) {
     diagnosticCandidates.push(
-      tests.diskRead || components.diskReadTest || 'not_tested',
-      tests.diskWrite || components.diskWriteTest || 'not_tested',
+      components.diskReadTest || tests.diskRead || 'not_tested',
+      components.diskWriteTest || tests.diskWrite || 'not_tested',
       tests.ram || components.ramTest || 'not_tested',
       tests.cpu || components.cpuTest || 'not_tested',
       tests.gpu || components.gpuTest || 'not_tested',
@@ -3131,6 +3182,53 @@ function applyCategoryUpdate(id, category) {
   invalidateListCache();
 }
 
+function applyLotMetaUpdate(lots, activeLotId) {
+  if (Array.isArray(lots)) {
+    state.lots = lots;
+  }
+  state.activeLotId = activeLotId ? normalizeLotId(activeLotId) : null;
+  renderLotMetrics();
+  renderReportZeroLotOptions();
+}
+
+function applyMachineLotUpdate(id, machineKey, lot) {
+  const reportId = id != null ? String(id) : '';
+  const normalizedMachineKey = machineKey ? String(machineKey) : '';
+  const updatedLot = lot && typeof lot === 'object' ? lot : null;
+  const matchesTarget = (item) => {
+    if (!item || typeof item !== 'object') {
+      return false;
+    }
+    if (normalizedMachineKey) {
+      return String(item.machineKey || '') === normalizedMachineKey;
+    }
+    return String(item.id || '') === reportId;
+  };
+
+  state.machines = state.machines.map((machine) => {
+    if (!matchesTarget(machine)) {
+      return machine;
+    }
+    return {
+      ...machine,
+      lot: updatedLot
+    };
+  });
+
+  Object.keys(state.details).forEach((detailId) => {
+    const detail = state.details[detailId];
+    if (!detail || detail.error || !matchesTarget(detail)) {
+      return;
+    }
+    state.details[detailId] = {
+      ...detail,
+      lot: updatedLot
+    };
+  });
+
+  invalidateListCache();
+}
+
 async function updateCategory(id, category, button) {
   if (button) {
     button.disabled = true;
@@ -3160,6 +3258,56 @@ async function updateCategory(id, category, button) {
   } catch (error) {
     window.alert("Impossible d'enregistrer la categorie.");
   } finally {
+    if (button) {
+      button.disabled = false;
+      button.classList.remove('is-loading');
+    }
+  }
+}
+
+async function updateMachineLot(id, lotId, button) {
+  if (button) {
+    button.disabled = true;
+    button.classList.add('is-loading');
+  }
+  const safeId = window.CSS && CSS.escape ? CSS.escape(String(id)) : String(id).replace(/"/g, '\\"');
+  const select = detailsDrawerShell
+    ? detailsDrawerShell.querySelector(`[data-lot-select-for="${safeId}"]`)
+    : null;
+  if (select) {
+    select.disabled = true;
+  }
+  try {
+    const response = await fetch(`/api/machines/${encodeURIComponent(id)}/lot`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lotId: lotId || null })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.alert("Pas les droits pour modifier le lot.");
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('lot_update_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('lot_update_failed');
+    }
+    applyLotMetaUpdate(Array.isArray(data.lots) ? data.lots : state.lots, data.activeLotId || null);
+    applyMachineLotUpdate(id, data.machineKey || null, data.lot || null);
+    renderList();
+    refreshActiveDrawerIfNeeded(id);
+  } catch (error) {
+    window.alert("Impossible d'enregistrer le lot.");
+  } finally {
+    if (select) {
+      select.disabled = false;
+    }
     if (button) {
       button.disabled = false;
       button.classList.remove('is-loading');
@@ -4111,8 +4259,8 @@ function buildDiagnosticsHtml(detail) {
     const cpuNote = tests.cpuNote || formatWinSatNote(winSatCpuScore);
     const gpuNote =
       tests.gpuNote || formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : tests.gpuScore);
-    addRow('Lecture disque', tests.diskRead || components.diskReadTest || 'not_tested', formatMbps(tests.diskReadMBps), 'diskReadTest');
-    addRow('Ecriture disque', tests.diskWrite || components.diskWriteTest || 'not_tested', formatMbps(tests.diskWriteMBps), 'diskWriteTest');
+    addRow('Lecture disque', components.diskReadTest || tests.diskRead || 'not_tested', formatMbps(tests.diskReadMBps), 'diskReadTest');
+    addRow('Ecriture disque', components.diskWriteTest || tests.diskWrite || 'not_tested', formatMbps(tests.diskWriteMBps), 'diskWriteTest');
     addRow('RAM (WinSAT)', tests.ramTest || components.ramTest || 'not_tested', ramNote || formatMbps(tests.ramMBps), 'ramTest');
     addRow('CPU (WinSAT)', tests.cpuTest || components.cpuTest || 'not_tested', cpuNote || formatMbps(tests.cpuMBps), 'cpuTest');
     const gpuStatus = tests.gpuTest || components.gpuTest || (winSatGraphicsScore != null ? 'ok' : 'not_tested');
@@ -4352,8 +4500,8 @@ function buildDrawerDiagnosticsRows(detail) {
           : null
       : null;
 
-    addRow('Lecture disque', tests.diskRead || components.diskReadTest || 'not_tested', formatMbps(tests.diskReadMBps), 'diskReadTest');
-    addRow('Ecriture disque', tests.diskWrite || components.diskWriteTest || 'not_tested', formatMbps(tests.diskWriteMBps), 'diskWriteTest');
+    addRow('Lecture disque', components.diskReadTest || tests.diskRead || 'not_tested', formatMbps(tests.diskReadMBps), 'diskReadTest');
+    addRow('Ecriture disque', components.diskWriteTest || tests.diskWrite || 'not_tested', formatMbps(tests.diskWriteMBps), 'diskWriteTest');
     addRow('RAM (WinSAT)', tests.ram || components.ramTest || 'not_tested', tests.ramNote || formatWinSatNote(memScore), 'ramTest');
     addRow('CPU (WinSAT)', tests.cpu || components.cpuTest || 'not_tested', tests.cpuNote || formatWinSatNote(cpuScore), 'cpuTest');
     addRow('GPU (WinSAT)', tests.gpu || components.gpuTest || 'not_tested', tests.gpuNote || formatWinSatNote(gfxScore), 'gpuTest');
@@ -4383,6 +4531,7 @@ function buildDrawerDetailHtml(detail) {
   const subtitle = escapeHtml(formatSubtitle(detail));
   const lot = getMachineLot(detail);
   const lotLabel = lot ? buildLotLabel(lot) : DEFAULT_LOT_LABEL;
+  const lotSelectOptions = buildLotAssignmentOptions(lot);
   const summary = summarizeDetailForDrawer(detail);
   const components = resolveDetailComponents(detail);
 
@@ -4449,12 +4598,32 @@ function buildDrawerDetailHtml(detail) {
     ? `<button class="drawer-copy-btn" type="button" data-action="copy-autopilot-hash" data-id="${detailId}" title="Copier le hash complet">Copier</button>`
     : '';
   const serialValue = detail.serialNumber ? String(detail.serialNumber).trim() : '';
+  const modelValue = detail.model ? String(detail.model).trim() : '';
   const serialBarcodeSrc = serialValue
-    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png`
+    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png${modelValue ? `?model=${encodeURIComponent(modelValue)}` : ''}`
     : '';
+  const lotEditorHtml = state.canEditTags
+    ? `
+      <div class="drawer-lot-field">
+        <span>Lot</span>
+        <div class="drawer-lot-editor">
+          <select class="drawer-lot-select" data-lot-select-for="${detailId}">
+            ${lotSelectOptions}
+          </select>
+          <button class="drawer-action-btn" type="button" data-action="save-lot" data-id="${detailId}">Appliquer</button>
+        </div>
+      </div>
+    `
+    : `
+      <div class="drawer-lot-field">
+        <span>Lot</span>
+        <strong>${escapeHtml(lotLabel)}</strong>
+      </div>
+    `;
 
   const identifiersPanel = `
     <div class="drawer-table">
+      ${lotEditorHtml}
       <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
       <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
       <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
@@ -4464,7 +4633,7 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-barcode-row"><span>Code-barres serial</span>${
         serialBarcodeSrc
           ? `<div class="drawer-barcode-wrap"><img src="${serialBarcodeSrc}" alt="Code-barres ${escapeHtml(
-              serialValue
+              modelValue ? `${modelValue} - ${serialValue}` : serialValue
             )}" loading="lazy" /></div>`
           : '<strong>--</strong>'
       }</div>
@@ -5238,8 +5407,9 @@ function buildDetailHtml(detail) {
     ? `<button class="hash-copy-btn" type="button" data-action="copy-autopilot-hash" data-id="${detailId}" title="Copier le hash complet">Copier</button>`
     : '';
   const serialValue = detail.serialNumber ? String(detail.serialNumber).trim() : '';
+  const modelValue = detail.model ? String(detail.model).trim() : '';
   const serialBarcodeSrc = serialValue
-    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png`
+    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png${modelValue ? `?model=${encodeURIComponent(modelValue)}` : ''}`
     : '';
 
   return `
@@ -5282,7 +5452,7 @@ function buildDetailHtml(detail) {
         ${
           serialBarcodeSrc
             ? `<div class="detail-barcode-wrap"><img src="${serialBarcodeSrc}" alt="Code-barres ${escapeHtml(
-                serialValue
+                modelValue ? `${modelValue} - ${serialValue}` : serialValue
               )}" loading="lazy" /></div>`
             : '<strong>--</strong>'
         }
@@ -5800,7 +5970,7 @@ function openReportPdf(detail) {
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = objectUrl;
-      link.download = `mdt-report-${detail.id}.pdf`;
+      link.download = buildPdfDownloadFilename(detail);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -6545,6 +6715,29 @@ if (detailsDrawerShell) {
         return;
       }
       openReportPdf(detail);
+      return;
+    }
+
+    const saveLotBtn = event.target.closest('[data-action="save-lot"]');
+    if (saveLotBtn) {
+      event.preventDefault();
+      const id = saveLotBtn.dataset.id;
+      if (!id || !detailsDrawerShell) {
+        return;
+      }
+      const detail = state.details[id];
+      const safeId = String(id).replace(/"/g, '\\"');
+      const select = detailsDrawerShell.querySelector(`[data-lot-select-for="${safeId}"]`);
+      if (!detail || detail.error || !select) {
+        return;
+      }
+      const currentLot = getMachineLot(detail);
+      const currentLotId = normalizeLotId(currentLot && currentLot.id ? currentLot.id : '');
+      const nextLotId = normalizeLotId(select.value || '');
+      if (currentLotId === nextLotId) {
+        return;
+      }
+      updateMachineLot(id, select.value || null, saveLotBtn);
       return;
     }
 

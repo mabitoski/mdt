@@ -3887,9 +3887,11 @@ function Get-BiosBatteryStatus {
 
   $portableBattery = Get-CimInstanceSafe -ClassName 'Win32_Battery' | Select-Object -First 1
   if ($portableBattery) {
-    $result.status = 'ok'
-    $result.source = 'win32_battery'
-    $result.note = 'portable_battery_detected'
+    $result.source = 'eventlog_unavailable'
+    $result.note = 'portable_battery_detected_cmos_unknown'
+  } else {
+    $result.source = 'eventlog_unavailable'
+    $result.note = 'no_cmos_signal'
   }
   return $result
 }
@@ -4402,12 +4404,12 @@ $biosPasswordInfo = [ordered]@{
   isSet = $null
   source = 'manual_only'
 }
-$biosBatteryInfo = [ordered]@{
-  status = 'not_tested'
-  source = 'manual_only'
-  note = $null
-}
-Write-Log 'BIOS language/password/battery set to not_tested (manual-only fields).'
+$biosBatteryInfo = Get-BiosBatteryStatus
+Write-Log 'BIOS language/password set to not_tested (manual-only fields).'
+Write-Log ("BIOS battery heuristic status={0} source={1} note={2}" -f `
+  $biosBatteryInfo.status, `
+  $biosBatteryInfo.source, `
+  $(if ($biosBatteryInfo.note) { $biosBatteryInfo.note } else { 'none' }))
 
 $hostname = $env:COMPUTERNAME
 $macAddress = Get-PrimaryMac
