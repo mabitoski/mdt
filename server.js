@@ -373,6 +373,132 @@ function hasPermission(user, permissionKey) {
   return getUserPermissions(user)[permissionKey] === true;
 }
 
+function normalizeIdentityLabel(value, maxLength = 128) {
+  const cleaned = cleanString(value, maxLength);
+  if (!cleaned) {
+    return null;
+  }
+  const normalized = cleaned.replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function extractPrimaryTechnicianLabel(value) {
+  const normalized = normalizeIdentityLabel(value, 128);
+  if (!normalized) {
+    return null;
+  }
+  const primary = normalized.split(' ').find(Boolean) || normalized;
+  return cleanString(primary, 64);
+}
+
+function getUserTechnicianScope(user) {
+  if (!user || typeof user !== 'object') {
+    return null;
+  }
+  if (normalizeAccessLevel(user.accessLevel) !== ACCESS_LEVELS.operator) {
+    return null;
+  }
+
+  const displayLabel = normalizeIdentityLabel(user.displayName, 128);
+  const email = normalizeEmailAddress(user.mail || user.username);
+  const emailLocal = email ? normalizeIdentityLabel(email.split('@')[0], 128) : null;
+  const usernameLabel = normalizeIdentityLabel(user.username, 128);
+  const preferredPrimary =
+    extractPrimaryTechnicianLabel(displayLabel) ||
+    extractPrimaryTechnicianLabel(emailLocal) ||
+    extractPrimaryTechnicianLabel(usernameLabel) ||
+    cleanString(user.displayName || user.username || user.mail, 64) ||
+    'Operateur';
+
+  const candidates = [
+    preferredPrimary,
+    displayLabel,
+    emailLocal,
+    usernameLabel
+  ].filter(Boolean);
+
+  const dedupe = new Map();
+  candidates.forEach((candidate) => {
+    const key = normalizeTechKey(candidate);
+    if (!key || dedupe.has(key)) {
+      return;
+    }
+    dedupe.set(key, cleanString(candidate, 128) || candidate);
+  });
+
+  const technicianLabels = Array.from(dedupe.values());
+  const technicianKeys = technicianLabels
+    .map((label) => normalizeTechKey(label))
+    .filter(Boolean);
+  const primaryLabel = technicianLabels[0] || preferredPrimary;
+  const primaryKey = normalizeTechKey(primaryLabel);
+
+  return {
+    restricted: true,
+    primaryLabel,
+    primaryKey: primaryKey || '',
+    technicianLabels,
+    technicianKeys
+  };
+}
+
+function getForcedReportTechKeys(user) {
+  const scope = getUserTechnicianScope(user);
+  return scope ? scope.technicianKeys : null;
+}
+
+function canUserAccessReportTechnician(user, technician) {
+  const scope = getUserTechnicianScope(user);
+  if (!scope) {
+    return true;
+  }
+  if (!scope.technicianKeys.length) {
+    return false;
+  }
+  const technicianKey = normalizeTechKey(technician || '');
+  return Boolean(technicianKey && scope.technicianKeys.includes(technicianKey));
+}
+
+function buildClientUserPayload(user) {
+  if (!user || typeof user !== 'object') {
+    return user || null;
+  }
+  return {
+    ...user,
+    permissions: getUserPermissions(user),
+    operatorScope: getUserTechnicianScope(user)
+  };
+}
+
+async function getScopedReportRowById(
+  client,
+  reportId,
+  user,
+  {
+    columns = 'id, machine_key, technician',
+    forUpdate = false
+  } = {}
+) {
+  const scope = getUserTechnicianScope(user);
+  const params = [reportId];
+  const clauses = ['id = $1'];
+
+  if (scope) {
+    if (!scope.technicianKeys.length) {
+      return null;
+    }
+    clauses.push(`${normalizeTextSql('technician')} = ANY($2::text[])`);
+    params.push(scope.technicianKeys);
+  }
+
+  const lockClause = forUpdate ? ' FOR UPDATE' : '';
+  const result = await client.query(
+    `SELECT ${columns} FROM reports WHERE ${clauses.join(' AND ')}${lockClause}`,
+    params
+  );
+  return result.rows && result.rows[0] ? result.rows[0] : null;
+}
+
 function normalizeObjectStorageSegment(value) {
   if (!value) {
     return '';
@@ -4686,10 +4812,30 @@ function getDateRange(dateFilter) {
   return null;
 }
 
-function buildReportFilters(query, { includeCategory = true, activeTagId = null } = {}) {
+function buildReportFilters(
+  query,
+  {
+    includeCategory = true,
+    activeTagId = null,
+    forcedTechKeys = null
+  } = {}
+) {
   const clauses = [];
   const values = [];
   let idx = 1;
+
+  const forcedTechList = Array.isArray(forcedTechKeys)
+    ? Array.from(new Set(forcedTechKeys.map((value) => normalizeTechKey(value)).filter(Boolean)))
+    : null;
+  if (forcedTechList) {
+    if (!forcedTechList.length) {
+      clauses.push('1 = 0');
+    } else {
+      clauses.push(`${normalizeTextSql('technician')} = ANY($${idx}::text[])`);
+      values.push(forcedTechList);
+      idx += 1;
+    }
+  }
 
   const techRaw = cleanString(query.tech, 64);
   const tech = techRaw ? normalizeTechKey(techRaw) : '';
@@ -4779,6 +4925,15 @@ function buildReportFilters(query, { includeCategory = true, activeTagId = null 
       `lower(COALESCE(NULLIF(components, ''), '{}')::jsonb ->> $${idx}) = 'nok'`
     );
     values.push(component);
+    idx += 1;
+  }
+
+  const batteryUnderRaw =
+    query.batteryUnder ?? query.batteryBelow ?? query.batteryHealthBelow ?? query.lowBattery;
+  const batteryUnder = Number.parseInt(String(batteryUnderRaw || '').trim(), 10);
+  if (Number.isFinite(batteryUnder) && batteryUnder >= 0 && batteryUnder <= 100) {
+    clauses.push(`battery_health IS NOT NULL AND battery_health < $${idx}`);
+    values.push(batteryUnder);
     idx += 1;
   }
 
@@ -8673,30 +8828,10 @@ app.get('/api/me', requireAuth, (req, res) => {
   refreshLdapPermissions(req)
     .then((user) => {
       const resolvedUser = user || req.session.user;
-      if (resolvedUser && typeof resolvedUser === 'object') {
-        res.json({
-          ok: true,
-          user: {
-            ...resolvedUser,
-            permissions: getUserPermissions(resolvedUser)
-          }
-        });
-        return;
-      }
-      res.json({ ok: true, user: resolvedUser });
+      res.json({ ok: true, user: buildClientUserPayload(resolvedUser) });
     })
     .catch(() => {
-      const resolvedUser = req.session.user;
-      res.json({
-        ok: true,
-        user:
-          resolvedUser && typeof resolvedUser === 'object'
-            ? {
-                ...resolvedUser,
-                permissions: getUserPermissions(resolvedUser)
-              }
-            : resolvedUser
-      });
+      res.json({ ok: true, user: buildClientUserPayload(req.session.user) });
     });
 });
 
@@ -9434,7 +9569,8 @@ app.get('/api/reports', requireAuth, async (req, res) => {
   }
   const { clauses, values } = buildReportFilters(req.query, {
     includeCategory: true,
-    activeTagId
+    activeTagId,
+    forcedTechKeys: getForcedReportTechKeys(req.session?.user)
   });
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const useLatest = shouldUseLatest(req.query);
@@ -9679,15 +9815,18 @@ app.get('/api/stats', requireAuth, async (req, res) => {
       activeTagId = null;
     }
   }
+  const forcedTechKeys = getForcedReportTechKeys(req.session?.user);
   const { clauses, values } = buildReportFilters(req.query, {
     includeCategory: false,
-    activeTagId
+    activeTagId,
+    forcedTechKeys
   });
   const queryWithoutTech = { ...req.query };
   delete queryWithoutTech.tech;
   const { clauses: techClauses, values: techValues } = buildReportFilters(queryWithoutTech, {
     includeCategory: false,
-    activeTagId
+    activeTagId,
+    forcedTechKeys
   });
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const techWhere = techClauses.length ? `WHERE ${techClauses.join(' AND ')}` : '';
@@ -9782,11 +9921,14 @@ app.get('/api/machines', requireAuth, async (req, res) => {
   const metaOnly = req.query.meta === '1';
   const legacyFlag = req.query.legacy;
   let permissions = null;
+  let operatorScope = null;
   try {
     const user = await refreshLdapPermissions(req);
     permissions = getUserPermissions(user);
+    operatorScope = getUserTechnicianScope(user);
   } catch (error) {
     permissions = null;
+    operatorScope = getUserTechnicianScope(req.session?.user);
   }
   try {
     if (metaOnly) {
@@ -9802,6 +9944,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
         ok: true,
         machines: [],
         permissions,
+        operatorScope,
         tags,
         activeTagId: activeTag ? activeTag.id : null,
         lots,
@@ -9861,6 +10004,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
     res.json({
       machines,
       permissions,
+      operatorScope,
       tags,
       activeTagId: activeTag ? activeTag.id : null,
       lots,
@@ -10376,6 +10520,9 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
   if (!row) {
     return res.status(404).json({ ok: false, error: 'not_found' });
   }
+  if (!canUserAccessReportTechnician(req.session?.user, row.technician)) {
+    return res.status(404).json({ ok: false, error: 'not_found' });
+  }
 
   let components = null;
   let machineComponents = null;
@@ -10562,8 +10709,10 @@ app.put('/api/machines/:id/pad', requireOperator, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     await setAuditContext(client, buildAuditContext(req));
-    const result = await client.query('SELECT components, machine_key FROM reports WHERE id = $1', [id]);
-    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    const row = await getScopedReportRowById(client, id, req.session?.user, {
+      columns: 'id, components, machine_key, technician',
+      forUpdate: true
+    });
     if (!row) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'not_found' });
@@ -10624,8 +10773,10 @@ app.put('/api/machines/:id/usb', requireOperator, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     await setAuditContext(client, buildAuditContext(req));
-    const result = await client.query('SELECT components, machine_key FROM reports WHERE id = $1', [id]);
-    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    const row = await getScopedReportRowById(client, id, req.session?.user, {
+      columns: 'id, components, machine_key, technician',
+      forUpdate: true
+    });
     if (!row) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'not_found' });
@@ -10692,8 +10843,10 @@ app.put('/api/reports/:id/component', requireOperator, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     await setAuditContext(client, buildAuditContext(req));
-    const result = await client.query('SELECT components, machine_key FROM reports WHERE id = $1', [id]);
-    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    const row = await getScopedReportRowById(client, id, req.session?.user, {
+      columns: 'id, components, machine_key, technician',
+      forUpdate: true
+    });
     if (!row) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'not_found' });
@@ -10768,8 +10921,10 @@ app.put('/api/reports/:id/category', requireOperator, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     await setAuditContext(client, buildAuditContext(req));
-    const result = await client.query('SELECT machine_key FROM reports WHERE id = $1', [id]);
-    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    const row = await getScopedReportRowById(client, id, req.session?.user, {
+      columns: 'id, machine_key, technician',
+      forUpdate: true
+    });
     if (!row) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'not_found' });
@@ -10926,8 +11081,10 @@ app.post('/api/machines/:id/report-zero', requireOperator, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     await setAuditContext(client, buildAuditContext(req));
-    const result = await client.query('SELECT * FROM reports WHERE id = $1', [id]);
-    const row = result.rows && result.rows[0] ? result.rows[0] : null;
+    const row = await getScopedReportRowById(client, id, req.session?.user, {
+      columns: '*',
+      forUpdate: true
+    });
     if (!row) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'not_found' });
@@ -11151,6 +11308,7 @@ app.get('/api/reports/manual-template.csv', requireAuth, (req, res) => {
 app.post('/api/reports/import-manual-csv', requireOperator, async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const csvText = typeof body.csvText === 'string' ? body.csvText : '';
+  const operatorScope = getUserTechnicianScope(req.session?.user);
   if (!csvText.trim()) {
     return res.status(400).json({
       ok: false,
@@ -11192,7 +11350,13 @@ app.post('/api/reports/import-manual-csv', requireOperator, async (req, res) => 
       buildAuditContext(req, { source: 'POST /api/reports/import-manual-csv' })
     );
     const imported = [];
-    for (const row of parsed.rows) {
+    for (const rawRow of parsed.rows) {
+      const row = operatorScope
+        ? {
+            ...rawRow,
+            technician: operatorScope.primaryLabel || rawRow.technician || null
+          }
+        : rawRow;
       const result = await insertManualCsvReportRow(client, req, row);
       imported.push(result);
     }
@@ -11236,7 +11400,9 @@ app.post('/api/reports/report-zero', requireOperator, async (req, res) => {
   const tag = cleanString(body.tag, 64);
   const model = cleanString(body.model, 64);
   const vendor = cleanString(body.vendor, 64);
-  const technician = cleanString(body.technician, 64);
+  const requestedTechnician = cleanString(body.technician, 64);
+  const operatorScope = getUserTechnicianScope(req.session?.user);
+  const technician = operatorScope ? operatorScope.primaryLabel || requestedTechnician : requestedTechnician;
   const osVersion = cleanString(body.osVersion, 64);
   const isDoubleCheck = isDoubleCheckPayload(body);
   let macAddresses = normalizeMacList(body.macAddresses);
@@ -11570,6 +11736,14 @@ app.put('/api/machines/:id/comment', requireOperator, async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     await setAuditContext(client, buildAuditContext(req));
+    const reportRow = await getScopedReportRowById(client, id, req.session?.user, {
+      columns: 'id, technician',
+      forUpdate: true
+    });
+    if (!reportRow) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
     const result = await client.query(
       `
         UPDATE reports
@@ -11580,13 +11754,13 @@ app.put('/api/machines/:id/comment', requireOperator, async (req, res) => {
       `,
       [comment, id]
     );
-    const row = result.rows && result.rows[0] ? result.rows[0] : null;
-    if (!row) {
+    const updatedRow = result.rows && result.rows[0] ? result.rows[0] : null;
+    if (!updatedRow) {
       await client.query('ROLLBACK');
       return res.status(404).json({ ok: false, error: 'not_found' });
     }
     await client.query('COMMIT');
-    return res.json({ ok: true, comment: row.comment, commentedAt: row.commented_at });
+    return res.json({ ok: true, comment: updatedRow.comment, commentedAt: updatedRow.commented_at });
   } catch (error) {
     if (client) {
       try {
@@ -11931,6 +12105,9 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
   }
 
   if (!row) {
+    return res.status(404).json({ ok: false, error: 'not_found' });
+  }
+  if (!canUserAccessReportTechnician(req.session?.user, row.technician)) {
     return res.status(404).json({ ok: false, error: 'not_found' });
   }
 

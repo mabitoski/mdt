@@ -1454,6 +1454,48 @@ button.admin-link {
   align-items: stretch;
 }
 
+.board-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.board-tab-btn {
+  border: 1px solid rgba(30, 125, 103, 0.24);
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 10px 16px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.board-tab-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(30, 125, 103, 0.42);
+}
+
+.board-tab-btn.active {
+  border-color: rgba(30, 125, 103, 0.52);
+  background: rgba(30, 125, 103, 0.12);
+  color: #165647;
+  box-shadow: 0 8px 18px rgba(30, 125, 103, 0.12);
+}
+
+.board-scope-banner {
+  border-radius: 16px;
+  border: 1px solid rgba(35, 93, 136, 0.24);
+  background: rgba(35, 93, 136, 0.08);
+  color: #174264;
+  padding: 10px 14px;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
 .board-copy {
   border-radius: 22px;
   border: 1px solid var(--stroke);
@@ -1858,6 +1900,34 @@ button.admin-link {
   background: rgba(35, 93, 136, 0.2);
 }
 
+.battery-pill {
+  border-color: rgba(185, 131, 33, 0.32);
+  background: rgba(185, 131, 33, 0.1);
+  color: #78510f;
+}
+
+.battery-pill .lot-pill-label {
+  background: rgba(185, 131, 33, 0.18);
+}
+
+.battery-pill.is-alert {
+  border-color: rgba(184, 63, 32, 0.4);
+  background: rgba(184, 63, 32, 0.12);
+  color: #8f2f17;
+}
+
+.battery-pill.is-alert .lot-pill-label {
+  background: rgba(184, 63, 32, 0.2);
+}
+
+.machine-card.is-battery-alert {
+  border-color: rgba(184, 63, 32, 0.28);
+}
+
+.machine-card.is-battery-alert:hover {
+  border-color: rgba(184, 63, 32, 0.45);
+}
+
 .machine-lot-line {
   margin: 2px 0 0;
   display: flex;
@@ -2240,6 +2310,13 @@ button.admin-link {
 .comment-inline:focus {
   border-color: rgba(47, 124, 92, 0.4);
   box-shadow: 0 0 0 2px rgba(47, 124, 92, 0.25);
+}
+
+.modal-field input.is-locked {
+  background: rgba(35, 93, 136, 0.06);
+  border-color: rgba(35, 93, 136, 0.2);
+  color: #174264;
+  font-weight: 600;
 }
 
 .card-comment .comment-label {

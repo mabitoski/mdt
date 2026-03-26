@@ -17,6 +17,8 @@ const state = {
   lots: [],
   activeLotId: null,
   stats: null,
+  currentUser: null,
+  operatorScope: null,
   techOptions: [],
   filter: 'all',
   techFilter: 'all',
@@ -79,7 +81,8 @@ const state = {
   scrollAnchorHold: null,
   scrollAnchorHoldRaf: null,
   reportsEpoch: 0,
-  drawerTab: 'identifiants'
+  drawerTab: 'identifiants',
+  boardView: 'workspace'
 };
 
 const listEl = document.getElementById('machine-list');
@@ -95,6 +98,9 @@ const reportZeroForm = document.getElementById('report-zero-form');
 const reportZeroError = document.getElementById('report-zero-error');
 const reportZeroSubmit = document.getElementById('report-zero-submit');
 const reportZeroLotSelect = document.getElementById('report-zero-lot');
+const reportZeroTechnicianInput = reportZeroForm
+  ? reportZeroForm.querySelector('input[name="technician"]')
+  : null;
 const suggestionBtn = document.getElementById('suggestion-btn');
 const suggestionModal = document.getElementById('suggestion-modal');
 const suggestionListEl = document.getElementById('suggestion-list');
@@ -130,6 +136,10 @@ const lotOverviewCount = document.getElementById('lot-overview-count');
 const lotOverviewStatus = document.getElementById('lot-overview-status');
 const lotOverviewFill = document.getElementById('lot-overview-fill');
 const lotOverviewList = document.getElementById('lot-overview-list');
+const boardTitleEl = document.getElementById('board-title');
+const boardSubEl = document.getElementById('board-sub');
+const boardTabsEl = document.getElementById('board-tabs');
+const boardScopeBannerEl = document.getElementById('board-scope-banner');
 const statFilterCards = document.querySelectorAll('.stat-card[data-filter]');
 const statTotalCard = document.getElementById('stat-total-card');
 const statTimeLabel = document.getElementById('stat-time-label');
@@ -178,6 +188,8 @@ const categoryCycle = ['desktop', 'unknown', 'laptop'];
 const DEFAULT_TAG_LABEL = 'En cours';
 const DEFAULT_LOT_LABEL = 'Aucun lot';
 const DEFAULT_PALLET_LABEL = 'Aucune palette';
+const BATTERY_ALERT_THRESHOLD = 78;
+const boardViewOptions = new Set(['workspace', 'battery-alerts']);
 
 const statusLabels = {
   ok: 'OK',
@@ -323,6 +335,7 @@ function savePreferences() {
     componentFilter: state.componentFilter,
     commentFilter: state.commentFilter,
     dateFilter: state.dateFilter,
+    boardView: state.boardView,
     search: state.search,
     quickFilter: state.quickFilter
   };
@@ -378,6 +391,9 @@ function applyPreferences() {
   if (commentFilterOptions.has(prefs.commentFilter)) {
     state.commentFilter = prefs.commentFilter;
   }
+  if (boardViewOptions.has(prefs.boardView)) {
+    state.boardView = prefs.boardView;
+  }
   if (dateFilterOrder.includes(prefs.dateFilter)) {
     state.dateFilter = prefs.dateFilter;
   }
@@ -401,9 +417,49 @@ function applyPreferences() {
   }
 }
 
+function isBatteryAlertsView() {
+  return state.boardView === 'battery-alerts';
+}
+
+function isTechnicianFilterLocked() {
+  return Boolean(state.operatorScope && state.operatorScope.restricted);
+}
+
+function getOperatorScopePrimaryKey() {
+  const scope = state.operatorScope;
+  if (!scope || !scope.restricted) {
+    return '';
+  }
+  return String(scope.primaryKey || '').trim();
+}
+
+function getOperatorScopePrimaryLabel() {
+  const scope = state.operatorScope;
+  if (!scope || !scope.restricted) {
+    return '';
+  }
+  return String(scope.primaryLabel || '').trim();
+}
+
+function applyOperatorScope(scope) {
+  const normalizedScope = scope && scope.restricted ? scope : null;
+  state.operatorScope = normalizedScope;
+  if (isTechnicianFilterLocked()) {
+    state.techFilter = getOperatorScopePrimaryKey() || 'all';
+  }
+}
+
+function applyCurrentUser(user) {
+  state.currentUser = user && typeof user === 'object' ? user : null;
+  applyOperatorScope(state.currentUser && state.currentUser.operatorScope ? state.currentUser.operatorScope : null);
+}
+
 function buildQueryParams({ includeCategory = true, includeTech = true } = {}) {
   const params = new URLSearchParams();
-  if (includeTech && state.techFilter !== 'all') {
+  if (isBatteryAlertsView()) {
+    params.set('batteryUnder', String(BATTERY_ALERT_THRESHOLD));
+  }
+  if (includeTech && !isTechnicianFilterLocked() && state.techFilter !== 'all') {
     params.set('tech', state.techFilter);
   }
   if (Array.isArray(state.tagFilter) && state.tagFilter.length > 0) {
@@ -850,6 +906,7 @@ async function loadStats() {
   } catch (error) {
     state.stats = null;
     state.techOptions = [];
+    renderTechFilters();
   }
   updateStats();
 }
@@ -877,6 +934,8 @@ async function loadMeta() {
     state.lots = Array.isArray(data.lots) ? data.lots : [];
     state.activeLotId = data.activeLotId ? normalizeLotId(data.activeLotId) : null;
     applyPermissions(data.permissions || null);
+    applyOperatorScope(data.operatorScope || null);
+    renderBoardTabs();
     hydrateTagFilterFromNames();
     renderTagFilters();
     renderTechFilters();
@@ -1552,6 +1611,22 @@ function renderTechFilters() {
   if (!techFiltersEl) {
     return;
   }
+  if (isTechnicianFilterLocked()) {
+    const lockedKey = getOperatorScopePrimaryKey();
+    const lockedLabel = getOperatorScopePrimaryLabel() || 'Operateur connecte';
+    if (lockedKey) {
+      state.techFilter = lockedKey;
+    }
+    techFiltersEl.innerHTML = `
+      <button class="filter-btn tech-filter-btn active is-locked" data-tech="${escapeHtml(
+        lockedKey || 'all'
+      )}" type="button" aria-pressed="true" disabled>
+        ${escapeHtml(lockedLabel)}
+      </button>
+    `;
+    updateTechFilterButtons();
+    return;
+  }
   const techMap = new Map();
   const techSource = Array.isArray(state.techOptions) && state.techOptions.length
     ? state.techOptions
@@ -1781,7 +1856,7 @@ function getActiveFilterCount() {
   if (state.dateFilter && state.dateFilter !== 'all') {
     count += 1;
   }
-  if (state.techFilter && state.techFilter !== 'all') {
+  if (!isTechnicianFilterLocked() && state.techFilter && state.techFilter !== 'all') {
     count += 1;
   }
   if (Array.isArray(state.tagFilter) && state.tagFilter.length) {
@@ -1984,6 +2059,14 @@ function renderTechnicianOptions() {
   if (!technicianOptionsEl) {
     return;
   }
+  if (isTechnicianFilterLocked()) {
+    const label = getOperatorScopePrimaryLabel();
+    technicianOptionsEl.innerHTML = label
+      ? `<option value="${escapeHtml(label)}"></option>`
+      : '';
+    syncReportZeroTechnicianField();
+    return;
+  }
   const techMap = new Map();
   const source = Array.isArray(state.techOptions) && state.techOptions.length
     ? state.techOptions
@@ -2002,6 +2085,7 @@ function renderTechnicianOptions() {
   technicianOptionsEl.innerHTML = techList
     .map((label) => `<option value="${escapeHtml(label)}"></option>`)
     .join('');
+  syncReportZeroTechnicianField();
 }
 
 function updateCommentFilterButtons() {
@@ -2111,6 +2195,53 @@ function applyPermissions(permissions) {
   updatePurgeImportsVisibility();
 }
 
+function syncReportZeroTechnicianField() {
+  if (!reportZeroTechnicianInput) {
+    return;
+  }
+  const locked = isTechnicianFilterLocked();
+  const lockedLabel = getOperatorScopePrimaryLabel();
+  reportZeroTechnicianInput.readOnly = locked;
+  reportZeroTechnicianInput.classList.toggle('is-locked', locked);
+  reportZeroTechnicianInput.setAttribute('aria-readonly', locked ? 'true' : 'false');
+  if (locked) {
+    reportZeroTechnicianInput.value = lockedLabel || '';
+  }
+}
+
+function renderBoardTabs() {
+  if (boardTabsEl) {
+    const buttons = boardTabsEl.querySelectorAll('.board-tab-btn[data-board-view]');
+    buttons.forEach((button) => {
+      const active = (button.dataset.boardView || 'workspace') === state.boardView;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+      button.setAttribute('tabindex', active ? '0' : '-1');
+    });
+  }
+  if (boardTitleEl) {
+    boardTitleEl.textContent = isBatteryAlertsView()
+      ? 'Alertes'
+      : 'Liste des postes en cours';
+  }
+  if (boardSubEl) {
+    boardSubEl.textContent = isBatteryAlertsView()
+      ? 'Vue dediee aux postes qui doivent etre controles ou batteries remplacees en priorite.'
+      : 'Vue operationnelle en temps reel avec suivi clair des machines et du lot prioritaire.';
+  }
+  if (boardScopeBannerEl) {
+    const label = getOperatorScopePrimaryLabel();
+    if (isTechnicianFilterLocked() && label) {
+      boardScopeBannerEl.hidden = false;
+      boardScopeBannerEl.textContent = `Vue restreinte au technicien ${label}.`;
+    } else {
+      boardScopeBannerEl.hidden = true;
+      boardScopeBannerEl.textContent = '';
+    }
+  }
+  syncReportZeroTechnicianField();
+}
+
 async function initAdminLink() {
   if (!adminLink && !lotsLink && !palletsLink) {
     return;
@@ -2127,7 +2258,11 @@ async function initAdminLink() {
     }
     const data = await response.json();
     if (data.user) {
+      applyCurrentUser(data.user);
       applyPermissions(data.user.permissions || null);
+      renderBoardTabs();
+      renderTechFilters();
+      renderTechnicianOptions();
       renderList();
     }
   } catch (error) {
@@ -2958,6 +3093,14 @@ function formatBatteryHealth(value) {
   return `${Math.round(value)}%`;
 }
 
+function parseBatteryHealthValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  const parsed = Number.parseFloat(String(value || '').replace('%', '').trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function formatMetric(value, unit) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return null;
@@ -3615,6 +3758,7 @@ function openReportZeroModal() {
   syncModalOpenState();
   reportZeroForm.reset();
   renderReportZeroLotOptions();
+  syncReportZeroTechnicianField();
   showReportZeroError('');
   const firstInput = reportZeroForm.querySelector('input[name="hostname"]');
   if (firstInput) {
@@ -3781,7 +3925,9 @@ function getReportZeroPayload() {
   const hostname = String(formData.get('hostname') || '').trim();
   const serialNumber = String(formData.get('serialNumber') || '').trim();
   const macAddress = String(formData.get('macAddress') || '').trim();
-  const technician = String(formData.get('technician') || '').trim();
+  const technician = isTechnicianFilterLocked()
+    ? getOperatorScopePrimaryLabel()
+    : String(formData.get('technician') || '').trim();
   const category = String(formData.get('category') || 'unknown').trim();
   const lotId = String(formData.get('lotId') || '').trim();
   const doubleCheck = String(formData.get('doubleCheck') || '').trim() !== '';
@@ -4229,7 +4375,7 @@ function resetAllFilters() {
     return;
   }
   state.filter = 'all';
-  state.techFilter = 'all';
+  state.techFilter = isTechnicianFilterLocked() ? getOperatorScopePrimaryKey() || 'all' : 'all';
   state.tagFilter = [];
   state.tagFilterNames = [];
   state.componentFilter = 'all';
@@ -5004,6 +5150,7 @@ function renderList(isScrollUpdate = false) {
   const useQuickFilter = Boolean(state.quickFilter && state.quickFilter.value);
   const cacheKey = JSON.stringify({
     length: state.machines.length,
+    boardView: state.boardView,
     filter: state.filter,
     techFilter: state.techFilter,
     tagFilter: state.tagFilter,
@@ -5031,7 +5178,9 @@ function renderList(isScrollUpdate = false) {
       listEl.style.paddingBottom = '0px';
       listEl.classList.remove('is-virtual');
     }
-    listEl.innerHTML = '<div class="empty">Aucun poste ne correspond a ce filtre.</div>';
+    listEl.innerHTML = isBatteryAlertsView()
+      ? `<div class="empty">Aucune machine avec une batterie inferieure a ${BATTERY_ALERT_THRESHOLD}%.</div>`
+      : '<div class="empty">Aucun poste ne correspond a ce filtre.</div>';
     return;
   }
 
@@ -5106,6 +5255,8 @@ function renderList(isScrollUpdate = false) {
         (Array.isArray(machine.macAddresses) ? machine.macAddresses[0] : '') ||
         '';
       const technicianValue = machine.technician || '';
+      const batteryValue = parseBatteryHealthValue(machine.batteryHealth);
+      const isBatteryAlert = batteryValue != null && batteryValue < BATTERY_ALERT_THRESHOLD;
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
       const tagLabel = getTagLabel(machine);
       const tagValue = escapeHtml(tagLabel);
@@ -5141,6 +5292,16 @@ function renderList(isScrollUpdate = false) {
           <span class="lot-pill pallet-pill" title="${palletValue}">
             <span class="lot-pill-label">Palette</span>
             <span class="lot-pill-value">${palletValue}</span>
+          </span>
+        `
+        : '';
+      const batteryHtml = batteryValue != null
+        ? `
+          <span class="lot-pill battery-pill${isBatteryAlert ? ' is-alert' : ''}" title="Batterie ${escapeHtml(
+            formatBatteryHealth(batteryValue)
+          )}">
+            <span class="lot-pill-label">Batterie</span>
+            <span class="lot-pill-value">${escapeHtml(formatBatteryHealth(batteryValue))}</span>
           </span>
         `
         : '';
@@ -5209,7 +5370,7 @@ function renderList(isScrollUpdate = false) {
       const toggleLabel = 'Voir details';
 
       return `
-        <article class="machine-card ${delayClass} ${selected}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="false">
+        <article class="machine-card ${delayClass} ${selected}${isBatteryAlert ? ' is-battery-alert' : ''}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="false">
           <div class="card-top">
             ${categoryBadge}
             <div class="card-top-right">
@@ -5217,6 +5378,7 @@ function renderList(isScrollUpdate = false) {
                 ${tagHtml}
                 ${lotHtml}
                 ${palletHtml}
+                ${batteryHtml}
               </div>
               <span class="machine-meta"><span>${lastSeen}</span></span>
             </div>
@@ -6379,8 +6541,28 @@ statFilterCards.forEach((card) => {
   });
 });
 
+if (boardTabsEl) {
+  boardTabsEl.addEventListener('click', (event) => {
+    const button = event.target.closest('.board-tab-btn[data-board-view]');
+    if (!button) {
+      return;
+    }
+    const nextView = button.dataset.boardView || 'workspace';
+    if (!boardViewOptions.has(nextView) || nextView === state.boardView) {
+      return;
+    }
+    state.boardView = nextView;
+    savePreferences();
+    renderBoardTabs();
+    reloadReports();
+  });
+}
+
 if (techFiltersEl) {
   techFiltersEl.addEventListener('click', (event) => {
+    if (isTechnicianFilterLocked()) {
+      return;
+    }
     const button = event.target.closest('.tech-filter-btn');
     if (!button) {
       return;
@@ -6492,6 +6674,7 @@ updateStatFilterCards();
 initSidebarNavigation();
 initFilterHub();
 updateFilterDockState();
+renderBoardTabs();
 
 if (searchToggle && searchWrap && searchInput) {
   searchToggle.addEventListener('click', () => {

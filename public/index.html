@@ -266,8 +266,8 @@
           <div class="board-toolbar">
             <div class="board-copy">
               <p class="board-kicker">Production</p>
-              <h2>Liste des postes en cours</h2>
-              <p class="board-sub">
+              <h2 id="board-title">Liste des postes en cours</h2>
+              <p class="board-sub" id="board-sub">
                 Vue operationnelle en temps reel avec suivi clair des machines et du lot prioritaire.
               </p>
             </div>
@@ -288,6 +288,15 @@
               </ul>
             </aside>
           </div>
+          <div class="board-tabs" id="board-tabs" role="tablist" aria-label="Vues production">
+            <button class="board-tab-btn" type="button" data-board-view="workspace" role="tab" aria-selected="true">
+              Postes en cours
+            </button>
+            <button class="board-tab-btn" type="button" data-board-view="battery-alerts" role="tab" aria-selected="false">
+              Alertes
+            </button>
+          </div>
+          <div class="board-scope-banner" id="board-scope-banner" hidden></div>
           <div id="scroll-top-sentinel" class="scroll-sentinel" aria-hidden="true"></div>
           <div class="list" id="machine-list" aria-live="polite"></div>
           <div id="scroll-sentinel" class="scroll-sentinel" aria-hidden="true"></div>
@@ -416,6 +425,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260326b" defer></script>
+    <script src="/app.js?v=20260326f" defer></script>
   </body>
 </html>
