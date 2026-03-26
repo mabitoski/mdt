@@ -2262,6 +2262,143 @@ const MANUAL_COMPONENT_DEFAULTS = {
   biosPassword: 'not_tested',
   wifiStandard: 'not_tested'
 };
+const MANUAL_REPORT_IMPORT_MAX_ROWS = 500;
+const MANUAL_REPORT_TEMPLATE_COLUMNS = [
+  'hostname',
+  'serial_number',
+  'mac_address',
+  'category',
+  'technician',
+  'lot_id',
+  'vendor',
+  'model',
+  'os_version',
+  'ram_gb',
+  'ram_slots_total',
+  'ram_slots_free',
+  'battery_health',
+  'camera_status',
+  'usb_status',
+  'keyboard_status',
+  'pad_status',
+  'badge_reader_status',
+  'bios_battery',
+  'bios_language',
+  'bios_password',
+  'wifi_standard',
+  'disk_read_status',
+  'disk_write_status',
+  'ram_test_status',
+  'cpu_test_status',
+  'gpu_test_status',
+  'network_ping_status',
+  'fs_check_status',
+  'cpu_name',
+  'cpu_cores',
+  'cpu_threads',
+  'gpu_name',
+  'primary_disk_model',
+  'primary_disk_size_gb',
+  'storage_total_gb',
+  'autopilot_hash',
+  'shipment_date',
+  'shipment_client',
+  'shipment_order_number',
+  'shipment_pallet_code',
+  'double_check'
+];
+const MANUAL_REPORT_TEMPLATE_SAMPLE = {
+  hostname: 'PC-MDT-001',
+  serial_number: 'ABC123456',
+  mac_address: 'AA:BB:CC:DD:EE:FF',
+  category: 'laptop',
+  technician: 'Mateo',
+  lot_id: '',
+  vendor: 'Dell',
+  model: 'Latitude 5420',
+  os_version: 'Windows 11 Pro',
+  ram_gb: '16',
+  ram_slots_total: '2',
+  ram_slots_free: '0',
+  battery_health: '88',
+  camera_status: 'ok',
+  usb_status: 'ok',
+  keyboard_status: 'ok',
+  pad_status: 'ok',
+  badge_reader_status: 'absent',
+  bios_battery: 'ok',
+  bios_language: 'fr',
+  bios_password: 'ok',
+  wifi_standard: '802.11ax',
+  disk_read_status: 'ok',
+  disk_write_status: 'ok',
+  ram_test_status: 'ok',
+  cpu_test_status: 'ok',
+  gpu_test_status: 'ok',
+  network_ping_status: 'ok',
+  fs_check_status: 'ok',
+  cpu_name: 'Intel Core i5-1145G7',
+  cpu_cores: '4',
+  cpu_threads: '8',
+  gpu_name: 'Intel Iris Xe',
+  primary_disk_model: 'NVMe 512Go',
+  primary_disk_size_gb: '476',
+  storage_total_gb: '476',
+  autopilot_hash: 'DEVICE-HARDWARE-HASH-EXEMPLE',
+  shipment_date: '2026-03-26',
+  shipment_client: 'Client Demo',
+  shipment_order_number: 'CMD-2026-001',
+  shipment_pallet_code: 'PAL-0001',
+  double_check: '0'
+};
+const MANUAL_REPORT_CSV_ALIASES = {
+  hostname: ['hostname', 'computer_name', 'name', 'nom_poste'],
+  serialNumber: ['serial_number', 'serial', 'serialnumber', 'numero_serie', 'numero_de_serie', 'sn'],
+  macAddress: ['mac_address', 'mac', 'adresse_mac'],
+  macAddresses: ['mac_addresses', 'macs', 'mac_list', 'liste_mac'],
+  category: ['category', 'categorie', 'type'],
+  technician: ['technician', 'technicien', 'tech', 'operator'],
+  lotId: ['lot_id', 'lotid', 'batch_id', 'batchid'],
+  tag: ['tag', 'production_tag', 'prod_tag'],
+  tagId: ['tag_id', 'tagid'],
+  vendor: ['vendor', 'manufacturer', 'fabricant', 'marque'],
+  model: ['model', 'modele'],
+  osVersion: ['os_version', 'os', 'systeme', 'systeme_exploitation'],
+  ramMb: ['ram_mb', 'memory_mb'],
+  ramGb: ['ram_gb', 'ram_go', 'memory_gb'],
+  ramSlotsTotal: ['ram_slots_total', 'slots_total', 'memory_slots_total'],
+  ramSlotsFree: ['ram_slots_free', 'slots_free', 'memory_slots_free'],
+  batteryHealth: ['battery_health', 'battery_health_percent', 'etat_batterie'],
+  cameraStatus: ['camera_status', 'camera', 'webcam_status'],
+  usbStatus: ['usb_status', 'usb'],
+  keyboardStatus: ['keyboard_status', 'keyboard', 'clavier_status', 'clavier'],
+  padStatus: ['pad_status', 'touchpad_status', 'trackpad_status', 'pave_tactile', 'pad'],
+  badgeReaderStatus: ['badge_reader_status', 'badge_reader', 'lecteur_badge', 'badge_status'],
+  biosBattery: ['bios_battery', 'bios_battery_status', 'cmos_battery'],
+  biosLanguage: ['bios_language', 'langue_bios'],
+  biosPassword: ['bios_password', 'mot_de_passe_bios'],
+  wifiStandard: ['wifi_standard', 'norme_wifi'],
+  diskReadTest: ['disk_read_status', 'lecture_disque', 'disk_read_test'],
+  diskWriteTest: ['disk_write_status', 'ecriture_disque', 'disk_write_test'],
+  ramTest: ['ram_test_status', 'ram_test'],
+  cpuTest: ['cpu_test_status', 'cpu_test'],
+  gpuTest: ['gpu_test_status', 'gpu_test'],
+  networkPing: ['network_ping_status', 'ping_status', 'network_ping'],
+  fsCheck: ['fs_check_status', 'check_disque', 'fs_check'],
+  cpuName: ['cpu_name', 'processeur'],
+  cpuCores: ['cpu_cores', 'coeurs_cpu'],
+  cpuThreads: ['cpu_threads', 'threads_cpu'],
+  gpuName: ['gpu_name', 'carte_graphique'],
+  primaryDiskModel: ['primary_disk_model', 'disk_model', 'modele_disque'],
+  primaryDiskSizeGb: ['primary_disk_size_gb', 'disk_size_gb', 'taille_disque_gb'],
+  storageTotalGb: ['storage_total_gb', 'total_storage_gb', 'stockage_total_gb'],
+  autopilotHash: ['autopilot_hash', 'hardware_hash', 'device_hardware_hash'],
+  shipmentDate: ['shipment_date', 'date_expedition', 'date_d_expedition', 'expedition_date'],
+  shipmentClient: ['shipment_client', 'client'],
+  shipmentOrderNumber: ['shipment_order_number', 'order_number', 'commande', 'numero_commande'],
+  shipmentPalletCode: ['shipment_pallet_code', 'pallet_code', 'palette', 'numero_palette'],
+  doubleCheck: ['double_check', 'doublecheck', 'controle_double', 'double_check_flag']
+};
 
 function getAllowedComponentStatuses(key) {
   return COMPONENT_ALLOWED_STATUSES[key] || DEFAULT_COMPONENT_STATUSES;
@@ -3231,6 +3368,722 @@ function extractPalletCsvRows(csvText) {
   }
 
   return { ok: true, rows: records, errors };
+}
+
+function escapeCsvCell(value) {
+  if (value == null) {
+    return '';
+  }
+  const text = String(value);
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function buildManualReportTemplateCsv() {
+  const header = MANUAL_REPORT_TEMPLATE_COLUMNS.join(',');
+  const sample = MANUAL_REPORT_TEMPLATE_COLUMNS.map((column) =>
+    escapeCsvCell(MANUAL_REPORT_TEMPLATE_SAMPLE[column] || '')
+  ).join(',');
+  return `${header}\n${sample}\n`;
+}
+
+function findCsvHeaderIndex(headerCandidates, aliases) {
+  if (!Array.isArray(headerCandidates) || !Array.isArray(aliases) || aliases.length === 0) {
+    return -1;
+  }
+  return headerCandidates.findIndex((cell) => aliases.includes(cell));
+}
+
+function normalizeIntegerRange(value, min, max) {
+  if (value == null) {
+    return null;
+  }
+  const raw = String(value).trim();
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    return null;
+  }
+  return parsed;
+}
+
+function normalizeSizeGb(value) {
+  if (value == null) {
+    return null;
+  }
+  const raw = String(value).trim();
+  if (!raw) {
+    return null;
+  }
+  const normalized = raw.replace(',', '.').replace(/go\b/gi, 'gb');
+  const match = normalized.match(/([0-9]+(?:\.[0-9]+)?)/);
+  const parsed = match ? Number(match[1]) : null;
+  if (parsed == null || parsed <= 0 || parsed > 32768) {
+    return null;
+  }
+  return Math.round(parsed * 10) / 10;
+}
+
+function normalizeManualCsvStatus(value, { label, normalizer = normalizeStatus, errors, serialNumber, line } = {}) {
+  if (value == null || String(value).trim() === '') {
+    return null;
+  }
+  const normalized = normalizer(value);
+  if (normalized) {
+    return normalized;
+  }
+  if (Array.isArray(errors)) {
+    errors.push({
+      line,
+      serialNumber: serialNumber || undefined,
+      error: `${label} invalide.`
+    });
+  }
+  return null;
+}
+
+function extractManualReportCsvRows(csvText) {
+  const rows = parseCsvRows(csvText, detectCsvDelimiter(csvText))
+    .map((row) => row.map((cell) => (cell == null ? '' : String(cell).trim())))
+    .filter((row) => row.some((cell) => cell !== ''));
+  if (!rows.length) {
+    return {
+      ok: false,
+      error: 'empty_csv',
+      rows: [],
+      errors: [{ line: 1, error: 'Fichier CSV vide.' }],
+      rowCount: 0
+    };
+  }
+
+  const headerCandidates = rows[0].map((cell) => normalizeCsvHeader(cell));
+  const columnMap = Object.fromEntries(
+    Object.entries(MANUAL_REPORT_CSV_ALIASES).map(([key, aliases]) => [key, findCsvHeaderIndex(headerCandidates, aliases)])
+  );
+  const recognizedColumns = Object.values(columnMap).filter((index) => index >= 0).length;
+  if (!recognizedColumns) {
+    return {
+      ok: false,
+      error: 'invalid_header',
+      rows: [],
+      errors: [
+        {
+          line: 1,
+          error: "En-tetes CSV inconnus. Utilise le modele de normalisation telechargeable."
+        }
+      ],
+      rowCount: 0
+    };
+  }
+  if (
+    columnMap.hostname < 0 &&
+    columnMap.serialNumber < 0 &&
+    columnMap.macAddress < 0 &&
+    columnMap.macAddresses < 0
+  ) {
+    return {
+      ok: false,
+      error: 'missing_identifier_columns',
+      rows: [],
+      errors: [
+        {
+          line: 1,
+          error: "Colonnes d'identifiant manquantes. Ajoute au moins hostname, serial_number ou mac_address."
+        }
+      ],
+      rowCount: 0
+    };
+  }
+
+  const dataRows = rows.slice(1);
+  if (dataRows.length > MANUAL_REPORT_IMPORT_MAX_ROWS) {
+    return {
+      ok: false,
+      error: 'too_many_rows',
+      rows: [],
+      errors: [
+        {
+          line: 1,
+          error: `Le fichier depasse la limite de ${MANUAL_REPORT_IMPORT_MAX_ROWS} lignes.`
+        }
+      ],
+      rowCount: dataRows.length
+    };
+  }
+
+  const parsedRows = [];
+  const errors = [];
+  const seenKeys = new Set();
+
+  const getCell = (row, key) => {
+    const index = columnMap[key];
+    return index >= 0 && index < row.length ? row[index] : '';
+  };
+
+  dataRows.forEach((row, rowIndex) => {
+    const lineNumber = rowIndex + 2;
+    const rowErrorStart = errors.length;
+    const raw = {
+      hostname: getCell(row, 'hostname'),
+      serialNumber: getCell(row, 'serialNumber'),
+      macAddress: getCell(row, 'macAddress'),
+      macAddresses: getCell(row, 'macAddresses'),
+      category: getCell(row, 'category'),
+      technician: getCell(row, 'technician'),
+      lotId: getCell(row, 'lotId'),
+      tag: getCell(row, 'tag'),
+      tagId: getCell(row, 'tagId'),
+      vendor: getCell(row, 'vendor'),
+      model: getCell(row, 'model'),
+      osVersion: getCell(row, 'osVersion'),
+      ramMb: getCell(row, 'ramMb'),
+      ramGb: getCell(row, 'ramGb'),
+      ramSlotsTotal: getCell(row, 'ramSlotsTotal'),
+      ramSlotsFree: getCell(row, 'ramSlotsFree'),
+      batteryHealth: getCell(row, 'batteryHealth'),
+      cameraStatus: getCell(row, 'cameraStatus'),
+      usbStatus: getCell(row, 'usbStatus'),
+      keyboardStatus: getCell(row, 'keyboardStatus'),
+      padStatus: getCell(row, 'padStatus'),
+      badgeReaderStatus: getCell(row, 'badgeReaderStatus'),
+      biosBattery: getCell(row, 'biosBattery'),
+      biosLanguage: getCell(row, 'biosLanguage'),
+      biosPassword: getCell(row, 'biosPassword'),
+      wifiStandard: getCell(row, 'wifiStandard'),
+      diskReadTest: getCell(row, 'diskReadTest'),
+      diskWriteTest: getCell(row, 'diskWriteTest'),
+      ramTest: getCell(row, 'ramTest'),
+      cpuTest: getCell(row, 'cpuTest'),
+      gpuTest: getCell(row, 'gpuTest'),
+      networkPing: getCell(row, 'networkPing'),
+      fsCheck: getCell(row, 'fsCheck'),
+      cpuName: getCell(row, 'cpuName'),
+      cpuCores: getCell(row, 'cpuCores'),
+      cpuThreads: getCell(row, 'cpuThreads'),
+      gpuName: getCell(row, 'gpuName'),
+      primaryDiskModel: getCell(row, 'primaryDiskModel'),
+      primaryDiskSizeGb: getCell(row, 'primaryDiskSizeGb'),
+      storageTotalGb: getCell(row, 'storageTotalGb'),
+      autopilotHash: getCell(row, 'autopilotHash'),
+      shipmentDate: getCell(row, 'shipmentDate'),
+      shipmentClient: getCell(row, 'shipmentClient'),
+      shipmentOrderNumber: getCell(row, 'shipmentOrderNumber'),
+      shipmentPalletCode: getCell(row, 'shipmentPalletCode'),
+      doubleCheck: getCell(row, 'doubleCheck')
+    };
+
+    if (!Object.values(raw).some((value) => String(value || '').trim() !== '')) {
+      return;
+    }
+
+    const hostname = cleanString(raw.hostname, 64);
+    let macAddress = raw.macAddress ? normalizeMac(raw.macAddress) : null;
+    let macAddresses = raw.macAddresses ? normalizeMacList(raw.macAddresses) : null;
+    const serialNumber = raw.serialNumber ? normalizeSerial(raw.serialNumber) : null;
+    const category = raw.category ? normalizeCategory(raw.category) : 'unknown';
+    const technician = cleanString(raw.technician, 64);
+    const lotId = raw.lotId ? normalizeUuid(raw.lotId) : null;
+    const tag = cleanString(raw.tag, 64);
+    const tagId = raw.tagId ? normalizeUuid(raw.tagId) : null;
+    const vendor = cleanString(raw.vendor, 64);
+    const model = cleanString(raw.model, 64);
+    const osVersion = cleanString(raw.osVersion, 64);
+    const batteryHealth = raw.batteryHealth ? normalizeBatteryHealth(raw.batteryHealth) : null;
+    const ramMb = raw.ramMb
+      ? normalizeRamMb(raw.ramMb)
+      : raw.ramGb
+        ? normalizeRamMb(`${raw.ramGb} GB`)
+        : null;
+    const ramSlotsTotal = raw.ramSlotsTotal ? normalizeSlots(raw.ramSlotsTotal) : null;
+    const ramSlotsFree = raw.ramSlotsFree ? normalizeSlots(raw.ramSlotsFree) : null;
+    const cpuCores = raw.cpuCores ? normalizeIntegerRange(raw.cpuCores, 1, 256) : null;
+    const cpuThreads = raw.cpuThreads ? normalizeIntegerRange(raw.cpuThreads, 1, 512) : null;
+    const primaryDiskSizeGb = raw.primaryDiskSizeGb ? normalizeSizeGb(raw.primaryDiskSizeGb) : null;
+    const storageTotalGb = raw.storageTotalGb ? normalizeSizeGb(raw.storageTotalGb) : null;
+    const autopilotHash = normalizeAutopilotHashValue(raw.autopilotHash);
+    const shipmentDate = raw.shipmentDate ? normalizeShipmentDate(raw.shipmentDate) : null;
+    const shipmentClient = normalizeShipmentClient(raw.shipmentClient);
+    const shipmentOrderNumber = normalizeShipmentOrderNumber(raw.shipmentOrderNumber);
+    const shipmentPalletCode = raw.shipmentPalletCode ? normalizePalletCode(raw.shipmentPalletCode) : null;
+    const doubleCheck = parseBooleanFlag(raw.doubleCheck, false);
+
+    if (raw.macAddress && !macAddress) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Adresse MAC invalide.' });
+    }
+    if (raw.macAddresses && !macAddresses) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Liste MAC invalide.' });
+    }
+    if (macAddress && (!macAddresses || !macAddresses.includes(macAddress))) {
+      macAddresses = [macAddress, ...(macAddresses || [])];
+    }
+    if (!macAddress && macAddresses && macAddresses.length > 0) {
+      macAddress = macAddresses[0];
+    }
+    if (raw.lotId && !lotId) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Lot ID invalide.' });
+    }
+    if (raw.tagId && !tagId) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Tag ID invalide.' });
+    }
+    if ((raw.ramMb || raw.ramGb) && ramMb == null) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Valeur RAM invalide.' });
+    }
+    if (raw.ramSlotsTotal && ramSlotsTotal == null) {
+      errors.push({ line: lineNumber, serialNumber, error: 'RAM slots total invalide.' });
+    }
+    if (raw.ramSlotsFree && ramSlotsFree == null) {
+      errors.push({ line: lineNumber, serialNumber, error: 'RAM slots libres invalide.' });
+    }
+    if (raw.batteryHealth && batteryHealth == null) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Sante batterie invalide.' });
+    }
+    if (raw.cpuCores && cpuCores == null) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Nombre de coeurs CPU invalide.' });
+    }
+    if (raw.cpuThreads && cpuThreads == null) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Nombre de threads CPU invalide.' });
+    }
+    if (raw.primaryDiskSizeGb && primaryDiskSizeGb == null) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Taille disque principale invalide.' });
+    }
+    if (raw.storageTotalGb && storageTotalGb == null) {
+      errors.push({ line: lineNumber, serialNumber, error: 'Stockage total invalide.' });
+    }
+    if (raw.shipmentDate && !shipmentDate) {
+      errors.push({ line: lineNumber, serialNumber, error: "Date d'expedition invalide." });
+    }
+    if (raw.shipmentPalletCode && !shipmentPalletCode) {
+      errors.push({ line: lineNumber, serialNumber, error: "Numero de palette d'expedition invalide." });
+    }
+
+    const cameraStatus = normalizeManualCsvStatus(raw.cameraStatus, {
+      label: 'Camera',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const usbStatus = normalizeManualCsvStatus(raw.usbStatus, {
+      label: 'USB',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const keyboardStatus = normalizeManualCsvStatus(raw.keyboardStatus, {
+      label: 'Clavier',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const padStatus = normalizeManualCsvStatus(raw.padStatus, {
+      label: 'Pave tactile',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const badgeReaderStatus = normalizeManualCsvStatus(raw.badgeReaderStatus, {
+      label: 'Lecteur badge',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const biosBattery = normalizeManualCsvStatus(raw.biosBattery, {
+      label: 'Pile BIOS',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const biosLanguage = normalizeManualCsvStatus(raw.biosLanguage, {
+      label: 'Langue BIOS',
+      normalizer: normalizeBiosLanguage,
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const biosPassword = normalizeManualCsvStatus(raw.biosPassword, {
+      label: 'Mot de passe BIOS',
+      normalizer: normalizeBiosPasswordStatus,
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const wifiStandard = normalizeManualCsvStatus(raw.wifiStandard, {
+      label: 'Norme Wi-Fi',
+      normalizer: normalizeWifiStandardStatus,
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const diskReadTest = normalizeManualCsvStatus(raw.diskReadTest, {
+      label: 'Lecture disque',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const diskWriteTest = normalizeManualCsvStatus(raw.diskWriteTest, {
+      label: 'Ecriture disque',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const ramTest = normalizeManualCsvStatus(raw.ramTest, {
+      label: 'Test RAM',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const cpuTest = normalizeManualCsvStatus(raw.cpuTest, {
+      label: 'Test CPU',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const gpuTest = normalizeManualCsvStatus(raw.gpuTest, {
+      label: 'Test GPU',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const networkPing = normalizeManualCsvStatus(raw.networkPing, {
+      label: 'Ping reseau',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+    const fsCheck = normalizeManualCsvStatus(raw.fsCheck, {
+      label: 'Check disque',
+      errors,
+      serialNumber,
+      line: lineNumber
+    });
+
+    if (!hostname && !macAddress && !serialNumber) {
+      errors.push({
+        line: lineNumber,
+        error: 'Aucun identifiant exploitable. Renseigne au moins hostname, serial_number ou mac_address.'
+      });
+      return;
+    }
+
+    const machineKey = buildMachineKey(serialNumber, macAddress, hostname);
+    if (!machineKey) {
+      errors.push({
+        line: lineNumber,
+        serialNumber,
+        error: "Impossible de construire la cle machine a partir des identifiants fournis."
+      });
+      return;
+    }
+    if (errors.length > rowErrorStart) {
+      return;
+    }
+    if (seenKeys.has(machineKey)) {
+      errors.push({
+        line: lineNumber,
+        serialNumber,
+        error: 'Machine dupliquee dans le CSV.'
+      });
+      return;
+    }
+
+    seenKeys.add(machineKey);
+    parsedRows.push({
+      lineNumber,
+      machineKey,
+      hostname,
+      serialNumber,
+      macAddress,
+      macAddresses,
+      category,
+      technician,
+      lotId,
+      tag,
+      tagId,
+      vendor,
+      model,
+      osVersion,
+      ramMb,
+      ramSlotsTotal,
+      ramSlotsFree,
+      batteryHealth,
+      cameraStatus,
+      usbStatus,
+      keyboardStatus,
+      padStatus,
+      badgeReaderStatus,
+      biosBattery,
+      biosLanguage,
+      biosPassword,
+      wifiStandard,
+      diskReadTest,
+      diskWriteTest,
+      ramTest,
+      cpuTest,
+      gpuTest,
+      networkPing,
+      fsCheck,
+      cpuName: cleanString(raw.cpuName, 128),
+      cpuCores,
+      cpuThreads,
+      gpuName: cleanString(raw.gpuName, 128),
+      primaryDiskModel: cleanString(raw.primaryDiskModel, 160),
+      primaryDiskSizeGb,
+      storageTotalGb,
+      autopilotHash,
+      shipmentDate,
+      shipmentClient,
+      shipmentOrderNumber,
+      shipmentPalletCode,
+      doubleCheck
+    });
+  });
+
+  return {
+    ok: true,
+    rows: parsedRows,
+    errors,
+    rowCount: dataRows.length
+  };
+}
+
+function buildManualCsvReportPayload(row, reportId) {
+  const tests = {};
+  if (row.diskReadTest) tests.diskRead = row.diskReadTest;
+  if (row.diskWriteTest) tests.diskWrite = row.diskWriteTest;
+  if (row.ramTest) tests.ramTest = row.ramTest;
+  if (row.cpuTest) tests.cpuTest = row.cpuTest;
+  if (row.gpuTest) tests.gpuTest = row.gpuTest;
+  if (row.networkPing) {
+    tests.networkPing = row.networkPing;
+    tests.networkPingTarget = '1.1.1.1';
+  }
+  if (row.fsCheck) tests.fsCheck = row.fsCheck;
+
+  const cpu =
+    row.cpuName || row.cpuCores || row.cpuThreads
+      ? {
+        name: row.cpuName || undefined,
+        cores: row.cpuCores || undefined,
+        threads: row.cpuThreads || undefined
+      }
+      : undefined;
+  const gpu = row.gpuName ? { name: row.gpuName } : undefined;
+  const diskSizeGb = row.primaryDiskSizeGb || row.storageTotalGb || null;
+  const disks =
+    row.primaryDiskModel || diskSizeGb
+      ? [
+        {
+          model: row.primaryDiskModel || undefined,
+          sizeGb: diskSizeGb || undefined
+        }
+      ]
+      : undefined;
+  const wifi =
+    row.wifiStandard
+      ? {
+        standard: row.wifiStandard,
+        standards: [row.wifiStandard]
+      }
+      : undefined;
+
+  const payload = {
+    reportId,
+    hostname: row.hostname || null,
+    macAddress: row.macAddress || null,
+    macAddresses: row.macAddresses || undefined,
+    serialNumber: row.serialNumber || null,
+    category: row.category || 'unknown',
+    technician: row.technician || null,
+    vendor: row.vendor || null,
+    model: row.model || null,
+    osVersion: row.osVersion || null,
+    diag: {
+      type: row.doubleCheck ? 'double_check' : 'manual_csv',
+      diagnosticsPerformed: Object.keys(tests).filter((key) => key !== 'networkPingTarget').length,
+      appVersion: 'manual-csv'
+    },
+    manualImport: {
+      source: 'csv',
+      lineNumber: row.lineNumber
+    }
+  };
+
+  if (Object.keys(tests).length > 0) {
+    payload.tests = tests;
+  }
+  if (cpu) {
+    payload.cpu = cpu;
+  }
+  if (gpu) {
+    payload.gpu = gpu;
+  }
+  if (disks) {
+    payload.disks = disks;
+  }
+  if (wifi) {
+    payload.wifi = wifi;
+  }
+  if (row.autopilotHash) {
+    payload.autopilotHash = row.autopilotHash;
+  }
+
+  const explicitComponents = {};
+  if (row.cameraStatus) explicitComponents.camera = row.cameraStatus;
+  if (row.usbStatus) explicitComponents.usb = row.usbStatus;
+  if (row.keyboardStatus) explicitComponents.keyboard = row.keyboardStatus;
+  if (row.padStatus) explicitComponents.pad = row.padStatus;
+  if (row.badgeReaderStatus) explicitComponents.badgeReader = row.badgeReaderStatus;
+  if (row.biosBattery) explicitComponents.biosBattery = row.biosBattery;
+  if (row.biosLanguage) explicitComponents.biosLanguage = row.biosLanguage;
+  if (row.biosPassword) explicitComponents.biosPassword = row.biosPassword;
+  if (row.wifiStandard) explicitComponents.wifiStandard = row.wifiStandard;
+  if (row.diskReadTest) explicitComponents.diskReadTest = row.diskReadTest;
+  if (row.diskWriteTest) explicitComponents.diskWriteTest = row.diskWriteTest;
+  if (row.ramTest) explicitComponents.ramTest = row.ramTest;
+  if (row.cpuTest) explicitComponents.cpuTest = row.cpuTest;
+  if (row.gpuTest) explicitComponents.gpuTest = row.gpuTest;
+  if (row.networkPing) explicitComponents.networkPing = row.networkPing;
+  if (row.fsCheck) explicitComponents.fsCheck = row.fsCheck;
+
+  const derivedComponents = buildDerivedComponents(payload, [payload, payload.wifi]);
+  const components = withManualComponentDefaults(mergeComponentSets(derivedComponents, explicitComponents));
+  return {
+    payload,
+    components
+  };
+}
+
+async function insertManualCsvReportRow(client, req, row) {
+  const now = new Date().toISOString();
+  const reportId = generateUuid();
+  const actor = row.technician || row.machineKey;
+  const { payload, components } = buildManualCsvReportPayload(row, reportId);
+  const payloadText = safeJsonStringify(payload, 64 * 1024);
+  const resolvedTag = await resolveTagForIngest(client, row.tagId || null, row.tag || null);
+  const lotResolution = await resolveLotForIngest(client, {
+    explicitLotId: row.lotId || null,
+    technician: row.technician || null
+  });
+  const resolvedLot = lotResolution.lot;
+  const resolvedLotId = resolvedLot && resolvedLot.id ? resolvedLot.id : null;
+  const resolvedPallet = await resolvePalletForSerial(client, {
+    serialNumber: row.serialNumber,
+    machineKey: row.machineKey,
+    actor
+  });
+  const resolvedPalletId = resolvedPallet && resolvedPallet.id ? resolvedPallet.id : null;
+  const resolvedPalletStatus = resolvedPallet && resolvedPallet.status ? resolvedPallet.status : null;
+  const palletShipment = normalizeShipmentFromRow(resolvedPallet);
+  const resolvedShipment =
+    row.shipmentDate || row.shipmentClient || row.shipmentOrderNumber || row.shipmentPalletCode
+      ? {
+        date: row.shipmentDate || null,
+        client: row.shipmentClient || null,
+        orderNumber: row.shipmentOrderNumber || null,
+        palletCode: row.shipmentPalletCode || (palletShipment ? palletShipment.palletCode : null) || null
+      }
+      : palletShipment;
+  const shouldCountLot = Boolean(
+    resolvedLotId &&
+    row.machineKey &&
+    !row.doubleCheck &&
+    !parseBooleanFlag(resolvedLot ? resolvedLot.is_paused : false, false)
+  );
+
+  const reportValues = [
+    reportId,
+    row.machineKey,
+    row.hostname,
+    row.macAddress,
+    row.macAddresses ? JSON.stringify(row.macAddresses) : null,
+    row.serialNumber,
+    row.category || 'unknown',
+    resolvedTag.name || DEFAULT_REPORT_TAG,
+    resolvedTag.id || null,
+    resolvedLotId,
+    resolvedPalletId,
+    resolvedPalletStatus,
+    resolvedShipment ? resolvedShipment.date : null,
+    resolvedShipment ? resolvedShipment.client : null,
+    resolvedShipment ? resolvedShipment.orderNumber : null,
+    resolvedShipment ? resolvedShipment.palletCode : null,
+    row.model,
+    row.vendor,
+    row.technician,
+    row.osVersion,
+    row.ramMb,
+    row.ramSlotsTotal,
+    row.ramSlotsFree,
+    row.batteryHealth,
+    row.cameraStatus,
+    row.usbStatus,
+    row.keyboardStatus,
+    row.padStatus,
+    row.badgeReaderStatus,
+    now,
+    now,
+    components ? JSON.stringify(components) : null,
+    payloadText,
+    getClientIp(req)
+  ];
+  const machineValues = [
+    row.machineKey,
+    row.hostname,
+    row.macAddress,
+    row.macAddresses ? JSON.stringify(row.macAddresses) : null,
+    row.serialNumber,
+    row.category || 'unknown',
+    resolvedTag.name || DEFAULT_REPORT_TAG,
+    resolvedTag.id || null,
+    resolvedLotId,
+    resolvedPalletId,
+    resolvedPalletStatus,
+    resolvedShipment ? resolvedShipment.date : null,
+    resolvedShipment ? resolvedShipment.client : null,
+    resolvedShipment ? resolvedShipment.orderNumber : null,
+    resolvedShipment ? resolvedShipment.palletCode : null,
+    row.model,
+    row.vendor,
+    row.technician,
+    row.osVersion,
+    row.ramMb,
+    row.ramSlotsTotal,
+    row.ramSlotsFree,
+    row.batteryHealth,
+    row.cameraStatus,
+    row.usbStatus,
+    row.keyboardStatus,
+    row.padStatus,
+    row.badgeReaderStatus,
+    now,
+    now,
+    components ? JSON.stringify(components) : null,
+    payloadText,
+    getClientIp(req)
+  ];
+
+  await client.query(upsertReportQuery, reportValues);
+  await client.query(upsertMachineQuery, machineValues);
+  const lotProgress = await registerLotProgress(client, {
+    lot: resolvedLot,
+    machineKey: row.machineKey,
+    reportId,
+    technician: row.technician,
+    source: 'manual-csv',
+    isDoubleCheck: row.doubleCheck,
+    shouldCount: shouldCountLot
+  });
+
+  return {
+    reportId,
+    machineKey: row.machineKey,
+    lot: normalizeLotFromRow(lotProgress && lotProgress.lot ? lotProgress.lot : resolvedLot),
+    pallet: resolvedPallet,
+    lotCounted: Boolean(lotProgress && lotProgress.counted)
+  };
 }
 
 async function listPalletsWithStats(client) {
@@ -9794,6 +10647,86 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
       }
     }
     console.error('Failed to create report zero', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.get('/api/reports/manual-template.csv', requireAuth, (req, res) => {
+  const csv = buildManualReportTemplateCsv();
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="mdt-manual-import-template.csv"');
+  return res.status(200).send(csv);
+});
+
+app.post('/api/reports/import-manual-csv', requireAuth, async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const csvText = typeof body.csvText === 'string' ? body.csvText : '';
+  if (!csvText.trim()) {
+    return res.status(400).json({
+      ok: false,
+      error: 'missing_csv',
+      message: 'Fichier CSV vide.'
+    });
+  }
+
+  const parsed = extractManualReportCsvRows(csvText);
+  if (!parsed.ok) {
+    return res.status(400).json({
+      ok: false,
+      error: parsed.error || 'invalid_csv',
+      appliedCount: 0,
+      skippedCount: parsed.errors.length,
+      rowCount: parsed.rowCount || 0,
+      errors: parsed.errors
+    });
+  }
+  if (!parsed.rows.length) {
+    return res.status(400).json({
+      ok: false,
+      error: 'no_valid_rows',
+      appliedCount: 0,
+      skippedCount: parsed.errors.length,
+      rowCount: parsed.rowCount || 0,
+      errors: parsed.errors.length
+        ? parsed.errors
+        : [{ line: 1, error: 'Aucune ligne exploitable dans le CSV.' }]
+    });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(
+      client,
+      buildAuditContext(req, { source: 'POST /api/reports/import-manual-csv' })
+    );
+    const imported = [];
+    for (const row of parsed.rows) {
+      const result = await insertManualCsvReportRow(client, req, row);
+      imported.push(result);
+    }
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      appliedCount: imported.length,
+      skippedCount: parsed.errors.length,
+      rowCount: parsed.rowCount || imported.length + parsed.errors.length,
+      errors: parsed.errors
+    });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback manual CSV import', rollbackError);
+      }
+    }
+    console.error('Failed to import manual CSV', error);
     return res.status(500).json({ ok: false, error: 'db_error' });
   } finally {
     if (client) {

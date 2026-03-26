@@ -40,6 +40,7 @@
           <a class="sidebar-nav-btn" href="#section-dashboard">Tableau et pages</a>
           <a class="sidebar-nav-btn" href="#section-lots">Lots</a>
           <a class="sidebar-nav-btn" href="#section-palettes">Palettes</a>
+          <a class="sidebar-nav-btn" href="#section-normalization">Saisie manuelle</a>
           <a class="sidebar-nav-btn" href="#section-checks">Checks reels</a>
           <a class="sidebar-nav-btn" href="#section-status">Statuts et regles</a>
           <a class="sidebar-nav-btn" href="#section-procedures">Procedures types</a>
@@ -344,7 +345,7 @@
             <ul class="guide-list">
               <li>Un lot atelier n'est pas une palette logistique.</li>
               <li>Le lot sert au suivi de production, pas au stockage ou a l'expedition.</li>
-              <li>Le report-zero existe pour creer un rapport manuel, mais ce n'est pas le flux normal MDT.</li>
+              <li>Le report-zero reste le mode rapide. Pour une saisie manuelle complete, preferer le CSV normalise.</li>
             </ul>
           </div>
         </section>
@@ -402,6 +403,80 @@
 ABC123,PAL-001
 DEF456,PAL-001
 GHI789,PAL-002</code></pre>
+        </section>
+
+        <section class="admin-card guide-card" id="section-normalization">
+          <div class="admin-header">
+            <div>
+              <p class="admin-kicker">Saisie manuelle</p>
+              <h2>Guide de normalisation CSV</h2>
+              <p class="admin-sub">
+                Ce flux permet d'ajouter un ou plusieurs PC a la main avec le meme stockage que les
+                remontees MDT: memes rapports, memes filtres, memes PDFs et meme fiche detail.
+              </p>
+            </div>
+            <div class="guide-badge-row">
+              <span class="guide-badge guide-badge--manual">Modele CSV</span>
+              <span class="guide-badge guide-badge--server">Import direct</span>
+            </div>
+          </div>
+
+          <div class="guide-card-grid">
+            <article class="guide-info-card">
+              <h3>Telecharger le modele</h3>
+              <p>
+                Le modele contient les en-tetes attendus. Une ligne correspond a un poste. Tu peux
+                t'en servir pour un seul PC ou pour un import de plusieurs machines.
+              </p>
+              <div class="admin-actions">
+                <a class="admin-secondary" href="/api/reports/manual-template.csv">Telecharger le modele CSV</a>
+              </div>
+              <p class="guide-inline-note">Laisse `lot_id` vide si l'affectation doit rester automatique.</p>
+            </article>
+
+            <article class="guide-info-card">
+              <h3>Valeurs a respecter</h3>
+              <ul class="guide-list">
+                <li>`category`: `laptop`, `desktop`, `unknown`.</li>
+                <li>Statuts: `ok`, `nok`, `not_tested`, `absent`.</li>
+                <li>`bios_language`: `fr`, `en`, `not_tested`.</li>
+                <li>`bios_password`: `ok` = pas de mot de passe, `nok` = mot de passe present.</li>
+                <li>La MAC accepte `AA:BB:CC:DD:EE:FF` ou `AABBCCDDEEFF`.</li>
+              </ul>
+            </article>
+
+            <article class="guide-info-card">
+              <h3>Importer le CSV</h3>
+              <p>
+                Charge le fichier ici. Les lignes valides sont inserees dans les tables actives de
+                l'application, pas dans un stockage a part.
+              </p>
+              <form class="admin-form" id="manual-csv-import-form">
+                <label class="admin-field">
+                  <span>Fichier CSV</span>
+                  <input id="manual-csv-file" type="file" accept=".csv,text/csv" />
+                </label>
+                <div class="admin-actions">
+                  <button class="primary-btn" type="submit" id="manual-csv-submit">Importer le CSV</button>
+                </div>
+                <div class="admin-feedback" id="manual-csv-feedback" aria-live="polite"></div>
+              </form>
+            </article>
+          </div>
+
+          <div class="guide-callout">
+            <p class="guide-callout-title">Colonnes conseillees</p>
+            <ul class="guide-list">
+              <li>Identifiants: `serial_number` ou `hostname` ou `mac_address`.</li>
+              <li>Atelier: `technician`, `category`, `vendor`, `model`, `os_version`.</li>
+              <li>Qualite: `camera_status`, `usb_status`, `keyboard_status`, `pad_status`, `badge_reader_status`, `bios_*`, `wifi_standard`, `*_test_status`.</li>
+              <li>Logistique optionnelle: `shipment_date`, `shipment_client`, `shipment_order_number`, `shipment_pallet_code`.</li>
+            </ul>
+          </div>
+
+          <p class="guide-code-label">Extrait du modele CSV</p>
+          <pre class="guide-code"><code>hostname,serial_number,mac_address,category,technician,lot_id,vendor,model,os_version,ram_gb,ram_slots_total,ram_slots_free,battery_health,camera_status,usb_status,keyboard_status,pad_status,badge_reader_status,bios_battery,bios_language,bios_password,wifi_standard,disk_read_status,disk_write_status,ram_test_status,cpu_test_status,gpu_test_status,network_ping_status,fs_check_status,cpu_name,cpu_cores,cpu_threads,gpu_name,primary_disk_model,primary_disk_size_gb,storage_total_gb,autopilot_hash,shipment_date,shipment_client,shipment_order_number,shipment_pallet_code,double_check
+PC-MDT-001,ABC123456,AA:BB:CC:DD:EE:FF,laptop,Mateo,,Dell,Latitude 5420,Windows 11 Pro,16,2,0,88,ok,ok,ok,ok,absent,ok,fr,ok,802.11ax,ok,ok,ok,ok,ok,ok,ok,Intel Core i5-1145G7,4,8,Intel Iris Xe,NVMe 512Go,476,476,DEVICE-HARDWARE-HASH-EXEMPLE,2026-03-26,Client Demo,CMD-2026-001,PAL-0001,0</code></pre>
         </section>
 
         <section class="admin-card guide-card" id="section-checks">
@@ -693,5 +768,6 @@ GHI789,PAL-002</code></pre>
         </section>
       </section>
     </main>
+    <script src="/guide.js?v=20260326a" defer></script>
   </body>
 </html>
