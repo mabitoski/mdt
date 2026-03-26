@@ -138,6 +138,9 @@ const MICROSOFT_PLATFORM_ADMIN_GROUP_IDS_RAW = process.env.MICROSOFT_PLATFORM_AD
 const MICROSOFT_SSO_ENABLED = Boolean(
   MICROSOFT_ENTRA_TENANT_ID && MICROSOFT_ENTRA_CLIENT_ID && MICROSOFT_ENTRA_CLIENT_SECRET
 );
+const MICROSOFT_AUTH_SCOPES = Object.freeze(['openid', 'profile', 'email', 'User.Read']);
+const MICROSOFT_GRAPH_ME_CHECK_MEMBER_OBJECTS_URL =
+  'https://graph.microsoft.com/v1.0/me/checkMemberObjects';
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const PGSSLMODE = (process.env.PGSSLMODE || '').toLowerCase();
 const PGSSL =
@@ -258,6 +261,17 @@ const MICROSOFT_GROUP_IDS = Object.freeze({
   [ACCESS_LEVELS.admin]: parseDirectoryObjectIdList(MICROSOFT_ADMIN_GROUP_IDS_RAW),
   [ACCESS_LEVELS.platformAdmin]: parseDirectoryObjectIdList(MICROSOFT_PLATFORM_ADMIN_GROUP_IDS_RAW)
 });
+
+function getConfiguredMicrosoftGroupIds() {
+  return Array.from(
+    new Set(
+      Object.values(MICROSOFT_GROUP_IDS)
+        .flat()
+        .map((value) => normalizeDirectoryObjectId(value))
+        .filter(Boolean)
+    )
+  );
+}
 
 function buildPermissionSet(overrides = {}) {
   const canCreateReportZero = overrides.canCreateReportZero === true;
@@ -5605,6 +5619,93 @@ function hasMicrosoftGroup(groups, allowedGroupIds) {
   return allowedGroupIds.some((groupId) => known.has(groupId));
 }
 
+function hasMicrosoftGroupOverageClaims(claims) {
+  const sourceClaims = claims && typeof claims === 'object' ? claims : {};
+  if (sourceClaims.hasgroups === true) {
+    return true;
+  }
+  const claimNames =
+    sourceClaims._claim_names && typeof sourceClaims._claim_names === 'object'
+      ? sourceClaims._claim_names
+      : null;
+  return Boolean(claimNames && claimNames.groups);
+}
+
+async function resolveMicrosoftGroupIdsForSignIn(accessToken, claims) {
+  const sourceClaims = claims && typeof claims === 'object' ? claims : {};
+  const tokenGroups = normalizeMicrosoftGroupIds(sourceClaims.groups);
+  if (tokenGroups.length) {
+    return {
+      groupIds: tokenGroups,
+      source: 'token',
+      error: null
+    };
+  }
+
+  const configuredGroupIds = getConfiguredMicrosoftGroupIds();
+  if (!configuredGroupIds.length) {
+    return {
+      groupIds: [],
+      source: 'config',
+      error: null
+    };
+  }
+
+  const shouldUseGraph =
+    !Array.isArray(sourceClaims.groups) || hasMicrosoftGroupOverageClaims(sourceClaims);
+  if (!shouldUseGraph) {
+    return {
+      groupIds: [],
+      source: 'token',
+      error: null
+    };
+  }
+
+  if (!accessToken) {
+    return {
+      groupIds: [],
+      source: 'graph',
+      error: 'missing_access_token'
+    };
+  }
+
+  try {
+    const response = await fetch(MICROSOFT_GRAPH_ME_CHECK_MEMBER_OBJECTS_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ ids: configuredGroupIds })
+    });
+    if (!response.ok) {
+      const bodyText = await response.text();
+      console.error('Failed Microsoft Graph group check', {
+        status: response.status,
+        body: cleanString(bodyText, 800)
+      });
+      return {
+        groupIds: [],
+        source: 'graph',
+        error: 'graph_lookup_failed'
+      };
+    }
+    const data = await response.json();
+    return {
+      groupIds: normalizeMicrosoftGroupIds(Array.isArray(data?.value) ? data.value : []),
+      source: 'graph',
+      error: null
+    };
+  } catch (error) {
+    console.error('Failed Microsoft Graph group check', error);
+    return {
+      groupIds: [],
+      source: 'graph',
+      error: 'graph_lookup_failed'
+    };
+  }
+}
+
 function resolveMicrosoftAccessLevel(groups) {
   let accessLevel = null;
   if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.reader])) {
@@ -8370,7 +8471,7 @@ app.get('/auth/microsoft/signin', async (req, res) => {
     }
     try {
       const authUrl = await clientApp.getAuthCodeUrl({
-        scopes: ['openid', 'profile', 'email'],
+        scopes: MICROSOFT_AUTH_SCOPES,
         redirectUri: getMicrosoftRedirectUri(req),
         state,
         prompt: 'select_account'
@@ -8406,7 +8507,7 @@ app.get('/auth/microsoft/callback', async (req, res) => {
   try {
     const tokenResponse = await clientApp.acquireTokenByCode({
       code,
-      scopes: ['openid', 'profile', 'email'],
+      scopes: MICROSOFT_AUTH_SCOPES,
       redirectUri: getMicrosoftRedirectUri(req)
     });
     const claims =
@@ -8421,7 +8522,20 @@ app.get('/auth/microsoft/callback', async (req, res) => {
       return req.session.save(() => res.redirect('/login?error=1'));
     }
 
-    const user = buildMicrosoftSessionUser(tokenResponse.account || null, claims);
+    const groupResolution = await resolveMicrosoftGroupIdsForSignIn(tokenResponse.accessToken || '', claims);
+    if (groupResolution.error) {
+      return req.session.save(() => res.redirect('/login?error=group_resolution_failed'));
+    }
+
+    const resolvedClaims =
+      groupResolution.groupIds.length || !Array.isArray(claims.groups)
+        ? {
+            ...claims,
+            groups: groupResolution.groupIds
+          }
+        : claims;
+
+    const user = buildMicrosoftSessionUser(tokenResponse.account || null, resolvedClaims);
     if (!user || !user.username) {
       return req.session.save(() => res.redirect('/login?error=group_required'));
     }

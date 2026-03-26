@@ -12,6 +12,8 @@ const submitBtn = document.getElementById('login-submit');
 const errorMessages = {
   '1': 'Connexion Microsoft impossible. Reessayez.',
   group_required: "Votre compte Microsoft n'appartient a aucun groupe MDT autorise.",
+  group_resolution_failed:
+    "Impossible de verifier vos groupes Microsoft. Il faut probablement activer l'acces Graph pour l'application.",
   sso_only: 'Le login par mot de passe LDAP est desactive. Utilise Microsoft ou le compte admin local.',
   local_invalid: 'Compte admin local invalide. Reessayez.'
 };
