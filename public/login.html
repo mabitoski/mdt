@@ -38,58 +38,22 @@
 
       <section class="login-card" aria-labelledby="login-title">
         <h2 id="login-title">Bienvenue</h2>
-        <p class="login-card-sub">Authentification Microsoft, LDAP ou compte admin local.</p>
+        <p class="login-card-sub">SSO Microsoft obligatoire. Aucun login LDAP ou mot de passe local.</p>
         <div class="login-error" id="login-error" role="status" aria-live="polite">
-          Identifiants invalides. Reessayez.
+          Connexion impossible. Reessayez.
         </div>
         <div class="login-sso" id="login-sso">
           <a class="login-microsoft-btn" id="login-microsoft-btn" href="/auth/microsoft/signin">
             Se connecter avec Microsoft
           </a>
-          <p class="login-sso-note">Comptes Microsoft 365 de l'organisation uniquement.</p>
+          <p class="login-sso-note">
+            Comptes Microsoft 365 de l'organisation uniquement. L'utilisateur doit appartenir a au moins
+            un groupe MDT autorise pour ouvrir une session.
+          </p>
         </div>
-        <div class="login-divider" id="login-divider" aria-hidden="true">
-          <span>ou</span>
-        </div>
-        <form class="login-form" method="post" action="/login" id="login-form">
-          <label class="login-field">
-            <span>Utilisateur</span>
-            <input
-              id="login-username"
-              type="text"
-              name="username"
-              autocomplete="username"
-              required
-            />
-          </label>
-
-          <label class="login-field">
-            <span>Mot de passe</span>
-            <div class="password-wrap">
-              <input
-                id="login-password"
-                type="password"
-                name="password"
-                autocomplete="current-password"
-                required
-              />
-              <button
-                class="toggle-password-btn"
-                id="toggle-password"
-                type="button"
-                aria-controls="login-password"
-                aria-pressed="false"
-              >
-                Afficher
-              </button>
-            </div>
-          </label>
-
-          <button type="submit" id="login-submit">Se connecter</button>
-        </form>
-        <p class="login-footnote">Acces reserve au personnel autorise.</p>
+        <p class="login-footnote">Acces reserve aux comptes Microsoft affectes aux groupes MDT.</p>
       </section>
     </main>
-    <script src="/login.js?v=20260223a" defer></script>
+    <script src="/login.js?v=20260326c" defer></script>
   </body>
 </html>

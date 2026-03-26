@@ -31,7 +31,7 @@ const actionLabels = {
 const tableLabels = {
   machines: 'Machines',
   reports: 'Rapports',
-  ldap_settings: 'Config LDAP',
+  ldap_settings: 'Config auth legacy',
   pallets: 'Palettes',
   pallet_imports: 'Imports palettes',
   pallet_serials: 'Liaisons palettes',

@@ -1,33 +1,25 @@
 const params = new URLSearchParams(window.location.search);
-const formEl = document.getElementById('login-form');
 const errorEl = document.getElementById('login-error');
-const usernameEl = document.getElementById('login-username');
-const passwordEl = document.getElementById('login-password');
-const togglePasswordBtn = document.getElementById('toggle-password');
-const submitBtn = document.getElementById('login-submit');
 const ssoBlock = document.getElementById('login-sso');
-const dividerEl = document.getElementById('login-divider');
 const microsoftBtn = document.getElementById('login-microsoft-btn');
 
-if (params.get('error') === '1' && errorEl) {
+const errorMessages = {
+  '1': 'Connexion Microsoft impossible. Reessayez.',
+  group_required: "Votre compte Microsoft n'appartient a aucun groupe MDT autorise.",
+  sso_only: 'Le login par mot de passe est desactive. Utilise Se connecter avec Microsoft.'
+};
+
+function showError(message) {
+  if (!errorEl || !message) {
+    return;
+  }
+  errorEl.textContent = message;
   errorEl.classList.add('visible');
 }
 
-if (togglePasswordBtn && passwordEl) {
-  togglePasswordBtn.addEventListener('click', () => {
-    const reveal = passwordEl.type === 'password';
-    passwordEl.type = reveal ? 'text' : 'password';
-    togglePasswordBtn.textContent = reveal ? 'Masquer' : 'Afficher';
-    togglePasswordBtn.setAttribute('aria-pressed', reveal ? 'true' : 'false');
-    passwordEl.focus();
-  });
-}
-
-if (formEl && submitBtn) {
-  formEl.addEventListener('submit', () => {
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Connexion...';
-  });
+const errorCode = params.get('error');
+if (errorCode) {
+  showError(errorMessages[errorCode] || errorMessages['1']);
 }
 
 if (microsoftBtn) {
@@ -37,23 +29,31 @@ if (microsoftBtn) {
   });
 }
 
-if (ssoBlock && dividerEl) {
+if (ssoBlock) {
   fetch('/api/auth/providers')
     .then((response) => (response.ok ? response.json() : null))
     .then((data) => {
       if (!data || !data.microsoft || data.microsoft.enabled !== true) {
-        ssoBlock.hidden = true;
-        dividerEl.hidden = true;
+        if (microsoftBtn) {
+          microsoftBtn.removeAttribute('href');
+          microsoftBtn.setAttribute('aria-disabled', 'true');
+          microsoftBtn.textContent = 'SSO Microsoft indisponible';
+        }
+        showError("Le SSO Microsoft n'est pas configure sur cette instance.");
+        return;
+      }
+      if (microsoftBtn && !errorCode) {
+        window.requestAnimationFrame(() => {
+          microsoftBtn.focus();
+        });
       }
     })
     .catch(() => {
-      ssoBlock.hidden = true;
-      dividerEl.hidden = true;
+      if (microsoftBtn) {
+        microsoftBtn.removeAttribute('href');
+        microsoftBtn.setAttribute('aria-disabled', 'true');
+        microsoftBtn.textContent = 'SSO Microsoft indisponible';
+      }
+      showError("Impossible de verifier la configuration Microsoft.");
     });
-}
-
-if (usernameEl && params.get('error') !== '1') {
-  window.requestAnimationFrame(() => {
-    usernameEl.focus();
-  });
 }

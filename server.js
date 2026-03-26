@@ -2676,8 +2676,19 @@ app.use(
 );
 
 function requireAuth(req, res, next) {
-  if (req.session && req.session.user) {
+  if (isSupportedSessionUser(req.session?.user)) {
     return next();
+  }
+  if (req.session && req.session.user) {
+    return clearSessionUser(req, () => {
+      if (req.path.startsWith('/api')) {
+        return res.status(401).json({ ok: false, error: 'sso_only' });
+      }
+      if (req.accepts('html')) {
+        return res.redirect('/login?error=sso_only');
+      }
+      return res.status(401).json({ ok: false, error: 'sso_only' });
+    });
   }
   if (req.path.startsWith('/api')) {
     return res.status(401).json({ ok: false, error: 'unauthorized' });
@@ -2702,6 +2713,24 @@ function getPatchnoteUser(req) {
     return null;
   }
   return { username: user.username, type: user.type };
+}
+
+function isSupportedSessionUser(user) {
+  if (!user || typeof user !== 'object') {
+    return false;
+  }
+  return user.type === 'microsoft' && Boolean(cleanString(user.username, 128));
+}
+
+function clearSessionUser(req, callback) {
+  if (!req.session) {
+    callback();
+    return;
+  }
+  delete req.session.user;
+  delete req.session.microsoftAuthState;
+  delete req.session.microsoftAuthStartedAt;
+  req.session.save(() => callback());
 }
 
 function getLdapAttribute(ldapUser, key) {
@@ -2844,6 +2873,9 @@ function requirePermission(permissionKey) {
     if (!req.session || !req.session.user) {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
+    if (!isSupportedSessionUser(req.session.user)) {
+      return clearSessionUser(req, () => res.status(401).json({ ok: false, error: 'sso_only' }));
+    }
     if (hasPermission(req.session.user, permissionKey)) {
       return next();
     }
@@ -2862,6 +2894,9 @@ function requirePermissionPage(permissionKey) {
   return (req, res, next) => {
     if (!req.session || !req.session.user) {
       return res.redirect('/login');
+    }
+    if (!isSupportedSessionUser(req.session.user)) {
+      return clearSessionUser(req, () => res.redirect('/login?error=sso_only'));
     }
     if (hasPermission(req.session.user, permissionKey)) {
       return next();
@@ -5566,27 +5601,30 @@ function hasMicrosoftGroup(groups, allowedGroupIds) {
   return allowedGroupIds.some((groupId) => known.has(groupId));
 }
 
-function resolveMicrosoftAccessLevel(groups, roles, email) {
-  let accessLevel = ACCESS_LEVELS.reader;
+function resolveMicrosoftAccessLevel(groups) {
+  let accessLevel = null;
   if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.reader])) {
     accessLevel = ACCESS_LEVELS.reader;
   }
   if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.operator])) {
-    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.operator);
+    accessLevel = accessLevel
+      ? maxAccessLevel(accessLevel, ACCESS_LEVELS.operator)
+      : ACCESS_LEVELS.operator;
   }
   if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.logistics])) {
-    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.logistics);
+    accessLevel = accessLevel
+      ? maxAccessLevel(accessLevel, ACCESS_LEVELS.logistics)
+      : ACCESS_LEVELS.logistics;
   }
   if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.admin])) {
-    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.admin);
+    accessLevel = accessLevel
+      ? maxAccessLevel(accessLevel, ACCESS_LEVELS.admin)
+      : ACCESS_LEVELS.admin;
   }
   if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.platformAdmin])) {
-    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.platformAdmin);
-  }
-
-  const allowedEmails = parseMicrosoftAdminEmails();
-  if ((email && allowedEmails.includes(email)) || canUseMicrosoftAdminRole(roles)) {
-    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.admin);
+    accessLevel = accessLevel
+      ? maxAccessLevel(accessLevel, ACCESS_LEVELS.platformAdmin)
+      : ACCESS_LEVELS.platformAdmin;
   }
   return accessLevel;
 }
@@ -5679,7 +5717,10 @@ function buildMicrosoftSessionUser(account, claims) {
     sourceClaims.name || (account && (account.name || account.username)) || email || 'Utilisateur Microsoft',
     128
   );
-  const accessLevel = resolveMicrosoftAccessLevel(groups, roles, email);
+  const accessLevel = resolveMicrosoftAccessLevel(groups);
+  if (!accessLevel) {
+    return null;
+  }
   const permissions = buildPermissionsForAccessLevel(accessLevel);
   const isHydraAdmin = accessLevelRank(accessLevel) >= accessLevelRank(ACCESS_LEVELS.admin);
   return {
@@ -8298,7 +8339,12 @@ app.get('/logs', requireAuth, (req, res) => {
 });
 
 app.get('/auth/microsoft/signin', async (req, res) => {
-  if (req.session && req.session.user) {
+  if (req.session && req.session.user && !isSupportedSessionUser(req.session.user)) {
+    delete req.session.user;
+    delete req.session.microsoftAuthState;
+    delete req.session.microsoftAuthStartedAt;
+  }
+  if (isSupportedSessionUser(req.session?.user)) {
     return res.redirect('/');
   }
   if (!MICROSOFT_SSO_ENABLED) {
@@ -8373,7 +8419,7 @@ app.get('/auth/microsoft/callback', async (req, res) => {
 
     const user = buildMicrosoftSessionUser(tokenResponse.account || null, claims);
     if (!user || !user.username) {
-      return req.session.save(() => res.redirect('/login?error=1'));
+      return req.session.save(() => res.redirect('/login?error=group_required'));
     }
 
     return req.session.regenerate((err) => {
@@ -8390,82 +8436,21 @@ app.get('/auth/microsoft/callback', async (req, res) => {
 });
 
 app.get('/login', (req, res) => {
-  if (req.session && req.session.user) {
+  if (req.session && req.session.user && !isSupportedSessionUser(req.session.user)) {
+    return clearSessionUser(req, () => res.sendFile(path.join(PUBLIC_DIR, 'login.html')));
+  }
+  if (isSupportedSessionUser(req.session?.user)) {
     return res.redirect('/');
   }
   return res.sendFile(path.join(PUBLIC_DIR, 'login.html'));
 });
 
-app.post('/login', async (req, res) => {
-  const username = cleanString(req.body?.username, 128);
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-
-  if (!username || !password) {
-    return res.redirect('/login?error=1');
-  }
-
-  let user = null;
-  if (await isLocalAdmin(username, password)) {
-    user = buildLocalSessionUser(username);
-  } else {
-    try {
-      const ldapConfig = await getEffectiveLdapConfig();
-      if (ldapConfig.enabled && ldapConfig.url && ldapConfig.searchBase) {
-        const ldapUser = await authenticateLdap(username, password, ldapConfig);
-        user = buildLdapSessionUser(username, ldapUser);
-      }
-    } catch (error) {
-      user = null;
-    }
-  }
-
-  if (!user) {
-    return res.redirect('/login?error=1');
-  }
-
-  return req.session.regenerate((err) => {
-    if (err) {
-      return res.redirect('/login?error=1');
-    }
-    req.session.user = user;
-    return req.session.save(() => res.redirect('/'));
-  });
+app.post('/login', (req, res) => {
+  return res.redirect('/login?error=sso_only');
 });
 
-app.post('/api/login', async (req, res) => {
-  const username = cleanString(req.body?.username, 128);
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-
-  if (!username || !password) {
-    return res.status(400).json({ ok: false, error: 'invalid_credentials' });
-  }
-
-  let user = null;
-  if (await isLocalAdmin(username, password)) {
-    user = buildLocalSessionUser(username);
-  } else {
-    try {
-      const ldapConfig = await getEffectiveLdapConfig();
-      if (ldapConfig.enabled && ldapConfig.url && ldapConfig.searchBase) {
-        const ldapUser = await authenticateLdap(username, password, ldapConfig);
-        user = buildLdapSessionUser(username, ldapUser);
-      }
-    } catch (error) {
-      user = null;
-    }
-  }
-
-  if (!user) {
-    return res.status(401).json({ ok: false, error: 'invalid_credentials' });
-  }
-
-  return req.session.regenerate((err) => {
-    if (err) {
-      return res.status(500).json({ ok: false, error: 'session_error' });
-    }
-    req.session.user = user;
-    return req.session.save(() => res.json({ ok: true, user }));
-  });
+app.post('/api/login', (req, res) => {
+  return res.status(403).json({ ok: false, error: 'sso_only' });
 });
 
 app.get('/logout', (req, res) => {
@@ -8975,106 +8960,11 @@ app.get('/api/logs/:id', requireAuth, async (req, res) => {
 });
 
 app.get('/api/admin/ldap', requireAuth, requireAdmin, async (req, res) => {
-  const config = await getEffectiveLdapConfig();
-  res.json({ ok: true, config: formatLdapConfigForResponse(config) });
+  return res.status(410).json({ ok: false, error: 'ldap_removed' });
 });
 
 app.put('/api/admin/ldap', requireAuth, requireAdmin, async (req, res) => {
-  const body = req.body && typeof req.body === 'object' ? req.body : {};
-  const url = normalizeOptionalString(body.url, LDAP_FIELD_LIMIT);
-  const bindDn = normalizeOptionalString(body.bindDn, LDAP_FIELD_LIMIT);
-  const searchBase = normalizeOptionalString(body.searchBase, LDAP_FIELD_LIMIT);
-  const searchFilter = normalizeLdapSearchFilter(body.searchFilter);
-  const searchAttributes = normalizeLdapSearchAttributesString(body.searchAttributes);
-  const tlsRejectUnauthorized =
-    typeof body.tlsRejectUnauthorized === 'boolean' ? body.tlsRejectUnauthorized : true;
-  const enabled =
-    typeof body.enabled === 'boolean' ? body.enabled : Boolean(url && searchBase);
-  const clearBindPassword = body.clearBindPassword === true;
-  const currentConfig = await getEffectiveLdapConfig();
-  let bindPassword = currentConfig.bindPassword || '';
-
-  if (typeof body.bindPassword === 'string' && body.bindPassword.trim() !== '') {
-    bindPassword = body.bindPassword;
-  } else if (clearBindPassword) {
-    bindPassword = '';
-  }
-
-  if (enabled && (!url || !searchBase)) {
-    return res.status(400).json({ ok: false, error: 'missing_required' });
-  }
-
-  let client;
-  try {
-    client = await pool.connect();
-    await client.query('BEGIN');
-    await setAuditContext(client, buildAuditContext(req));
-    await client.query(
-      `
-        INSERT INTO ldap_settings (
-          id,
-          enabled,
-          url,
-          bind_dn,
-          bind_password,
-          search_base,
-          search_filter,
-          search_attributes,
-          tls_reject_unauthorized,
-          updated_at
-        ) VALUES (
-          1,
-          $1,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          $7,
-          $8,
-          NOW()
-        )
-        ON CONFLICT (id) DO UPDATE SET
-          enabled = EXCLUDED.enabled,
-          url = EXCLUDED.url,
-          bind_dn = EXCLUDED.bind_dn,
-          bind_password = EXCLUDED.bind_password,
-          search_base = EXCLUDED.search_base,
-          search_filter = EXCLUDED.search_filter,
-          search_attributes = EXCLUDED.search_attributes,
-          tls_reject_unauthorized = EXCLUDED.tls_reject_unauthorized,
-          updated_at = NOW()
-      `,
-      [
-        enabled,
-        url,
-        bindDn,
-        bindPassword,
-        searchBase,
-        searchFilter,
-        searchAttributes,
-        tlsRejectUnauthorized
-      ]
-    );
-    await client.query('COMMIT');
-  } catch (error) {
-    if (client) {
-      try {
-        await client.query('ROLLBACK');
-      } catch (rollbackError) {
-        console.error('Failed to rollback LDAP settings update', rollbackError);
-      }
-    }
-    console.error('Failed to update LDAP settings', error);
-    return res.status(500).json({ ok: false, error: 'db_error' });
-  } finally {
-    if (client) {
-      client.release();
-    }
-  }
-
-  const updated = await getEffectiveLdapConfig();
-  return res.json({ ok: true, config: formatLdapConfigForResponse(updated) });
+  return res.status(410).json({ ok: false, error: 'ldap_removed' });
 });
 
 app.post('/api/ingest', ingestLimiter, async (req, res) => {
