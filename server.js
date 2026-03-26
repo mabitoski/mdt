@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 const net = require('net');
 const tls = require('tls');
 const express = require('express');
+const archiver = require('archiver');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const session = require('express-session');
@@ -135,6 +136,7 @@ const AUDIT_LOG_LIMIT_DEFAULT = Number.parseInt(process.env.AUDIT_LOG_LIMIT || '
 const AUDIT_LOG_LIMIT_MAX = Number.parseInt(process.env.AUDIT_LOG_LIMIT_MAX || '500', 10);
 const REPORT_PAGE_LIMIT_DEFAULT = Number.parseInt(process.env.REPORT_PAGE_LIMIT || '60', 10);
 const REPORT_PAGE_LIMIT_MAX = Number.parseInt(process.env.REPORT_PAGE_LIMIT_MAX || '200', 10);
+const PDF_BATCH_EXPORT_LIMIT = Number.parseInt(process.env.PDF_BATCH_EXPORT_LIMIT || '120', 10);
 const LOT_TARGET_COUNT_MIN = 1;
 const LOT_TARGET_COUNT_MAX = Number.parseInt(process.env.LOT_TARGET_COUNT_MAX || '50000', 10);
 const LOT_PRIORITY_DEFAULT = Number.parseInt(process.env.LOT_PRIORITY_DEFAULT || '100', 10);
@@ -901,6 +903,10 @@ async function initDb() {
       lot_id UUID,
       pallet_id UUID,
       pallet_status TEXT,
+      shipment_date DATE,
+      shipment_client TEXT,
+      shipment_order_number TEXT,
+      shipment_pallet_code TEXT,
       model TEXT,
       vendor TEXT,
       technician TEXT,
@@ -936,6 +942,10 @@ async function initDb() {
       lot_id UUID,
       pallet_id UUID,
       pallet_status TEXT,
+      shipment_date DATE,
+      shipment_client TEXT,
+      shipment_order_number TEXT,
+      shipment_pallet_code TEXT,
       model TEXT,
       vendor TEXT,
       technician TEXT,
@@ -965,11 +975,19 @@ async function initDb() {
   await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS lot_id UUID;`);
   await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS pallet_id UUID;`);
   await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS pallet_status TEXT;`);
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS shipment_date DATE;`);
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS shipment_client TEXT;`);
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS shipment_order_number TEXT;`);
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS shipment_pallet_code TEXT;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag TEXT;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag_id UUID;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS lot_id UUID;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS pallet_id UUID;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS pallet_status TEXT;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS shipment_date DATE;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS shipment_client TEXT;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS shipment_order_number TEXT;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS shipment_pallet_code TEXT;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tags (
@@ -1053,12 +1071,20 @@ async function initDb() {
       serial_number TEXT PRIMARY KEY,
       pallet_id UUID NOT NULL REFERENCES pallets(id) ON DELETE CASCADE,
       movement_type TEXT NOT NULL CHECK (movement_type IN ('entry', 'exit')),
+      shipment_date DATE,
+      shipment_client TEXT,
+      shipment_order_number TEXT,
+      shipment_pallet_code TEXT,
       machine_key TEXT,
       last_import_id UUID REFERENCES pallet_imports(id) ON DELETE SET NULL,
       updated_by TEXT,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
+  await pool.query(`ALTER TABLE pallet_serials ADD COLUMN IF NOT EXISTS shipment_date DATE;`);
+  await pool.query(`ALTER TABLE pallet_serials ADD COLUMN IF NOT EXISTS shipment_client TEXT;`);
+  await pool.query(`ALTER TABLE pallet_serials ADD COLUMN IF NOT EXISTS shipment_order_number TEXT;`);
+  await pool.query(`ALTER TABLE pallet_serials ADD COLUMN IF NOT EXISTS shipment_pallet_code TEXT;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pallet_movements (
@@ -1150,6 +1176,10 @@ async function initDb() {
     ['tag', 'TEXT'],
     ['tag_id', 'UUID'],
     ['lot_id', 'UUID'],
+    ['shipment_date', 'DATE'],
+    ['shipment_client', 'TEXT'],
+    ['shipment_order_number', 'TEXT'],
+    ['shipment_pallet_code', 'TEXT'],
     ['last_ip', 'TEXT'],
     ['components', 'TEXT'],
     ['payload', 'TEXT'],
@@ -1171,6 +1201,10 @@ async function initDb() {
     ['tag', 'TEXT'],
     ['tag_id', 'UUID'],
     ['lot_id', 'UUID'],
+    ['shipment_date', 'DATE'],
+    ['shipment_client', 'TEXT'],
+    ['shipment_order_number', 'TEXT'],
+    ['shipment_pallet_code', 'TEXT'],
     ['model', 'TEXT'],
     ['vendor', 'TEXT'],
     ['technician', 'TEXT'],
@@ -1219,6 +1253,10 @@ async function initDb() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_tag_id ON machines(tag_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_lot_id ON machines(lot_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_pallet_id ON machines(pallet_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_shipment_date ON machines(shipment_date)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_shipment_client ON machines(shipment_client)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_shipment_order_number ON machines(shipment_order_number)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_shipment_pallet_code ON machines(shipment_pallet_code)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_machine_key ON reports(machine_key)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_category ON reports(category)');
@@ -1226,6 +1264,10 @@ async function initDb() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_tag_id ON reports(tag_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_lot_id ON reports(lot_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_pallet_id ON reports(pallet_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_shipment_date ON reports(shipment_date)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_shipment_client ON reports(shipment_client)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_shipment_order_number ON reports(shipment_order_number)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_shipment_pallet_code ON reports(shipment_pallet_code)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_last_seen ON reports(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_technician ON reports(technician)');
   await pool.query(
@@ -1773,109 +1815,10 @@ const upsertMachineQuery = `
     lot_id,
     pallet_id,
     pallet_status,
-    model,
-    vendor,
-    technician,
-    os_version,
-    ram_mb,
-    ram_slots_total,
-    ram_slots_free,
-    battery_health,
-    camera_status,
-    usb_status,
-    keyboard_status,
-    pad_status,
-    badge_reader_status,
-    last_seen,
-    created_at,
-    components,
-    payload,
-    last_ip
-  ) VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6,
-    $7,
-    $8,
-    $9,
-    $10,
-    $11,
-    $12,
-    $13,
-    $14,
-    $15,
-    $16,
-    $17,
-    $18,
-    $19,
-    $20,
-    $21,
-    $22,
-    $23,
-    $24,
-    $25,
-    $26,
-    $27,
-    $28,
-    $29
-  )
-  ON CONFLICT(machine_key) DO UPDATE SET
-    hostname = COALESCE(excluded.hostname, machines.hostname),
-    mac_address = COALESCE(excluded.mac_address, machines.mac_address),
-    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
-    serial_number = COALESCE(excluded.serial_number, machines.serial_number),
-    category = CASE
-      WHEN excluded.category != 'unknown' THEN excluded.category
-      ELSE machines.category
-    END,
-    tag = COALESCE(excluded.tag, machines.tag),
-    tag_id = COALESCE(excluded.tag_id, machines.tag_id),
-    lot_id = COALESCE(excluded.lot_id, machines.lot_id),
-    pallet_id = COALESCE(excluded.pallet_id, machines.pallet_id),
-    pallet_status = COALESCE(excluded.pallet_status, machines.pallet_status),
-    model = COALESCE(excluded.model, machines.model),
-    vendor = COALESCE(excluded.vendor, machines.vendor),
-    technician = COALESCE(excluded.technician, machines.technician),
-    os_version = COALESCE(excluded.os_version, machines.os_version),
-    ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
-    ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
-    ram_slots_free = COALESCE(excluded.ram_slots_free, machines.ram_slots_free),
-    battery_health = COALESCE(excluded.battery_health, machines.battery_health),
-    camera_status = COALESCE(excluded.camera_status, machines.camera_status),
-    usb_status = COALESCE(excluded.usb_status, machines.usb_status),
-    keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
-    pad_status = COALESCE(excluded.pad_status, machines.pad_status),
-    badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
-    last_seen = excluded.last_seen,
-    components = CASE
-      WHEN excluded.components IS NULL THEN machines.components
-      ELSE (
-        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
-        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
-      )::text
-    END,
-    payload = COALESCE(excluded.payload, machines.payload),
-    last_ip = excluded.last_ip
-  RETURNING id
-`;
-
-const upsertReportQuery = `
-  INSERT INTO reports (
-    id,
-    machine_key,
-    hostname,
-    mac_address,
-    mac_addresses,
-    serial_number,
-    category,
-    tag,
-    tag_id,
-    lot_id,
-    pallet_id,
-    pallet_status,
+    shipment_date,
+    shipment_client,
+    shipment_order_number,
+    shipment_pallet_code,
     model,
     vendor,
     technician,
@@ -1924,7 +1867,126 @@ const upsertReportQuery = `
     $27,
     $28,
     $29,
-    $30
+    $30,
+    $31,
+    $32,
+    $33
+  )
+  ON CONFLICT(machine_key) DO UPDATE SET
+    hostname = COALESCE(excluded.hostname, machines.hostname),
+    mac_address = COALESCE(excluded.mac_address, machines.mac_address),
+    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
+    serial_number = COALESCE(excluded.serial_number, machines.serial_number),
+    category = CASE
+      WHEN excluded.category != 'unknown' THEN excluded.category
+      ELSE machines.category
+    END,
+    tag = COALESCE(excluded.tag, machines.tag),
+    tag_id = COALESCE(excluded.tag_id, machines.tag_id),
+    lot_id = COALESCE(excluded.lot_id, machines.lot_id),
+    pallet_id = COALESCE(excluded.pallet_id, machines.pallet_id),
+    pallet_status = COALESCE(excluded.pallet_status, machines.pallet_status),
+    shipment_date = COALESCE(excluded.shipment_date, machines.shipment_date),
+    shipment_client = COALESCE(excluded.shipment_client, machines.shipment_client),
+    shipment_order_number = COALESCE(excluded.shipment_order_number, machines.shipment_order_number),
+    shipment_pallet_code = COALESCE(excluded.shipment_pallet_code, machines.shipment_pallet_code),
+    model = COALESCE(excluded.model, machines.model),
+    vendor = COALESCE(excluded.vendor, machines.vendor),
+    technician = COALESCE(excluded.technician, machines.technician),
+    os_version = COALESCE(excluded.os_version, machines.os_version),
+    ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
+    ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
+    ram_slots_free = COALESCE(excluded.ram_slots_free, machines.ram_slots_free),
+    battery_health = COALESCE(excluded.battery_health, machines.battery_health),
+    camera_status = COALESCE(excluded.camera_status, machines.camera_status),
+    usb_status = COALESCE(excluded.usb_status, machines.usb_status),
+    keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
+    pad_status = COALESCE(excluded.pad_status, machines.pad_status),
+    badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
+    last_seen = excluded.last_seen,
+    components = CASE
+      WHEN excluded.components IS NULL THEN machines.components
+      ELSE (
+        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
+        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
+      )::text
+    END,
+    payload = COALESCE(excluded.payload, machines.payload),
+    last_ip = excluded.last_ip
+  RETURNING id
+`;
+
+const upsertReportQuery = `
+  INSERT INTO reports (
+    id,
+    machine_key,
+    hostname,
+    mac_address,
+    mac_addresses,
+    serial_number,
+    category,
+    tag,
+    tag_id,
+    lot_id,
+    pallet_id,
+    pallet_status,
+    shipment_date,
+    shipment_client,
+    shipment_order_number,
+    shipment_pallet_code,
+    model,
+    vendor,
+    technician,
+    os_version,
+    ram_mb,
+    ram_slots_total,
+    ram_slots_free,
+    battery_health,
+    camera_status,
+    usb_status,
+    keyboard_status,
+    pad_status,
+    badge_reader_status,
+    last_seen,
+    created_at,
+    components,
+    payload,
+    last_ip
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12,
+    $13,
+    $14,
+    $15,
+    $16,
+    $17,
+    $18,
+    $19,
+    $20,
+    $21,
+    $22,
+    $23,
+    $24,
+    $25,
+    $26,
+    $27,
+    $28,
+    $29,
+    $30,
+    $31,
+    $32,
+    $33,
+    $34
   )
   ON CONFLICT(id) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, reports.hostname),
@@ -1940,6 +2002,10 @@ const upsertReportQuery = `
     lot_id = COALESCE(excluded.lot_id, reports.lot_id),
     pallet_id = COALESCE(excluded.pallet_id, reports.pallet_id),
     pallet_status = COALESCE(excluded.pallet_status, reports.pallet_status),
+    shipment_date = COALESCE(excluded.shipment_date, reports.shipment_date),
+    shipment_client = COALESCE(excluded.shipment_client, reports.shipment_client),
+    shipment_order_number = COALESCE(excluded.shipment_order_number, reports.shipment_order_number),
+    shipment_pallet_code = COALESCE(excluded.shipment_pallet_code, reports.shipment_pallet_code),
     model = COALESCE(excluded.model, reports.model),
     vendor = COALESCE(excluded.vendor, reports.vendor),
     technician = COALESCE(excluded.technician, reports.technician),
@@ -1980,6 +2046,10 @@ const listReportsQuery = `
     reports.lot_id,
     reports.pallet_id,
     reports.pallet_status,
+    reports.shipment_date,
+    reports.shipment_client,
+    reports.shipment_order_number,
+    reports.shipment_pallet_code,
     COALESCE(tags.name, reports.tag) AS tag_name,
     lots.supplier AS lot_supplier,
     lots.lot_number AS lot_number,
@@ -2026,6 +2096,10 @@ const getReportByIdQuery = `
     reports.lot_id AS report_lot_id,
     reports.pallet_id AS report_pallet_id,
     reports.pallet_status AS report_pallet_status,
+    reports.shipment_date AS report_shipment_date,
+    reports.shipment_client AS report_shipment_client,
+    reports.shipment_order_number AS report_shipment_order_number,
+    reports.shipment_pallet_code AS report_shipment_pallet_code,
     COALESCE(tags.name, reports.tag) AS report_tag_name,
     report_lot.supplier AS report_lot_supplier,
     report_lot.lot_number AS report_lot_number,
@@ -2061,6 +2135,10 @@ const getReportByIdQuery = `
     machines.lot_id AS machine_lot_id,
     machines.pallet_id AS machine_pallet_id,
     machines.pallet_status AS machine_pallet_status,
+    machines.shipment_date AS machine_shipment_date,
+    machines.shipment_client AS machine_shipment_client,
+    machines.shipment_order_number AS machine_shipment_order_number,
+    machines.shipment_pallet_code AS machine_shipment_pallet_code,
     machine_lot.supplier AS machine_lot_supplier,
     machine_lot.lot_number AS machine_lot_number,
     machine_lot.target_count AS machine_lot_target_count,
@@ -2766,6 +2844,109 @@ function buildPalletLabel(code, movementType) {
   return typeLabel ? `${palletCode} - ${typeLabel}` : palletCode;
 }
 
+function normalizeShipmentDate(value) {
+  if (value == null) {
+    return null;
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  const raw = String(value).trim();
+  if (!raw) {
+    return null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return raw;
+  }
+  const dateMatch = raw.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/);
+  if (dateMatch) {
+    const day = Number.parseInt(dateMatch[1], 10);
+    const month = Number.parseInt(dateMatch[2], 10);
+    let year = Number.parseInt(dateMatch[3], 10);
+    if (year < 100) {
+      year += year >= 70 ? 1900 : 2000;
+    }
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    ) {
+      return parsed.toISOString().slice(0, 10);
+    }
+  }
+  const parsedTimestamp = Date.parse(raw);
+  if (Number.isFinite(parsedTimestamp)) {
+    return new Date(parsedTimestamp).toISOString().slice(0, 10);
+  }
+  return null;
+}
+
+function normalizeShipmentClient(value) {
+  return cleanString(value, 160) || null;
+}
+
+function normalizeShipmentOrderNumber(value) {
+  return cleanString(value, 128) || null;
+}
+
+function normalizeShipmentFromRow(row) {
+  if (!row || typeof row !== 'object') {
+    return null;
+  }
+  if (row.shipment && typeof row.shipment === 'object') {
+    const nestedDate = normalizeShipmentDate(row.shipment.date);
+    const nestedClient = normalizeShipmentClient(row.shipment.client);
+    const nestedOrder = normalizeShipmentOrderNumber(row.shipment.orderNumber);
+    const nestedPalletCode = normalizePalletCode(row.shipment.palletCode || row.shipment.pallet);
+    if (!nestedDate && !nestedClient && !nestedOrder && !nestedPalletCode) {
+      return null;
+    }
+    return {
+      date: nestedDate,
+      client: nestedClient,
+      orderNumber: nestedOrder,
+      palletCode: nestedPalletCode
+    };
+  }
+
+  const shipmentDate = normalizeShipmentDate(
+    row.shipment_date ||
+      row.report_shipment_date ||
+      row.machine_shipment_date ||
+      row.expedition_date ||
+      row.date_expedition
+  );
+  const shipmentClient = normalizeShipmentClient(
+    row.shipment_client || row.report_shipment_client || row.machine_shipment_client || row.client
+  );
+  const shipmentOrderNumber = normalizeShipmentOrderNumber(
+    row.shipment_order_number ||
+      row.report_shipment_order_number ||
+      row.machine_shipment_order_number ||
+      row.order_number ||
+      row.commande
+  );
+  const shipmentPalletCode = normalizePalletCode(
+    row.shipment_pallet_code ||
+      row.report_shipment_pallet_code ||
+      row.machine_shipment_pallet_code ||
+      row.pallet_code ||
+      row.report_pallet_code ||
+      row.machine_pallet_code ||
+      row.code
+  );
+  if (!shipmentDate && !shipmentClient && !shipmentOrderNumber && !shipmentPalletCode) {
+    return null;
+  }
+  return {
+    date: shipmentDate,
+    client: shipmentClient,
+    orderNumber: shipmentOrderNumber,
+    palletCode: shipmentPalletCode
+  };
+}
+
 function normalizePalletFromRow(row) {
   if (!row) {
     return null;
@@ -2956,8 +3137,35 @@ function extractPalletCsvRows(csvText) {
     'pallet_code',
     'palletcode'
   ]);
+  const shipmentDateHeaders = new Set([
+    'date_expedition',
+    'date_d_expedition',
+    'expedition_date',
+    'shipment_date',
+    'shipping_date',
+    'date_sortie'
+  ]);
+  const shipmentClientHeaders = new Set([
+    'client',
+    'customer',
+    'customer_name',
+    'nom_client'
+  ]);
+  const shipmentOrderHeaders = new Set([
+    'commande',
+    'order',
+    'order_number',
+    'ordernumber',
+    'numero_commande',
+    'numero_de_commande',
+    'n_commande',
+    'n_de_commande'
+  ]);
   let serialIndex = headerCandidates.findIndex((cell) => serialHeaders.has(cell));
   let palletIndex = headerCandidates.findIndex((cell) => palletHeaders.has(cell));
+  const shipmentDateIndex = headerCandidates.findIndex((cell) => shipmentDateHeaders.has(cell));
+  const shipmentClientIndex = headerCandidates.findIndex((cell) => shipmentClientHeaders.has(cell));
+  const shipmentOrderIndex = headerCandidates.findIndex((cell) => shipmentOrderHeaders.has(cell));
   let dataStart = 1;
 
   if (serialIndex === -1 || palletIndex === -1) {
@@ -2984,6 +3192,12 @@ function extractPalletCsvRows(csvText) {
     const row = rows[index];
     const serialNumber = normalizeSerial(row[serialIndex]);
     const palletCode = normalizePalletCode(row[palletIndex]);
+    const shipmentDateRaw = shipmentDateIndex >= 0 ? row[shipmentDateIndex] : '';
+    const shipmentClientRaw = shipmentClientIndex >= 0 ? row[shipmentClientIndex] : '';
+    const shipmentOrderRaw = shipmentOrderIndex >= 0 ? row[shipmentOrderIndex] : '';
+    const shipmentDate = normalizeShipmentDate(shipmentDateRaw);
+    const shipmentClient = normalizeShipmentClient(shipmentClientRaw);
+    const shipmentOrderNumber = normalizeShipmentOrderNumber(shipmentOrderRaw);
 
     if (!serialNumber && !palletCode) {
       continue;
@@ -2996,12 +3210,24 @@ function extractPalletCsvRows(csvText) {
       errors.push({ line: lineNumber, error: 'Code palette manquant ou invalide.', serialNumber });
       continue;
     }
+    if (shipmentDateRaw && !shipmentDate) {
+      errors.push({ line: lineNumber, error: "Date d'expedition invalide.", serialNumber });
+      continue;
+    }
     if (seenSerials.has(serialNumber)) {
       errors.push({ line: lineNumber, error: 'Numero de serie duplique dans le CSV.', serialNumber });
       continue;
     }
     seenSerials.add(serialNumber);
-    records.push({ lineNumber, serialNumber, palletCode });
+    records.push({
+      lineNumber,
+      serialNumber,
+      palletCode,
+      shipmentDate,
+      shipmentClient,
+      shipmentOrderNumber,
+      shipmentPalletCode: palletCode
+    });
   }
 
   return { ok: true, rows: records, errors };
@@ -3060,18 +3286,67 @@ async function listRecentPalletImports(client, limit = 12) {
   return result.rows || [];
 }
 
-async function syncPalletOnExistingRows(client, { serialNumber, palletId = null, palletStatus = null } = {}) {
+async function syncPalletOnExistingRows(
+  client,
+  {
+    serialNumber,
+    palletId = null,
+    palletStatus = null,
+    shipmentDate = null,
+    shipmentClient = null,
+    shipmentOrderNumber = null,
+    shipmentPalletCode = null
+  } = {}
+) {
   const serial = normalizeSerial(serialNumber);
   if (!serial) {
     return;
   }
+  const normalizedShipmentDate = normalizeShipmentDate(shipmentDate);
+  const normalizedShipmentClient = normalizeShipmentClient(shipmentClient);
+  const normalizedShipmentOrderNumber = normalizeShipmentOrderNumber(shipmentOrderNumber);
+  const normalizedShipmentPalletCode = normalizePalletCode(shipmentPalletCode);
   await client.query(
-    'UPDATE machines SET pallet_id = $2, pallet_status = $3 WHERE serial_number = $1',
-    [serial, palletId, palletStatus]
+    `
+      UPDATE machines
+      SET pallet_id = $2,
+          pallet_status = $3,
+          shipment_date = COALESCE($4, shipment_date),
+          shipment_client = COALESCE($5, shipment_client),
+          shipment_order_number = COALESCE($6, shipment_order_number),
+          shipment_pallet_code = COALESCE($7, shipment_pallet_code)
+      WHERE serial_number = $1
+    `,
+    [
+      serial,
+      palletId,
+      palletStatus,
+      normalizedShipmentDate,
+      normalizedShipmentClient,
+      normalizedShipmentOrderNumber,
+      normalizedShipmentPalletCode
+    ]
   );
   await client.query(
-    'UPDATE reports SET pallet_id = $2, pallet_status = $3 WHERE serial_number = $1',
-    [serial, palletId, palletStatus]
+    `
+      UPDATE reports
+      SET pallet_id = $2,
+          pallet_status = $3,
+          shipment_date = COALESCE($4, shipment_date),
+          shipment_client = COALESCE($5, shipment_client),
+          shipment_order_number = COALESCE($6, shipment_order_number),
+          shipment_pallet_code = COALESCE($7, shipment_pallet_code)
+      WHERE serial_number = $1
+    `,
+    [
+      serial,
+      palletId,
+      palletStatus,
+      normalizedShipmentDate,
+      normalizedShipmentClient,
+      normalizedShipmentOrderNumber,
+      normalizedShipmentPalletCode
+    ]
   );
 }
 
@@ -3115,6 +3390,10 @@ async function applyPalletAssignment(
     movementType,
     importId = null,
     machineKey = null,
+    shipmentDate = null,
+    shipmentClient = null,
+    shipmentOrderNumber = null,
+    shipmentPalletCode = null,
     actor = null,
     timestamp = null
   } = {}
@@ -3122,6 +3401,12 @@ async function applyPalletAssignment(
   const serial = normalizeSerial(serialNumber);
   const normalizedType = normalizePalletMovementType(movementType);
   const palletId = normalizeUuid(pallet && pallet.id ? pallet.id : null);
+  const normalizedShipmentDate = normalizeShipmentDate(shipmentDate);
+  const normalizedShipmentClient = normalizeShipmentClient(shipmentClient);
+  const normalizedShipmentOrderNumber = normalizeShipmentOrderNumber(shipmentOrderNumber);
+  const normalizedShipmentPalletCode = normalizePalletCode(
+    shipmentPalletCode || (pallet && pallet.code ? pallet.code : null)
+  );
   if (!serial || !normalizedType || !palletId) {
     return null;
   }
@@ -3132,20 +3417,40 @@ async function applyPalletAssignment(
         serial_number,
         pallet_id,
         movement_type,
+        shipment_date,
+        shipment_client,
+        shipment_order_number,
+        shipment_pallet_code,
         machine_key,
         last_import_id,
         updated_by,
         updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (serial_number) DO UPDATE SET
         pallet_id = EXCLUDED.pallet_id,
         movement_type = EXCLUDED.movement_type,
+        shipment_date = COALESCE(EXCLUDED.shipment_date, pallet_serials.shipment_date),
+        shipment_client = COALESCE(EXCLUDED.shipment_client, pallet_serials.shipment_client),
+        shipment_order_number = COALESCE(EXCLUDED.shipment_order_number, pallet_serials.shipment_order_number),
+        shipment_pallet_code = COALESCE(EXCLUDED.shipment_pallet_code, pallet_serials.shipment_pallet_code),
         machine_key = COALESCE(EXCLUDED.machine_key, pallet_serials.machine_key),
         last_import_id = EXCLUDED.last_import_id,
         updated_by = EXCLUDED.updated_by,
         updated_at = EXCLUDED.updated_at
     `,
-    [serial, palletId, normalizedType, machineKey || null, normalizeUuid(importId), actor || null, movedAt]
+    [
+      serial,
+      palletId,
+      normalizedType,
+      normalizedShipmentDate,
+      normalizedShipmentClient,
+      normalizedShipmentOrderNumber,
+      normalizedShipmentPalletCode,
+      machineKey || null,
+      normalizeUuid(importId),
+      actor || null,
+      movedAt
+    ]
   );
   await client.query(
     `
@@ -3164,7 +3469,11 @@ async function applyPalletAssignment(
   await syncPalletOnExistingRows(client, {
     serialNumber: serial,
     palletId,
-    palletStatus: normalizedType
+    palletStatus: normalizedType,
+    shipmentDate: normalizedShipmentDate,
+    shipmentClient: normalizedShipmentClient,
+    shipmentOrderNumber: normalizedShipmentOrderNumber,
+    shipmentPalletCode: normalizedShipmentPalletCode
   });
   return normalizedType;
 }
@@ -3180,6 +3489,10 @@ async function resolvePalletForSerial(client, { serialNumber, machineKey = null,
         pallet_serials.serial_number,
         pallet_serials.pallet_id,
         pallet_serials.movement_type AS pallet_status,
+        pallet_serials.shipment_date,
+        pallet_serials.shipment_client,
+        pallet_serials.shipment_order_number,
+        pallet_serials.shipment_pallet_code,
         pallet_serials.machine_key AS pallet_machine_key,
         pallet_serials.updated_at AS pallet_last_movement_at,
         pallets.code AS pallet_code,
@@ -3207,7 +3520,12 @@ async function resolvePalletForSerial(client, { serialNumber, machineKey = null,
       [serial, machineKey, actor || null]
     );
   }
-  return normalizePalletFromRow(row);
+  const pallet = normalizePalletFromRow(row);
+  if (!pallet) {
+    return null;
+  }
+  const shipment = normalizeShipmentFromRow(row);
+  return shipment ? { ...pallet, shipment } : pallet;
 }
 
 function detectDoubleCheck(raw) {
@@ -3322,6 +3640,43 @@ function buildReportFilters(query, { includeCategory = true, activeTagId = null 
     clauses.push(`(comment IS NULL OR comment = '')`);
   }
 
+  const shipmentDate = normalizeShipmentDate(
+    query.shipmentDate || query.dateExpedition || query.expeditionDate || query.shippingDate
+  );
+  if (shipmentDate) {
+    clauses.push(`shipment_date = $${idx}`);
+    values.push(shipmentDate);
+    idx += 1;
+  }
+
+  const shipmentClient = normalizeTechKey(
+    normalizeShipmentClient(query.shipmentClient || query.client || query.customer) || ''
+  );
+  if (shipmentClient) {
+    clauses.push(`${normalizeTextSql('shipment_client')} = $${idx}`);
+    values.push(shipmentClient);
+    idx += 1;
+  }
+
+  const shipmentOrderNumber = normalizeTechKey(
+    normalizeShipmentOrderNumber(query.shipmentOrderNumber || query.orderNumber || query.order || query.commande) ||
+      ''
+  );
+  if (shipmentOrderNumber) {
+    clauses.push(`${normalizeTextSql('shipment_order_number')} = $${idx}`);
+    values.push(shipmentOrderNumber);
+    idx += 1;
+  }
+
+  const shipmentPalletCode = normalizeTechKey(
+    normalizePalletCode(query.shipmentPalletCode || query.palletCode || query.pallet || query.palette) || ''
+  );
+  if (shipmentPalletCode) {
+    clauses.push(`${normalizeTextSql('shipment_pallet_code')} = $${idx}`);
+    values.push(shipmentPalletCode);
+    idx += 1;
+  }
+
   const component = cleanString(query.component, 64);
   if (component && component !== 'all') {
     clauses.push(
@@ -3345,7 +3700,8 @@ function buildReportFilters(query, { includeCategory = true, activeTagId = null 
       `lower(` +
         `coalesce(hostname,'') || ' ' || coalesce(serial_number,'') || ' ' || coalesce(mac_address,'') || ' ' || ` +
         `coalesce(mac_addresses,'') || ' ' || coalesce(machine_key,'') || ' ' || coalesce(technician,'') || ' ' || ` +
-        `coalesce(vendor,'') || ' ' || coalesce(model,'') || ' ' || coalesce(comment,'') || ' ' || coalesce(tag,'')` +
+        `coalesce(vendor,'') || ' ' || coalesce(model,'') || ' ' || coalesce(comment,'') || ' ' || coalesce(tag,'') || ' ' || ` +
+        `coalesce(shipment_client,'') || ' ' || coalesce(shipment_order_number,'') || ' ' || coalesce(shipment_pallet_code,'') || ' ' || coalesce(shipment_date::text,'')` +
         `) LIKE $${idx}`
     );
     values.push(`%${search.toLowerCase()}%`);
@@ -5179,6 +5535,22 @@ function formatDateTime(value) {
   });
 }
 
+function formatDateOnly(value) {
+  const normalized = normalizeShipmentDate(value);
+  if (!normalized) {
+    return '--';
+  }
+  const date = new Date(`${normalized}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    return normalized;
+  }
+  return date.toLocaleDateString('fr-FR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
+  });
+}
+
 function mergeHardwarePayload(primary, fallback) {
   const base =
     primary && typeof primary === 'object' && !Array.isArray(primary) ? { ...primary } : null;
@@ -6463,6 +6835,10 @@ function drawReportPdf(doc, data) {
 
   const identRows = [
     { label: 'Serial', value: data.serialNumber },
+    { label: 'Commande', value: data.shipmentOrderNumber || '--' },
+    { label: 'Palette', value: data.shipmentPalletCode || '--' },
+    { label: 'Client', value: data.shipmentClient || '--' },
+    { label: 'Date expedition', value: data.shipmentDate || '--' },
     { label: 'Hash Autopilot', value: data.autopilotHashDisplay || data.autopilotHash },
     { label: 'MAC', value: data.macPrimary },
     { label: 'OS', value: data.osVersion },
@@ -6537,7 +6913,7 @@ function drawReportPdf(doc, data) {
   const cardGap = 10;
 
   const leftProductHeight = Math.max(118, Math.floor(contentHeight * 0.2));
-  const leftIdHeight = Math.max(120, Math.floor(contentHeight * 0.2));
+  const leftIdHeight = Math.max(158, Math.floor(contentHeight * 0.27));
   const leftDetailHeight = Math.max(148, Math.floor(contentHeight * 0.26));
   let leftInventoryHeight =
     contentHeight - leftProductHeight - leftIdHeight - leftDetailHeight - cardGap * 3;
@@ -7570,6 +7946,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     const resolvedPalletId = resolvedPallet && resolvedPallet.id ? resolvedPallet.id : null;
     const resolvedPalletStatus =
       resolvedPallet && resolvedPallet.status ? resolvedPallet.status : null;
+    const resolvedShipment = normalizeShipmentFromRow(resolvedPallet);
     const shouldCountLot = Boolean(
       resolvedLotId &&
       machineKey &&
@@ -7596,6 +7973,10 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       resolvedLotId,
       resolvedPalletId,
       resolvedPalletStatus,
+      resolvedShipment ? resolvedShipment.date : null,
+      resolvedShipment ? resolvedShipment.client : null,
+      resolvedShipment ? resolvedShipment.orderNumber : null,
+      resolvedShipment ? resolvedShipment.palletCode : null,
       model,
       vendor,
       technician,
@@ -7628,6 +8009,10 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       resolvedLotId,
       resolvedPalletId,
       resolvedPalletStatus,
+      resolvedShipment ? resolvedShipment.date : null,
+      resolvedShipment ? resolvedShipment.client : null,
+      resolvedShipment ? resolvedShipment.orderNumber : null,
+      resolvedShipment ? resolvedShipment.palletCode : null,
       model,
       vendor,
       technician,
@@ -7754,6 +8139,10 @@ app.get('/api/reports', requireAuth, async (req, res) => {
               reports.lot_id,
               reports.pallet_id,
               reports.pallet_status,
+              reports.shipment_date,
+              reports.shipment_client,
+              reports.shipment_order_number,
+              reports.shipment_pallet_code,
               reports.model,
               reports.vendor,
               reports.technician,
@@ -7788,6 +8177,10 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             latest.lot_id,
             latest.pallet_id,
             latest.pallet_status,
+            latest.shipment_date,
+            latest.shipment_client,
+            latest.shipment_order_number,
+            latest.shipment_pallet_code,
             COALESCE(tags.name, latest.tag) AS tag_name,
             lots.supplier AS lot_supplier,
             lots.lot_number AS lot_number,
@@ -7837,6 +8230,10 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             reports.lot_id,
             reports.pallet_id,
             reports.pallet_status,
+            reports.shipment_date,
+            reports.shipment_client,
+            reports.shipment_order_number,
+            reports.shipment_pallet_code,
             COALESCE(tags.name, reports.tag) AS tag_name,
             lots.supplier AS lot_supplier,
             lots.lot_number AS lot_number,
@@ -7894,6 +8291,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
         tagName: row.tag_name || row.tag || null,
         lot: normalizeLotFromRow(row),
         pallet: normalizePalletFromRow(row),
+        shipment: normalizeShipmentFromRow(row),
         model: row.model,
         vendor: row.vendor,
         technician: row.technician,
@@ -8100,6 +8498,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
         tagName: row.tag_name || row.tag || null,
         lot: normalizeLotFromRow(row),
         pallet: normalizePalletFromRow(row),
+        shipment: normalizeShipmentFromRow(row),
         model: row.model,
         vendor: row.vendor,
         technician: row.technician,
@@ -8267,6 +8666,10 @@ app.post('/api/pallets/imports', requireTagEdit, async (req, res) => {
         movementType: importType,
         importId,
         machineKey: machineKeyBySerial.get(row.serialNumber) || null,
+        shipmentDate: row.shipmentDate || null,
+        shipmentClient: row.shipmentClient || null,
+        shipmentOrderNumber: row.shipmentOrderNumber || null,
+        shipmentPalletCode: row.shipmentPalletCode || row.palletCode || null,
         actor: createdBy,
         timestamp: now
       });
@@ -8748,6 +9151,18 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
     machine_pallet_status: row.machine_pallet_status,
     machine_pallet_last_movement_at: row.machine_pallet_last_movement_at
   });
+  const shipment = normalizeShipmentFromRow({
+    report_shipment_date: row.report_shipment_date,
+    report_shipment_client: row.report_shipment_client,
+    report_shipment_order_number: row.report_shipment_order_number,
+    report_shipment_pallet_code: row.report_shipment_pallet_code,
+    report_pallet_code: row.report_pallet_code,
+    machine_shipment_date: row.machine_shipment_date,
+    machine_shipment_client: row.machine_shipment_client,
+    machine_shipment_order_number: row.machine_shipment_order_number,
+    machine_shipment_pallet_code: row.machine_shipment_pallet_code,
+    machine_pallet_code: row.machine_pallet_code
+  });
 
   res.json({
     machine: {
@@ -8763,6 +9178,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       tagName: row.report_tag_name || row.tag || row.machine_tag || null,
       lot,
       pallet,
+      shipment,
       model: row.model,
       vendor: row.vendor,
       technician: row.technician,
@@ -9265,6 +9681,15 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
     const resolvedPalletId = resolvedPallet && resolvedPallet.id ? resolvedPallet.id : null;
     const resolvedPalletStatus =
       resolvedPallet && resolvedPallet.status ? resolvedPallet.status : null;
+    const resolvedShipment =
+      normalizeShipmentFromRow(resolvedPallet) ||
+      normalizeShipmentFromRow({
+        shipment_date: row.shipment_date,
+        shipment_client: row.shipment_client,
+        shipment_order_number: row.shipment_order_number,
+        shipment_pallet_code: row.shipment_pallet_code,
+        pallet_code: row.pallet_code
+      });
     const reportValues = [
       reportId,
       row.machine_key,
@@ -9278,6 +9703,10 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
       resolvedLotId,
       resolvedPalletId,
       resolvedPalletStatus,
+      resolvedShipment ? resolvedShipment.date : null,
+      resolvedShipment ? resolvedShipment.client : null,
+      resolvedShipment ? resolvedShipment.orderNumber : null,
+      resolvedShipment ? resolvedShipment.palletCode : null,
       row.model,
       row.vendor,
       row.technician,
@@ -9312,6 +9741,10 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
         resolvedLotId,
         resolvedPalletId,
         resolvedPalletStatus,
+        resolvedShipment ? resolvedShipment.date : null,
+        resolvedShipment ? resolvedShipment.client : null,
+        resolvedShipment ? resolvedShipment.orderNumber : null,
+        resolvedShipment ? resolvedShipment.palletCode : null,
         row.model,
         row.vendor,
         row.technician,
@@ -9481,6 +9914,7 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
     const resolvedPalletId = resolvedPallet && resolvedPallet.id ? resolvedPallet.id : null;
     const resolvedPalletStatus =
       resolvedPallet && resolvedPallet.status ? resolvedPallet.status : null;
+    const resolvedShipment = normalizeShipmentFromRow(resolvedPallet);
     const shouldCountLot = Boolean(
       resolvedLotId &&
       machineKey &&
@@ -9500,6 +9934,10 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
       resolvedLotId,
       resolvedPalletId,
       resolvedPalletStatus,
+      resolvedShipment ? resolvedShipment.date : null,
+      resolvedShipment ? resolvedShipment.client : null,
+      resolvedShipment ? resolvedShipment.orderNumber : null,
+      resolvedShipment ? resolvedShipment.palletCode : null,
       model,
       vendor,
       technician,
@@ -9532,6 +9970,10 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
       resolvedLotId,
       resolvedPalletId,
       resolvedPalletStatus,
+      resolvedShipment ? resolvedShipment.date : null,
+      resolvedShipment ? resolvedShipment.client : null,
+      resolvedShipment ? resolvedShipment.orderNumber : null,
+      resolvedShipment ? resolvedShipment.palletCode : null,
       model,
       vendor,
       technician,
@@ -9877,25 +10319,12 @@ app.put('/api/tags/rename', requireTagEdit, async (req, res) => {
   }
 });
 
-app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
-  const id = normalizeUuid(req.params.id);
-  if (!id) {
-    return res.status(400).json({ ok: false, error: 'invalid_id' });
-  }
+async function getReportDetailRow(reportId) {
+  const result = await pool.query(getReportByIdQuery, [reportId]);
+  return result.rows && result.rows[0] ? result.rows[0] : null;
+}
 
-  let row;
-  try {
-    const result = await pool.query(getReportByIdQuery, [id]);
-    row = result.rows && result.rows[0] ? result.rows[0] : null;
-  } catch (error) {
-    console.error('Failed to fetch machine detail for PDF', error);
-    return res.status(500).json({ ok: false, error: 'db_error' });
-  }
-
-  if (!row) {
-    return res.status(404).json({ ok: false, error: 'not_found' });
-  }
-
+function buildReportPdfPayload(row) {
   let components = null;
   let machineComponents = null;
   let payload = null;
@@ -9950,6 +10379,18 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
   const diskInfo = Array.isArray(diskInfoRaw) ? diskInfoRaw : diskInfoRaw ? [diskInfoRaw] : [];
   const volumeInfoRaw = payload ? payload.volumes : null;
   const volumeInfo = Array.isArray(volumeInfoRaw) ? volumeInfoRaw : volumeInfoRaw ? [volumeInfoRaw] : [];
+  const shipment = normalizeShipmentFromRow({
+    report_shipment_date: row.report_shipment_date,
+    report_shipment_client: row.report_shipment_client,
+    report_shipment_order_number: row.report_shipment_order_number,
+    report_shipment_pallet_code: row.report_shipment_pallet_code,
+    report_pallet_code: row.report_pallet_code,
+    machine_shipment_date: row.machine_shipment_date,
+    machine_shipment_client: row.machine_shipment_client,
+    machine_shipment_order_number: row.machine_shipment_order_number,
+    machine_shipment_pallet_code: row.machine_shipment_pallet_code,
+    machine_pallet_code: row.machine_pallet_code
+  });
 
   const reportData = {
     id: row.id,
@@ -9976,6 +10417,10 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     wifiStandardCode: buildPdfWifiStandardCode(payload),
     autopilotHash,
     autopilotHashDisplay: formatPdfAutopilotHash(autopilotHash),
+    shipmentDate: shipment ? formatDateOnly(shipment.date) : '--',
+    shipmentClient: shipment && shipment.client ? shipment.client : '--',
+    shipmentOrderNumber: shipment && shipment.orderNumber ? shipment.orderNumber : '--',
+    shipmentPalletCode: shipment && shipment.palletCode ? shipment.palletCode : '--',
     cameraStatus: row.camera_status,
     usbStatus: row.usb_status,
     keyboardStatus: row.keyboard_status,
@@ -9993,20 +10438,208 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     productLabel || row.serial_number || row.hostname || row.mac_address || macList[0],
     `Machine ${row.id}`
   );
-  const filename = `rapport-atelier-${sanitizeFilename(downloadBaseName)}.pdf`;
+  return {
+    reportData,
+    filename: `rapport-atelier-${sanitizeFilename(downloadBaseName)}.pdf`
+  };
+}
+
+function decorateReportPdfDocument(doc, reportData) {
+  doc.info.Title = `Rapport atelier - ${reportData.productLabel || reportData.title}`;
+  doc.info.Author = 'Atelier Ops';
+  drawReportPdf(doc, reportData);
+}
+
+function renderReportPdfBuffer(reportData) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const doc = new PDFDocument({ size: 'A4', margin: 40 });
+    doc.on('data', (chunk) => {
+      chunks.push(chunk);
+    });
+    doc.on('end', () => {
+      resolve(Buffer.concat(chunks));
+    });
+    doc.on('error', (error) => {
+      reject(error);
+    });
+    decorateReportPdfDocument(doc, reportData);
+    doc.end();
+  });
+}
+
+function buildShipmentExportFilters(query) {
+  return {
+    shipmentDate: normalizeShipmentDate(
+      query.shipmentDate || query.dateExpedition || query.expeditionDate || query.shippingDate
+    ),
+    shipmentClient: normalizeShipmentClient(query.shipmentClient || query.client || query.customer),
+    shipmentOrderNumber: normalizeShipmentOrderNumber(
+      query.shipmentOrderNumber || query.orderNumber || query.order || query.commande
+    ),
+    shipmentPalletCode: normalizePalletCode(
+      query.shipmentPalletCode || query.palletCode || query.pallet || query.palette
+    )
+  };
+}
+
+function buildShipmentExportArchiveName(filters) {
+  const parts = ['rapports-atelier'];
+  if (filters.shipmentOrderNumber) {
+    parts.push(`commande-${sanitizeFilename(filters.shipmentOrderNumber)}`);
+  }
+  if (filters.shipmentPalletCode) {
+    parts.push(`palette-${sanitizeFilename(filters.shipmentPalletCode)}`);
+  }
+  if (!filters.shipmentOrderNumber && !filters.shipmentPalletCode) {
+    parts.push(`export-${Date.now()}`);
+  }
+  return `${parts.join('-')}.zip`;
+}
+
+app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  let row;
+  try {
+    row = await getReportDetailRow(id);
+  } catch (error) {
+    console.error('Failed to fetch machine detail for PDF', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+
+  if (!row) {
+    return res.status(404).json({ ok: false, error: 'not_found' });
+  }
+
+  const { reportData, filename } = buildReportPdfPayload(row);
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Cache-Control', 'no-store');
 
   const doc = new PDFDocument({ size: 'A4', margin: 40 });
-  doc.info.Title = `Rapport atelier - ${productLabel || title}`;
-  doc.info.Author = 'Atelier Ops';
   doc.on('error', (error) => {
     console.error('PDF generation error', error);
   });
   doc.pipe(res);
-  drawReportPdf(doc, reportData);
+  decorateReportPdfDocument(doc, reportData);
   doc.end();
+});
+
+app.get('/api/reports/export.zip', requireTagEdit, async (req, res) => {
+  const filters = buildShipmentExportFilters(req.query || {});
+  if (!filters.shipmentOrderNumber && !filters.shipmentPalletCode) {
+    return res.status(400).json({
+      ok: false,
+      error: 'missing_export_filter',
+      message: 'Renseigne au minimum un numero de commande ou un numero de palette.'
+    });
+  }
+
+  const filterQuery = {
+    shipmentDate: filters.shipmentDate || undefined,
+    shipmentClient: filters.shipmentClient || undefined,
+    shipmentOrderNumber: filters.shipmentOrderNumber || undefined,
+    shipmentPalletCode: filters.shipmentPalletCode || undefined
+  };
+  const { clauses, values } = buildReportFilters(filterQuery, {
+    includeCategory: false
+  });
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+
+  let reportRows;
+  try {
+    const result = await pool.query(
+      `
+        WITH latest AS (
+          SELECT DISTINCT ON (reports.machine_key)
+            reports.id,
+            reports.machine_key,
+            reports.last_seen
+          FROM reports
+          ${where}
+          ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+        )
+        SELECT id, machine_key, last_seen
+        FROM latest
+        ORDER BY last_seen DESC
+        LIMIT $${values.length + 1}
+      `,
+      [...values, PDF_BATCH_EXPORT_LIMIT + 1]
+    );
+    reportRows = result.rows || [];
+  } catch (error) {
+    console.error('Failed to resolve report export selection', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+
+  if (!reportRows.length) {
+    return res.status(404).json({
+      ok: false,
+      error: 'no_reports_found',
+      message: 'Aucun rapport correspondant a ces filtres.'
+    });
+  }
+  if (reportRows.length > PDF_BATCH_EXPORT_LIMIT) {
+    return res.status(413).json({
+      ok: false,
+      error: 'too_many_reports',
+      message: `Export limite a ${PDF_BATCH_EXPORT_LIMIT} rapports. Raffine ta recherche.`
+    });
+  }
+
+  const archiveName = buildShipmentExportArchiveName(filters);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${archiveName}"`);
+  res.setHeader('Cache-Control', 'no-store');
+
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', (error) => {
+    console.error('ZIP export error', error);
+    if (!res.headersSent) {
+      res.status(500).json({ ok: false, error: 'zip_error' });
+      return;
+    }
+    res.destroy(error);
+  });
+  archive.pipe(res);
+
+  try {
+    for (const item of reportRows) {
+      const row = await getReportDetailRow(item.id);
+      if (!row) {
+        continue;
+      }
+      const { reportData, filename } = buildReportPdfPayload(row);
+      const pdfBuffer = await renderReportPdfBuffer(reportData);
+      archive.append(pdfBuffer, { name: filename });
+    }
+    archive.append(
+      Buffer.from(
+        JSON.stringify(
+          {
+            generatedAt: new Date().toISOString(),
+            reportCount: reportRows.length,
+            filters
+          },
+          null,
+          2
+        )
+      ),
+      { name: 'export.json' }
+    );
+    await archive.finalize();
+  } catch (error) {
+    console.error('Failed to build ZIP export', error);
+    archive.abort();
+    if (!res.headersSent) {
+      return res.status(500).json({ ok: false, error: 'pdf_export_failed' });
+    }
+    return res.destroy(error);
+  }
 });
 
 app.use((err, req, res, next) => {

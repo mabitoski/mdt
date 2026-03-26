@@ -1272,6 +1272,24 @@ function getMachinePallet(machine) {
   return machine.pallet;
 }
 
+function getMachineShipment(machine) {
+  if (!machine || !machine.shipment || typeof machine.shipment !== 'object') {
+    return null;
+  }
+  return machine.shipment;
+}
+
+function formatShipmentDate(value) {
+  if (!value) {
+    return '--';
+  }
+  const date = new Date(`${String(value).trim()}T00:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    return '--';
+  }
+  return date.toLocaleDateString('fr-FR');
+}
+
 function getActiveLot() {
   if (!Array.isArray(state.lots) || !state.lots.length) {
     return null;
@@ -4598,6 +4616,7 @@ function buildDrawerDetailHtml(detail) {
   const rawPalletLabel = pallet ? buildPalletLabel(pallet) : '';
   const hasAssignedPallet = Boolean(rawPalletLabel && rawPalletLabel !== DEFAULT_PALLET_LABEL);
   const palletLabel = hasAssignedPallet ? rawPalletLabel : DEFAULT_PALLET_LABEL;
+  const shipment = getMachineShipment(detail);
   const lotSelectOptions = buildLotAssignmentOptions(lot);
   const summary = summarizeDetailForDrawer(detail);
   const components = resolveDetailComponents(detail);
@@ -4703,6 +4722,10 @@ function buildDrawerDetailHtml(detail) {
       ${lotEditorHtml}
       <div><span>Palette</span><strong>${escapeHtml(palletLabel)}</strong></div>
       <div><span>Statut palette</span><strong>${escapeHtml((pallet && pallet.statusLabel) || '--')}</strong></div>
+      <div><span>Commande</span><strong>${escapeHtml((shipment && shipment.orderNumber) || '--')}</strong></div>
+      <div><span>Client</span><strong>${escapeHtml((shipment && shipment.client) || '--')}</strong></div>
+      <div><span>Date expedition</span><strong>${escapeHtml(formatShipmentDate(shipment && shipment.date))}</strong></div>
+      <div><span>Palette expedition</span><strong>${escapeHtml((shipment && shipment.palletCode) || '--')}</strong></div>
       <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
       <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
       <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
@@ -5241,6 +5264,7 @@ function buildDetailHtml(detail) {
   const lotLabel = lot ? buildLotLabel(lot) : '';
   const pallet = getMachinePallet(detail);
   const palletLabel = pallet ? buildPalletLabel(pallet) : '';
+  const shipment = getMachineShipment(detail);
   const technicianLine = detail.technician
     ? `<p class="detail-tech"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></p>`
     : '';
@@ -5546,6 +5570,22 @@ function buildDetailHtml(detail) {
       <div class="detail-item">
         <span>Statut palette</span>
         <strong>${escapeHtml((pallet && pallet.statusLabel) || '--')}</strong>
+      </div>
+      <div class="detail-item">
+        <span>N° commande</span>
+        <strong>${escapeHtml((shipment && shipment.orderNumber) || '--')}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Client</span>
+        <strong>${escapeHtml((shipment && shipment.client) || '--')}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Date expedition</span>
+        <strong>${escapeHtml(formatShipmentDate(shipment && shipment.date))}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Palette expedition</span>
+        <strong>${escapeHtml((shipment && shipment.palletCode) || '--')}</strong>
       </div>
       <div class="detail-item">
         <span>Serial</span>

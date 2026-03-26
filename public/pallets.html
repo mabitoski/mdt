@@ -37,6 +37,7 @@
         <nav class="sidebar-nav" aria-label="Sections palettes">
           <a class="sidebar-nav-btn is-active" href="#section-palettes-head">Vue generale</a>
           <a class="sidebar-nav-btn" href="#section-pallet-imports">Imports CSV</a>
+          <a class="sidebar-nav-btn" href="#section-pallet-pdf-export">Exports PDF</a>
           <a class="sidebar-nav-btn" href="#section-pallet-board">Palettes</a>
           <a class="sidebar-nav-btn" href="#section-pallet-history">Historique</a>
         </nav>
@@ -111,7 +112,8 @@
                   <p class="admin-kicker">Entree entrepot</p>
                   <h2>Importer une entree palette</h2>
                   <p class="admin-sub">
-                    CSV attendu: `serial_number,palette_code`. Chaque ligne place un serial sur une palette.
+                    CSV attendu: `serial_number,palette_code` avec en option `date_expedition`, `client`,
+                    `order_number`. Chaque ligne place un serial sur une palette.
                   </p>
                 </div>
                 <span class="admin-status" data-status="enabled">Entree</span>
@@ -139,7 +141,8 @@
                   <p class="admin-kicker">Sortie entrepot</p>
                   <h2>Importer une sortie palette</h2>
                   <p class="admin-sub">
-                    Utilise un nouveau CSV pour marquer les serials qui quittent l'entrepot sur telle palette.
+                    Utilise le fichier logistique d'expedition pour injecter la palette, le client, la commande
+                    et la date d'expedition sur les rapports deja existants.
                   </p>
                 </div>
                 <span class="admin-status" data-status="unknown">Sortie</span>
@@ -152,7 +155,8 @@
                   </label>
                 </div>
                 <p class="admin-hint">
-                  Si un serial existe deja, le nouvel import remplace l'etat courant et conserve l'historique des mouvements.
+                  Format recommande: `serial_number,date_expedition,client,order_number,palette_code`. Si un serial existe
+                  deja, le nouvel import remplace l'etat courant et conserve l'historique des mouvements.
                 </p>
                 <div class="admin-actions">
                   <button type="submit" class="admin-primary" id="pallet-exit-submit">Importer la sortie</button>
@@ -160,6 +164,46 @@
                 <div class="admin-feedback" id="pallet-exit-feedback" role="status"></div>
               </form>
             </div>
+          </div>
+
+          <div class="admin-card" id="section-pallet-pdf-export">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Exports clients</p>
+                <h2>Telecharger les PDFs par commande / palette</h2>
+                <p class="admin-sub">
+                  Filtre les rapports expedies et telecharge tous les PDFs correspondants dans une archive ZIP.
+                </p>
+              </div>
+            </div>
+            <form class="admin-form" id="pallet-pdf-export-form">
+              <div class="admin-grid">
+                <label class="admin-field">
+                  <span>Date expedition</span>
+                  <input type="date" id="shipment-date-filter" />
+                </label>
+                <label class="admin-field">
+                  <span>Client</span>
+                  <input type="text" id="shipment-client-filter" maxlength="160" placeholder="Nom du client" />
+                </label>
+                <label class="admin-field">
+                  <span>N° commande</span>
+                  <input type="text" id="shipment-order-filter" maxlength="128" placeholder="Commande client" />
+                </label>
+                <label class="admin-field">
+                  <span>N° palette</span>
+                  <input type="text" id="shipment-pallet-filter" maxlength="96" placeholder="Palette logistique" />
+                </label>
+              </div>
+              <p class="admin-hint">
+                Renseigne au minimum le numero de commande, le numero de palette, ou les deux. Les champs client
+                et date servent a affiner la selection.
+              </p>
+              <div class="admin-actions">
+                <button type="submit" class="admin-primary" id="pallet-export-submit">Telecharger les PDFs</button>
+              </div>
+              <div class="admin-feedback" id="pallet-export-feedback" role="status"></div>
+            </form>
           </div>
 
           <div class="admin-card" id="section-pallet-board">

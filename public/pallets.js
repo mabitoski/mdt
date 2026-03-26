@@ -13,6 +13,12 @@ const palletTotalCountEl = document.getElementById('pallet-total-count');
 const palletSerialCountEl = document.getElementById('pallet-serial-count');
 const palletLinkedCountEl = document.getElementById('pallet-linked-count');
 const palletLastImportEl = document.getElementById('pallet-last-import');
+const palletPdfExportForm = document.getElementById('pallet-pdf-export-form');
+const shipmentDateFilterInput = document.getElementById('shipment-date-filter');
+const shipmentClientFilterInput = document.getElementById('shipment-client-filter');
+const shipmentOrderFilterInput = document.getElementById('shipment-order-filter');
+const shipmentPalletFilterInput = document.getElementById('shipment-pallet-filter');
+const palletExportFeedback = document.getElementById('pallet-export-feedback');
 
 const state = {
   pallets: [],
@@ -97,6 +103,23 @@ function readFileAsText(file) {
     reader.onerror = () => reject(new Error('file_read_failed'));
     reader.readAsText(file);
   });
+}
+
+function getDownloadFilename(response, fallback) {
+  const header = response.headers.get('Content-Disposition') || '';
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch (error) {
+      return fallback;
+    }
+  }
+  const simpleMatch = header.match(/filename="([^"]+)"/i);
+  if (simpleMatch && simpleMatch[1]) {
+    return simpleMatch[1];
+  }
+  return fallback;
 }
 
 function applyPayload(data, warnings = null) {
@@ -322,6 +345,85 @@ async function submitImport(importType, form, fileInput, feedbackEl) {
   }
 }
 
+async function exportMatchingPdfs(event) {
+  event.preventDefault();
+  if (!palletPdfExportForm) {
+    return;
+  }
+  const shipmentDate = shipmentDateFilterInput ? shipmentDateFilterInput.value.trim() : '';
+  const shipmentClient = shipmentClientFilterInput ? shipmentClientFilterInput.value.trim() : '';
+  const shipmentOrderNumber = shipmentOrderFilterInput ? shipmentOrderFilterInput.value.trim() : '';
+  const shipmentPalletCode = shipmentPalletFilterInput ? shipmentPalletFilterInput.value.trim() : '';
+
+  if (!shipmentOrderNumber && !shipmentPalletCode) {
+    setFeedback(
+      palletExportFeedback,
+      'error',
+      'Renseigne au minimum un numero de commande ou un numero de palette.'
+    );
+    return;
+  }
+
+  const params = new URLSearchParams();
+  if (shipmentDate) {
+    params.set('shipmentDate', shipmentDate);
+  }
+  if (shipmentClient) {
+    params.set('shipmentClient', shipmentClient);
+  }
+  if (shipmentOrderNumber) {
+    params.set('shipmentOrderNumber', shipmentOrderNumber);
+  }
+  if (shipmentPalletCode) {
+    params.set('shipmentPalletCode', shipmentPalletCode);
+  }
+
+  setFormDisabled(palletPdfExportForm, true);
+  setFeedback(palletExportFeedback, 'info', "Preparation de l'archive PDF...");
+  try {
+    const response = await fetch(`/api/reports/export.zip?${params.toString()}`);
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.location.href = '/';
+      return;
+    }
+    if (!response.ok) {
+      let message = "Export impossible avec ces filtres.";
+      try {
+        const data = await response.json();
+        if (data && data.message) {
+          message = data.message;
+        }
+      } catch (error) {
+        message = "Export impossible avec ces filtres.";
+      }
+      throw new Error(message);
+    }
+
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = getDownloadFilename(response, 'rapports-atelier.zip');
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+    setFeedback(palletExportFeedback, 'success', 'Archive ZIP telechargee.');
+  } catch (error) {
+    setFeedback(
+      palletExportFeedback,
+      'error',
+      error && error.message ? error.message : "Export impossible avec ces filtres."
+    );
+  } finally {
+    setFormDisabled(palletPdfExportForm, false);
+  }
+}
+
 if (palletEntryForm) {
   palletEntryForm.addEventListener('submit', (event) => {
     event.preventDefault();
@@ -340,6 +442,10 @@ if (palletReloadBtn) {
   palletReloadBtn.addEventListener('click', () => {
     loadPallets();
   });
+}
+
+if (palletPdfExportForm) {
+  palletPdfExportForm.addEventListener('submit', exportMatchingPdfs);
 }
 
 loadPallets();
