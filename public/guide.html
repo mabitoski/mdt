@@ -1,0 +1,697 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Guide operateur MDT</title>
+    <meta
+      name="description"
+      content="Guide d'utilisation de la plateforme MDT : pages, lots, checks automatiques, remontees manuelles et flux logistiques prevus."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600;700&amp;display=swap"
+      rel="stylesheet"
+    />
+    <script src="/env.js?v=20250108a"></script>
+    <link rel="stylesheet" href="/styles.css?v=20260316a" />
+  </head>
+  <body class="dashboard-page admin-page guide-page">
+    <div class="aura" aria-hidden="true"></div>
+    <main class="app app-shell">
+      <aside class="left-sidebar" aria-label="Navigation guide">
+        <div class="sidebar-head">
+          <div class="sidebar-brand" aria-label="Identite du site">
+            <img class="sidebar-brand-logo" src="/logo.png?v=20260225b" alt="MMA Automation" />
+            <div class="sidebar-brand-copy">
+              <span class="sidebar-brand-name">MMA Automation</span>
+              <span class="sidebar-brand-tag">Ops Platform</span>
+            </div>
+          </div>
+          <h1 class="sidebar-title">Guide operateur</h1>
+          <p class="sidebar-sub">
+            Reference de travail pour l'atelier, l'admin et la logistique. Ce guide decrit l'etat
+            reel actuel du site et des scripts MDT.
+          </p>
+        </div>
+        <nav class="sidebar-nav" aria-label="Sections guide">
+          <a class="sidebar-nav-btn is-active" href="#section-intro">Demarrage</a>
+          <a class="sidebar-nav-btn" href="#section-dashboard">Tableau et pages</a>
+          <a class="sidebar-nav-btn" href="#section-lots">Lots</a>
+          <a class="sidebar-nav-btn" href="#section-palettes">Palettes</a>
+          <a class="sidebar-nav-btn" href="#section-checks">Checks reels</a>
+          <a class="sidebar-nav-btn" href="#section-status">Statuts et regles</a>
+          <a class="sidebar-nav-btn" href="#section-procedures">Procedures types</a>
+        </nav>
+        <div class="sidebar-links" aria-label="Navigation pages">
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Navigation</p>
+            <a class="admin-link" href="/">Tableau de bord</a>
+            <a class="admin-link" href="/admin">Admin</a>
+            <a class="admin-link" href="/lots">Lots</a>
+            <a class="admin-link" href="/pallets">Palettes</a>
+            <a class="admin-link" href="/metrics">Metrics</a>
+            <a class="admin-link" href="/legacy-imports">Imports</a>
+          </div>
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Suivi</p>
+            <a class="admin-link is-current" href="/guide">Guide</a>
+            <a class="admin-link" href="/patchnotes">Patchnotes</a>
+            <a class="admin-link journal-link" href="/journal">Journal</a>
+          </div>
+          <div class="sidebar-link-group sidebar-link-group--session">
+            <p class="sidebar-link-title">Session</p>
+            <a class="logout-btn" href="/logout">Deconnexion</a>
+          </div>
+          <span class="dev-badge" aria-hidden="true">DEV</span>
+        </div>
+        <p class="sidebar-note">
+          Point cle: un lot = production atelier. Une palette = logistique. Ne pas melanger les deux.
+        </p>
+      </aside>
+
+      <section class="workspace">
+        <header class="admin-hero" id="section-intro">
+          <div class="admin-hero-copy">
+            <p class="hero-kicker">Documentation</p>
+            <h1>Guide d'utilisation de la plateforme MDT</h1>
+            <p class="hero-sub">
+              Cette page explique a quoi sert chaque ecran, ce qui est automatique, ce qui reste
+              manuel, et les limites connues de la collecte MDT actuelle.
+            </p>
+          </div>
+          <div class="admin-hero-actions">
+            <a class="admin-secondary" href="/">Retour au tableau</a>
+            <a class="admin-secondary" href="/journal">Voir le journal</a>
+          </div>
+        </header>
+
+        <section class="guide-summary-grid" aria-label="Resume rapide">
+          <article class="guide-summary-card">
+            <p class="guide-summary-label">Atelier</p>
+            <strong class="guide-summary-title">Suivre et corriger</strong>
+            <p class="guide-summary-copy">
+              Le tableau principal sert a suivre les machines, ouvrir la fiche poste, commenter,
+              exporter le PDF, corriger certains statuts et ajuster un lot.
+            </p>
+          </article>
+          <article class="guide-summary-card">
+            <p class="guide-summary-label">Admin</p>
+            <strong class="guide-summary-title">Configurer et piloter</strong>
+            <p class="guide-summary-copy">
+              Les pages Admin et Lots servent a configurer LDAP, creer les lots de production, mettre
+              en pause et assigner les techniciens.
+            </p>
+          </article>
+          <article class="guide-summary-card">
+            <p class="guide-summary-label">Qualite</p>
+            <strong class="guide-summary-title">Mesurer et auditer</strong>
+            <p class="guide-summary-copy">
+              Metrics, Journal et Patchnotes couvrent respectivement le suivi analytique, les traces
+              d'actions et l'historique fonctionnel.
+            </p>
+          </article>
+          <article class="guide-summary-card">
+            <p class="guide-summary-label">Logistique</p>
+            <strong class="guide-summary-title">Palettes actives</strong>
+            <p class="guide-summary-copy">
+              La page palettes permet maintenant d'importer des CSV entree / sortie et de rattacher
+              automatiquement la logistique aux PC par numero de serie.
+            </p>
+          </article>
+        </section>
+
+        <section class="admin-card guide-card" id="section-dashboard">
+          <div class="admin-header">
+            <div>
+              <p class="admin-kicker">Pages principales</p>
+              <h2>Comment se repere le site</h2>
+              <p class="admin-sub">
+                Chaque page a un usage differente. Le plus important est de ne pas confondre le tableau
+                de production, les imports historiques et les futurs flux palettes.
+              </p>
+            </div>
+          </div>
+          <div class="guide-page-grid">
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--auto">Production</span>
+              </div>
+              <h3>Tableau de bord</h3>
+              <p class="guide-page-path">/</p>
+              <p>
+                Vue atelier principale. Recherche, filtres, stats, ouverture de fiche poste, rapport
+                manuel, commentaires, PDF, code-barres et historique des passages.
+              </p>
+              <ul class="guide-list">
+                <li>Recherche par serial, hostname, MAC, modele, technicien.</li>
+                <li>Filtres categorie, tags, commentaires.</li>
+                <li>Actions rapides: categorie, commentaires, statut de certains composants.</li>
+              </ul>
+            </article>
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--server">Production</span>
+              </div>
+              <h3>Fiche poste</h3>
+              <p class="guide-page-path">Drawer depuis le tableau</p>
+              <p>
+                Detail complet d'un poste. On y voit les identifiants, le hash Autopilot, le code-barres,
+                les diagnostics, les composants, le BIOS / Wi-Fi et les commentaires.
+              </p>
+              <ul class="guide-list">
+                <li>Telechargement du PDF.</li>
+                <li>Copie du hash Autopilot.</li>
+                <li>Affectation ou correction du lot si droits suffisants.</li>
+              </ul>
+            </article>
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--auto">Production</span>
+              </div>
+              <h3>Lots</h3>
+              <p class="guide-page-path">/lots</p>
+              <p>
+                Gestion dediee des lots de production. Un lot definit un objectif atelier, une priorite
+                et des techniciens assignes.
+              </p>
+              <ul class="guide-list">
+                <li>Creation, pause, priorite.</li>
+                <li>Assignation / retrait des techniciens.</li>
+                <li>Suivi de l'avancement produit.</li>
+              </ul>
+            </article>
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--server">Logistique</span>
+              </div>
+              <h3>Palettes</h3>
+              <p class="guide-page-path">/pallets</p>
+              <p>
+                Page dediee a la logistique. Elle gere les imports CSV entree / sortie et affiche la
+                palette courante rattachee a chaque numero de serie.
+              </p>
+              <ul class="guide-list">
+                <li>Imports CSV separes entree et sortie.</li>
+                <li>Vue courante des palettes et des serials suivis.</li>
+                <li>Historique recent des imports et warnings de parsing.</li>
+              </ul>
+            </article>
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--mixed">Admin</span>
+              </div>
+              <h3>Administration</h3>
+              <p class="guide-page-path">/admin</p>
+              <p>
+                Configuration LDAP et gestion centralisee des lots. Utilisee surtout pour les droits,
+                les comptes et le cadrage production.
+              </p>
+              <ul class="guide-list">
+                <li>Configuration LDAP.</li>
+                <li>Creation rapide de lots.</li>
+                <li>Vue centralisee des assignations.</li>
+              </ul>
+            </article>
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--server">Analyse</span>
+              </div>
+              <h3>Metrics</h3>
+              <p class="guide-page-path">/metrics</p>
+              <p>
+                Dashboard Grafana integre. Sert a voir les tendances qualite, les lots et les postes a
+                corriger au niveau parc.
+              </p>
+              <ul class="guide-list">
+                <li>Vue globale.</li>
+                <li>Corrections et lots.</li>
+                <li>Suivi dans le temps.</li>
+              </ul>
+            </article>
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--manual">Legacy</span>
+              </div>
+              <h3>Imports historiques</h3>
+              <p class="guide-page-path">/legacy-imports</p>
+              <p>
+                Page reservee aux anciens rapports importes depuis des CSV historiques. Ce n'est pas la
+                page d'import logistique palettes.
+              </p>
+              <ul class="guide-list">
+                <li>Permet de separer l'historique de la prod courante.</li>
+                <li>Reprend les memes filtres que le tableau principal.</li>
+                <li>Ne pas utiliser pour les palettes entree / sortie.</li>
+              </ul>
+            </article>
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--server">Trace</span>
+              </div>
+              <h3>Journal</h3>
+              <p class="guide-page-path">/journal</p>
+              <p>
+                Audit des insertions, mises a jour et suppressions sur les tables critiques. Utile pour
+                savoir qui a change quoi et quand.
+              </p>
+              <ul class="guide-list">
+                <li>Machines, reports, LDAP.</li>
+                <li>Filtres par table, action, limite.</li>
+              </ul>
+            </article>
+            <article class="guide-page-item">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--mixed">Info</span>
+              </div>
+              <h3>Patchnotes et suggestions</h3>
+              <p class="guide-page-path">/patchnotes + bouton Suggestion</p>
+              <p>
+                Les patchnotes documentent les changements de version. Le bouton Suggestion permet de
+                remonter une idee ou un besoin depuis les vues principales.
+              </p>
+            </article>
+          </div>
+
+          <div class="guide-callout">
+            <p class="guide-callout-title">Ce que l'atelier peut deja faire depuis le tableau principal</p>
+            <ul class="guide-list">
+              <li>Creer un rapport manuel via "Creer un rapport".</li>
+              <li>Cycler la categorie d'un poste.</li>
+              <li>Renommer un tag si le droit d'edition est present.</li>
+              <li>Ajouter un commentaire rapide dans la carte ou dans la fiche poste.</li>
+              <li>Exporter un PDF dont le nom utilise en priorite le numero de serie.</li>
+              <li>Afficher un code-barres serial avec le libelle modele - serial.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="admin-card guide-card" id="section-lots">
+          <div class="admin-header">
+            <div>
+              <p class="admin-kicker">Production atelier</p>
+              <h2>Comment fonctionnent les lots</h2>
+              <p class="admin-sub">
+                Les lots actuels sont des lots de production. Ils servent a compter l'avancement atelier,
+                pas a representer les palettes logistiques.
+              </p>
+            </div>
+          </div>
+
+          <div class="guide-card-grid">
+            <article class="guide-info-card">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--auto">Automatique</span>
+              </div>
+              <h3>Incrementation</h3>
+              <p>
+                Lorsqu'un technicien est assigne a un lot et qu'un poste remonte un report avec ce
+                technicien, le lot est incremente automatiquement.
+              </p>
+            </article>
+            <article class="guide-info-card">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--manual">Manuel</span>
+              </div>
+              <h3>Correction d'erreur</h3>
+              <p>
+                Si un PC n'a pas de lot ou a le mauvais lot, la fiche poste permet de lui en attribuer
+                un, d'en changer un, ou de remettre "Aucun lot".
+              </p>
+            </article>
+            <article class="guide-info-card">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--server">Regle serveur</span>
+              </div>
+              <h3>Compteurs</h3>
+              <p>
+                Les compteurs sont recalcules cote serveur. Un lot en pause peut etre visible sur une
+                machine, mais n'incremente pas le compteur produit.
+              </p>
+            </article>
+          </div>
+
+          <ol class="guide-steps">
+            <li>Creer le lot avec fournisseur, numero, objectif et priorite.</li>
+            <li>Assigner les techniciens qui doivent alimenter ce lot.</li>
+            <li>Laisser les postes remonter leurs rapports MDT normalement.</li>
+            <li>Corriger manuellement un lot depuis la fiche poste en cas d'erreur de rattachement.</li>
+          </ol>
+
+          <div class="guide-callout guide-callout--warning">
+            <p class="guide-callout-title">Attention</p>
+            <ul class="guide-list">
+              <li>Un lot atelier n'est pas une palette logistique.</li>
+              <li>Le lot sert au suivi de production, pas au stockage ou a l'expedition.</li>
+              <li>Le report-zero existe pour creer un rapport manuel, mais ce n'est pas le flux normal MDT.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="admin-card guide-card" id="section-palettes">
+          <div class="admin-header">
+            <div>
+              <p class="admin-kicker">Logistique</p>
+              <h2>Palettes entree / sortie</h2>
+              <p class="admin-sub">
+                Les palettes logistiques sont maintenant gerees dans une page dediee, distincte des
+                lots de production atelier.
+              </p>
+            </div>
+            <div class="guide-badge-row">
+              <span class="guide-badge guide-badge--server">Disponible</span>
+            </div>
+          </div>
+
+          <div class="guide-card-grid">
+            <article class="guide-info-card">
+              <h3>Flux disponible</h3>
+              <p>
+                Un concept separe de palettes logistiques, distinct des lots de production, avec
+                import CSV en entree et en sortie sur la page `/pallets`.
+              </p>
+            </article>
+            <article class="guide-info-card">
+              <h3>Association automatique</h3>
+              <p>
+                Au passage MDT, la plateforme retrouve la palette par numero de serie et l'associe
+                automatiquement au poste si un mapping existe deja.
+              </p>
+            </article>
+            <article class="guide-info-card">
+              <h3>Historique conserve</h3>
+              <p>
+                L'application conserve l'etat courant de la palette du PC et un historique des imports
+                entree / sortie pour audit logistique.
+              </p>
+            </article>
+          </div>
+
+          <div class="guide-callout guide-callout--warning">
+            <p class="guide-callout-title">Etat actuel</p>
+            <ul class="guide-list">
+              <li>La page palettes est distincte de l'atelier et ne remplace pas les lots.</li>
+              <li>Le menu Imports historiques ne gere toujours pas ce besoin logistique.</li>
+              <li>Ne pas detourner les lots atelier pour simuler des palettes.</li>
+            </ul>
+          </div>
+
+          <p class="guide-code-label">Format CSV cible recommande</p>
+          <pre class="guide-code"><code>serial_number,palette_code
+ABC123,PAL-001
+DEF456,PAL-001
+GHI789,PAL-002</code></pre>
+        </section>
+
+        <section class="admin-card guide-card" id="section-checks">
+          <div class="admin-header">
+            <div>
+              <p class="admin-kicker">Checks effectifs</p>
+              <h2>Ce qui est vraiment remonte par les scripts MDT</h2>
+              <p class="admin-sub">
+                Cette section distingue les tests reelement automatiques, les tests dependants d'un
+                outil annexe et les elements qui restent manuels ou heuristiques.
+              </p>
+            </div>
+          </div>
+
+          <div class="guide-card-grid">
+            <article class="guide-info-card">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--auto">Automatique</span>
+              </div>
+              <h3>Collecte technique</h3>
+              <p>
+                Le script remonte l'identite machine, l'inventaire materiel, les mesures WinSAT, le
+                Wi-Fi, la batterie principale et une partie des peripheriques via WMI/CIM.
+              </p>
+            </article>
+            <article class="guide-info-card">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--mixed">Semi-auto</span>
+              </div>
+              <h3>Dependances externes</h3>
+              <p>
+                Certains checks ne sont fiables que si un outil existe vraiment sur le poste, par
+                exemple le binaire camera ou la capture clavier.
+              </p>
+            </article>
+            <article class="guide-info-card">
+              <div class="guide-badge-row">
+                <span class="guide-badge guide-badge--manual">Manuel</span>
+              </div>
+              <h3>Non automatisable proprement</h3>
+              <p>
+                Les jumpers carte mere, le vrai etat de la pile BIOS ou certains champs BIOS ne sont
+                pas exposes de facon generique et restent non fiables ou manuels.
+              </p>
+            </article>
+          </div>
+
+          <div class="guide-table-wrap">
+            <table class="guide-table">
+              <thead>
+                <tr>
+                  <th>Element</th>
+                  <th>Ce qui est fait aujourd'hui</th>
+                  <th>Mode</th>
+                  <th>Lecture operateur</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Identite machine</td>
+                  <td>Hostname, serial, MAC, modele, vendor, OS, RAM, slots.</td>
+                  <td>Automatique</td>
+                  <td>Collecte standard WMI/CIM, fiable en usage courant.</td>
+                </tr>
+                <tr>
+                  <td>Batterie principale</td>
+                  <td>Battery health et inventaire batterie principale Windows.</td>
+                  <td>Automatique</td>
+                  <td>Concerne la batterie du portable, pas la pile CMOS / BIOS.</td>
+                </tr>
+                <tr>
+                  <td>Disques</td>
+                  <td>Inventaire disques + mesures WinSAT lecture / ecriture.</td>
+                  <td>Automatique + serveur</td>
+                  <td>Le serveur decide ensuite OK / NOK sur la performance disque.</td>
+                </tr>
+                <tr>
+                  <td>CPU / RAM / GPU</td>
+                  <td>Scores et mesures WinSAT, avec fallbacks selon disponibilite.</td>
+                  <td>Automatique</td>
+                  <td>Le statut depend surtout de l'execution WinSAT et de la presence des mesures.</td>
+                </tr>
+                <tr>
+                  <td>Reseau</td>
+                  <td>iperf si configure + ping rapide.</td>
+                  <td>Semi-auto</td>
+                  <td>Sans serveur iperf configure, le resultat peut rester not_tested.</td>
+                </tr>
+                <tr>
+                  <td>Check disque logique</td>
+                  <td>chkdsk selon mode configure.</td>
+                  <td>Semi-auto</td>
+                  <td>Pas toujours lance, depend du mode et du contexte.</td>
+                </tr>
+                <tr>
+                  <td>Diagnostic memoire</td>
+                  <td>Planification mdsched selon options.</td>
+                  <td>Semi-auto</td>
+                  <td>Ce n'est pas un resultat temps reel immediat dans la session courante.</td>
+                </tr>
+                <tr>
+                  <td>Camera</td>
+                  <td>Presence PnP + test fonctionnel si un binaire camera est disponible.</td>
+                  <td>Semi-auto</td>
+                  <td>Sans exe camera, le statut peut rester not_tested meme si la camera existe.</td>
+                </tr>
+                <tr>
+                  <td>USB</td>
+                  <td>Detection du controleur USB.</td>
+                  <td>Automatique</td>
+                  <td>Ce n'est pas un test port par port avec cle USB fonctionnelle.</td>
+                </tr>
+                <tr>
+                  <td>Clavier</td>
+                  <td>Presence Windows + capture interactive sur laptop si activee.</td>
+                  <td>Semi-auto / manuel</td>
+                  <td>La vraie validation utile vient de la capture clavier, pas de la seule presence.</td>
+                </tr>
+                <tr>
+                  <td>Pave tactile</td>
+                  <td>Detection Windows + enrichissement possible par la capture clavier.</td>
+                  <td>Semi-auto / manuel</td>
+                  <td>En cas de detection floue, il faut garder un regard operateur.</td>
+                </tr>
+                <tr>
+                  <td>Lecteur badge</td>
+                  <td>Presence de lecteurs smart card / security devices.</td>
+                  <td>Automatique</td>
+                  <td>Detection de presence surtout, pas une validation fonctionnelle complete.</td>
+                </tr>
+                <tr>
+                  <td>Wi-Fi</td>
+                  <td>Detection de la norme Wi-Fi remontee par Windows.</td>
+                  <td>Automatique + serveur</td>
+                  <td>Le serveur normalise le statut, mais il faut une info exploitable cote client.</td>
+                </tr>
+                <tr>
+                  <td>Langue BIOS</td>
+                  <td>Champ reserve mais actuellement non teste automatiquement.</td>
+                  <td>Manuel</td>
+                  <td>Aujourd'hui la valeur doit etre traitee comme manuelle.</td>
+                </tr>
+                <tr>
+                  <td>Mot de passe BIOS</td>
+                  <td>Champ reserve mais actuellement non teste automatiquement.</td>
+                  <td>Manuel</td>
+                  <td>Le serveur sait normaliser un statut, mais le script ne le decide pas seul.</td>
+                </tr>
+                <tr>
+                  <td>Pile BIOS / CMOS</td>
+                  <td>Heuristique basee sur indices systeme et event logs.</td>
+                  <td>Heuristique</td>
+                  <td>Pas de pourcentage reel fiable. On peut seulement avoir un soupcon de panne.</td>
+                </tr>
+                <tr>
+                  <td>Jumpers carte mere</td>
+                  <td>Rien de generique via PowerShell standard.</td>
+                  <td>Non disponible</td>
+                  <td>Il faudrait des outils constructeur specifiques, parfois inexistants.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="guide-callout">
+            <p class="guide-callout-title">Points de lecture importants</p>
+            <ul class="guide-list">
+              <li>Sur desktop, les tests camera / USB / clavier / pave / badge sont volontairement sautes.</li>
+              <li>Le statut USB actuel correspond surtout a une presence de controleur, pas a un vrai test port.</li>
+              <li>Le statut clavier / pave devient pertinent quand la capture interactive a bien tourne.</li>
+              <li>La pile BIOS n'a pas de pourcentage universel exploitable via PowerShell classique.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="admin-card guide-card" id="section-status">
+          <div class="admin-header">
+            <div>
+              <p class="admin-kicker">Lecture des statuts</p>
+              <h2>Comment interpreter OK, NOK, not_tested et absent</h2>
+              <p class="admin-sub">
+                Le meme mot ne veut pas toujours dire la meme intensite de preuve. Il faut toujours le
+                lire avec la nature du check.
+              </p>
+            </div>
+          </div>
+
+          <div class="guide-status-grid">
+            <article class="guide-status-card">
+              <span class="guide-badge guide-badge--auto">OK</span>
+              <p>
+                Le systeme considere le check satisfaisant. Pour un disque, c'est un verdict serveur sur
+                la metrique. Pour un badge ou un USB, cela peut n'etre qu'une presence detectee.
+              </p>
+            </article>
+            <article class="guide-status-card">
+              <span class="guide-badge guide-badge--manual">NOK</span>
+              <p>
+                Le check a explicitement echoue ou la valeur est sous seuil. Exemple actuel: disque trop
+                lent cote serveur.
+              </p>
+            </article>
+            <article class="guide-status-card">
+              <span class="guide-badge guide-badge--mixed">not_tested</span>
+              <p>
+                Le test n'a pas pu etre mene, n'etait pas configure, ou est reserve a une saisie
+                operateur. Ce n'est ni un OK ni un NOK.
+              </p>
+            </article>
+            <article class="guide-status-card">
+              <span class="guide-badge guide-badge--server">absent</span>
+              <p>
+                Le composant n'a pas ete detecte. C'est utile pour badge, camera ou peripheriques, mais
+                ce n'est pas applicable a tous les checks.
+              </p>
+            </article>
+          </div>
+
+          <div class="guide-callout">
+            <p class="guide-callout-title">Regles serveur deja actives</p>
+            <ul class="guide-list">
+              <li>Lecture disque &lt; 400 MB/s = NOK.</li>
+              <li>Ecriture disque &lt; 350 MB/s = NOK.</li>
+              <li>Le serveur ecrase le verdict disque client et l'UI affiche ce verdict serveur.</li>
+              <li>Le serveur normalise aussi certaines informations BIOS / Wi-Fi lorsqu'elles existent.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="admin-card guide-card" id="section-procedures">
+          <div class="admin-header">
+            <div>
+              <p class="admin-kicker">Mode operatoire</p>
+              <h2>Procedures types</h2>
+              <p class="admin-sub">
+                Resume rapide de ce que doit faire chaque profil dans les scenarios les plus courants.
+              </p>
+            </div>
+          </div>
+
+          <div class="guide-card-grid">
+            <article class="guide-info-card">
+              <h3>Atelier - passage standard</h3>
+              <ol class="guide-list guide-list--ordered">
+                <li>Lancer le MDT avec le bon script.</li>
+                <li>Attendre la remontee du report.</li>
+                <li>Ouvrir la fiche poste si un doute existe.</li>
+                <li>Verifier surtout les checks semi-auto ou manuels.</li>
+                <li>Ajouter un commentaire si un point doit etre trace.</li>
+              </ol>
+            </article>
+            <article class="guide-info-card">
+              <h3>Atelier - correction d'un lot</h3>
+              <ol class="guide-list guide-list--ordered">
+                <li>Ouvrir la fiche poste.</li>
+                <li>Changer le selecteur Lot.</li>
+                <li>Cliquer sur Appliquer.</li>
+                <li>Verifier ensuite le libelle du lot et le compteur correspondant.</li>
+              </ol>
+            </article>
+            <article class="guide-info-card">
+              <h3>Qualite - analyse</h3>
+              <ol class="guide-list guide-list--ordered">
+                <li>Utiliser Metrics pour la tendance globale.</li>
+                <li>Utiliser Journal pour tracer une action precise.</li>
+                <li>Utiliser Patchnotes pour connaitre les changements de logique.</li>
+              </ol>
+            </article>
+            <article class="guide-info-card">
+              <h3>Logistique - palettes ciblees</h3>
+              <ol class="guide-list guide-list--ordered">
+                <li>Importer un CSV entree serial - palette.</li>
+                <li>Importer un CSV sortie quand la palette quitte l'entrepot.</li>
+                <li>Laisser le MDT associer automatiquement la palette par serial.</li>
+              </ol>
+              <p class="guide-inline-note">Ce flux est disponible via la page `/pallets`.</p>
+            </article>
+          </div>
+
+          <div class="guide-callout guide-callout--warning">
+            <p class="guide-callout-title">Ce qu'il faut remonter a la main aujourd'hui</p>
+            <ul class="guide-list">
+              <li>Tout doute sur la langue BIOS ou le mot de passe BIOS.</li>
+              <li>Les anomalies clavier / pave si la capture interactive n'a pas tourne correctement.</li>
+              <li>Les cas ou la camera existe mais n'a pas pu etre testee fonctionnellement.</li>
+              <li>Tout sujet pile BIOS, jumpers ou comportement carte mere non expose par Windows.</li>
+            </ul>
+          </div>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

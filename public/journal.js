@@ -17,6 +17,10 @@ const actionSelect = document.getElementById('log-action');
 const limitSelect = document.getElementById('log-limit');
 const refreshBtn = document.getElementById('refresh-btn');
 const lastUpdatedEl = document.getElementById('last-updated');
+const totalLogsEl = document.getElementById('journal-total-logs');
+const totalTablesEl = document.getElementById('journal-total-tables');
+const totalActorsEl = document.getElementById('journal-total-actors');
+const lastActionEl = document.getElementById('journal-last-action');
 
 const actionLabels = {
   INSERT: 'Ajout',
@@ -27,7 +31,11 @@ const actionLabels = {
 const tableLabels = {
   machines: 'Machines',
   reports: 'Rapports',
-  ldap_settings: 'Config LDAP'
+  ldap_settings: 'Config LDAP',
+  pallets: 'Palettes',
+  pallet_imports: 'Imports palettes',
+  pallet_serials: 'Liaisons palettes',
+  pallet_movements: 'Mouvements palettes'
 };
 
 const componentStatusLabels = {
@@ -48,6 +56,16 @@ const fieldLabels = {
   mac_addresses: 'MACs',
   serial_number: 'Serie',
   category: 'Categorie',
+  pallet_id: 'Palette',
+  pallet_status: 'Statut palette',
+  code: 'Code palette',
+  code_key: 'Cle palette',
+  import_type: 'Type import',
+  row_count: 'Lignes',
+  applied_count: 'Lignes appliquees',
+  skipped_count: 'Lignes ignorees',
+  movement_type: 'Type mouvement',
+  last_import_id: 'Dernier import',
   model: 'Modele',
   vendor: 'Constructeur',
   technician: 'Technicien',
@@ -66,6 +84,8 @@ const fieldLabels = {
   components: 'Composants',
   payload: 'Payload',
   last_ip: 'IP',
+  created_by: 'Cree par',
+  updated_by: 'Mis a jour par',
   comment: 'Commentaire',
   commented_at: 'Commentaire date',
   enabled: 'Actif',
@@ -273,6 +293,43 @@ function updateLastUpdated() {
   lastUpdatedEl.textContent = `Derniere mise a jour : ${formatDateTime(state.lastUpdated)}`;
 }
 
+function updateSummary() {
+  const logs = Array.isArray(state.logs) ? state.logs : [];
+
+  if (totalLogsEl) {
+    totalLogsEl.textContent = String(logs.length);
+  }
+
+  if (totalTablesEl) {
+    const tables = new Set(
+      logs
+        .map((log) => (log && log.table ? String(log.table).trim() : ''))
+        .filter(Boolean)
+    );
+    totalTablesEl.textContent = String(tables.size);
+  }
+
+  if (totalActorsEl) {
+    const actors = new Set(
+      logs
+        .map((log) => {
+          const actor = log && log.actor ? String(log.actor).trim() : 'systeme';
+          const actorType = log && log.actorType ? String(log.actorType).trim() : '';
+          return `${actor}::${actorType}`;
+        })
+        .filter(Boolean)
+    );
+    totalActorsEl.textContent = String(actors.size);
+  }
+
+  if (lastActionEl) {
+    const first = logs[0];
+    lastActionEl.textContent = first
+      ? `${formatAction(first.action)} / ${formatTable(first.table)}`
+      : '--';
+  }
+}
+
 function buildQuery() {
   const params = new URLSearchParams();
   if (state.filters.q) {
@@ -307,8 +364,11 @@ async function fetchLogs() {
     state.lastUpdated = new Date();
     renderLogs();
     updateLastUpdated();
+    updateSummary();
   } catch (error) {
+    state.logs = [];
     listEl.innerHTML = '<div class="empty">Impossible de charger le journal.</div>';
+    updateSummary();
   }
 }
 

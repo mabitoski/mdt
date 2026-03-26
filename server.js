@@ -899,6 +899,8 @@ async function initDb() {
       tag TEXT,
       tag_id UUID,
       lot_id UUID,
+      pallet_id UUID,
+      pallet_status TEXT,
       model TEXT,
       vendor TEXT,
       technician TEXT,
@@ -932,6 +934,8 @@ async function initDb() {
       tag TEXT,
       tag_id UUID,
       lot_id UUID,
+      pallet_id UUID,
+      pallet_status TEXT,
       model TEXT,
       vendor TEXT,
       technician TEXT,
@@ -959,9 +963,13 @@ async function initDb() {
   await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS tag TEXT;`);
   await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS tag_id UUID;`);
   await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS lot_id UUID;`);
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS pallet_id UUID;`);
+  await pool.query(`ALTER TABLE machines ADD COLUMN IF NOT EXISTS pallet_status TEXT;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag TEXT;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS tag_id UUID;`);
   await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS lot_id UUID;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS pallet_id UUID;`);
+  await pool.query(`ALTER TABLE reports ADD COLUMN IF NOT EXISTS pallet_status TEXT;`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tags (
@@ -1010,6 +1018,58 @@ async function initDb() {
       is_double_check BOOLEAN NOT NULL DEFAULT false,
       counted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE(lot_id, machine_key)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pallets (
+      id UUID PRIMARY KEY,
+      code TEXT NOT NULL,
+      code_key TEXT NOT NULL UNIQUE,
+      last_movement_type TEXT CHECK (last_movement_type IS NULL OR last_movement_type IN ('entry', 'exit')),
+      last_movement_at TIMESTAMPTZ,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pallet_imports (
+      id UUID PRIMARY KEY,
+      import_type TEXT NOT NULL CHECK (import_type IN ('entry', 'exit')),
+      file_name TEXT,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      applied_count INTEGER NOT NULL DEFAULT 0,
+      skipped_count INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      summary TEXT
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pallet_serials (
+      serial_number TEXT PRIMARY KEY,
+      pallet_id UUID NOT NULL REFERENCES pallets(id) ON DELETE CASCADE,
+      movement_type TEXT NOT NULL CHECK (movement_type IN ('entry', 'exit')),
+      machine_key TEXT,
+      last_import_id UUID REFERENCES pallet_imports(id) ON DELETE SET NULL,
+      updated_by TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pallet_movements (
+      id BIGSERIAL PRIMARY KEY,
+      pallet_id UUID NOT NULL REFERENCES pallets(id) ON DELETE CASCADE,
+      serial_number TEXT NOT NULL,
+      machine_key TEXT,
+      import_id UUID REFERENCES pallet_imports(id) ON DELETE SET NULL,
+      movement_type TEXT NOT NULL CHECK (movement_type IN ('entry', 'exit')),
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
@@ -1158,12 +1218,14 @@ async function initDb() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_tag ON machines(tag)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_tag_id ON machines(tag_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_lot_id ON machines(lot_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_pallet_id ON machines(pallet_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_machine_key ON reports(machine_key)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_category ON reports(category)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_tag ON reports(tag)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_tag_id ON reports(tag_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_lot_id ON reports(lot_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_pallet_id ON reports(pallet_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_last_seen ON reports(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_technician ON reports(technician)');
   await pool.query(
@@ -1174,6 +1236,15 @@ async function initDb() {
   );
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_lots_priority_active ON lots (is_paused, priority, created_at)'
+  );
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_pallets_last_movement_at ON pallets(last_movement_at DESC)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_pallet_serials_pallet_id ON pallet_serials(pallet_id)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_pallet_serials_machine_key ON pallet_serials(machine_key)');
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_pallet_movements_pallet_created_at ON pallet_movements(pallet_id, created_at DESC)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_pallet_movements_serial_created_at ON pallet_movements(serial_number, created_at DESC)'
   );
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_lot_assignments_tech_key ON lot_assignments (technician_key)'
@@ -1700,103 +1771,8 @@ const upsertMachineQuery = `
     tag,
     tag_id,
     lot_id,
-    model,
-    vendor,
-    technician,
-    os_version,
-    ram_mb,
-    ram_slots_total,
-    ram_slots_free,
-    battery_health,
-    camera_status,
-    usb_status,
-    keyboard_status,
-    pad_status,
-    badge_reader_status,
-    last_seen,
-    created_at,
-    components,
-    payload,
-    last_ip
-  ) VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    $5,
-    $6,
-    $7,
-    $8,
-    $9,
-    $10,
-    $11,
-    $12,
-    $13,
-    $14,
-    $15,
-    $16,
-    $17,
-    $18,
-    $19,
-    $20,
-    $21,
-    $22,
-    $23,
-    $24,
-    $25,
-    $26,
-    $27
-  )
-  ON CONFLICT(machine_key) DO UPDATE SET
-    hostname = COALESCE(excluded.hostname, machines.hostname),
-    mac_address = COALESCE(excluded.mac_address, machines.mac_address),
-    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
-    serial_number = COALESCE(excluded.serial_number, machines.serial_number),
-    category = CASE
-      WHEN excluded.category != 'unknown' THEN excluded.category
-      ELSE machines.category
-    END,
-    tag = COALESCE(excluded.tag, machines.tag),
-    tag_id = COALESCE(excluded.tag_id, machines.tag_id),
-    lot_id = COALESCE(excluded.lot_id, machines.lot_id),
-    model = COALESCE(excluded.model, machines.model),
-    vendor = COALESCE(excluded.vendor, machines.vendor),
-    technician = COALESCE(excluded.technician, machines.technician),
-    os_version = COALESCE(excluded.os_version, machines.os_version),
-    ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
-    ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
-    ram_slots_free = COALESCE(excluded.ram_slots_free, machines.ram_slots_free),
-    battery_health = COALESCE(excluded.battery_health, machines.battery_health),
-    camera_status = COALESCE(excluded.camera_status, machines.camera_status),
-    usb_status = COALESCE(excluded.usb_status, machines.usb_status),
-    keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
-    pad_status = COALESCE(excluded.pad_status, machines.pad_status),
-    badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
-    last_seen = excluded.last_seen,
-    components = CASE
-      WHEN excluded.components IS NULL THEN machines.components
-      ELSE (
-        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
-        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
-      )::text
-    END,
-    payload = COALESCE(excluded.payload, machines.payload),
-    last_ip = excluded.last_ip
-  RETURNING id
-`;
-
-const upsertReportQuery = `
-  INSERT INTO reports (
-    id,
-    machine_key,
-    hostname,
-    mac_address,
-    mac_addresses,
-    serial_number,
-    category,
-    tag,
-    tag_id,
-    lot_id,
+    pallet_id,
+    pallet_status,
     model,
     vendor,
     technician,
@@ -1843,7 +1819,112 @@ const upsertReportQuery = `
     $25,
     $26,
     $27,
-    $28
+    $28,
+    $29
+  )
+  ON CONFLICT(machine_key) DO UPDATE SET
+    hostname = COALESCE(excluded.hostname, machines.hostname),
+    mac_address = COALESCE(excluded.mac_address, machines.mac_address),
+    mac_addresses = COALESCE(excluded.mac_addresses, machines.mac_addresses),
+    serial_number = COALESCE(excluded.serial_number, machines.serial_number),
+    category = CASE
+      WHEN excluded.category != 'unknown' THEN excluded.category
+      ELSE machines.category
+    END,
+    tag = COALESCE(excluded.tag, machines.tag),
+    tag_id = COALESCE(excluded.tag_id, machines.tag_id),
+    lot_id = COALESCE(excluded.lot_id, machines.lot_id),
+    pallet_id = COALESCE(excluded.pallet_id, machines.pallet_id),
+    pallet_status = COALESCE(excluded.pallet_status, machines.pallet_status),
+    model = COALESCE(excluded.model, machines.model),
+    vendor = COALESCE(excluded.vendor, machines.vendor),
+    technician = COALESCE(excluded.technician, machines.technician),
+    os_version = COALESCE(excluded.os_version, machines.os_version),
+    ram_mb = COALESCE(excluded.ram_mb, machines.ram_mb),
+    ram_slots_total = COALESCE(excluded.ram_slots_total, machines.ram_slots_total),
+    ram_slots_free = COALESCE(excluded.ram_slots_free, machines.ram_slots_free),
+    battery_health = COALESCE(excluded.battery_health, machines.battery_health),
+    camera_status = COALESCE(excluded.camera_status, machines.camera_status),
+    usb_status = COALESCE(excluded.usb_status, machines.usb_status),
+    keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
+    pad_status = COALESCE(excluded.pad_status, machines.pad_status),
+    badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
+    last_seen = excluded.last_seen,
+    components = CASE
+      WHEN excluded.components IS NULL THEN machines.components
+      ELSE (
+        COALESCE(NULLIF(machines.components, ''), '{}')::jsonb ||
+        COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
+      )::text
+    END,
+    payload = COALESCE(excluded.payload, machines.payload),
+    last_ip = excluded.last_ip
+  RETURNING id
+`;
+
+const upsertReportQuery = `
+  INSERT INTO reports (
+    id,
+    machine_key,
+    hostname,
+    mac_address,
+    mac_addresses,
+    serial_number,
+    category,
+    tag,
+    tag_id,
+    lot_id,
+    pallet_id,
+    pallet_status,
+    model,
+    vendor,
+    technician,
+    os_version,
+    ram_mb,
+    ram_slots_total,
+    ram_slots_free,
+    battery_health,
+    camera_status,
+    usb_status,
+    keyboard_status,
+    pad_status,
+    badge_reader_status,
+    last_seen,
+    created_at,
+    components,
+    payload,
+    last_ip
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12,
+    $13,
+    $14,
+    $15,
+    $16,
+    $17,
+    $18,
+    $19,
+    $20,
+    $21,
+    $22,
+    $23,
+    $24,
+    $25,
+    $26,
+    $27,
+    $28,
+    $29,
+    $30
   )
   ON CONFLICT(id) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, reports.hostname),
@@ -1857,6 +1938,8 @@ const upsertReportQuery = `
     tag = COALESCE(excluded.tag, reports.tag),
     tag_id = COALESCE(excluded.tag_id, reports.tag_id),
     lot_id = COALESCE(excluded.lot_id, reports.lot_id),
+    pallet_id = COALESCE(excluded.pallet_id, reports.pallet_id),
+    pallet_status = COALESCE(excluded.pallet_status, reports.pallet_status),
     model = COALESCE(excluded.model, reports.model),
     vendor = COALESCE(excluded.vendor, reports.vendor),
     technician = COALESCE(excluded.technician, reports.technician),
@@ -1895,12 +1978,16 @@ const listReportsQuery = `
     tag,
     tag_id,
     reports.lot_id,
+    reports.pallet_id,
+    reports.pallet_status,
     COALESCE(tags.name, reports.tag) AS tag_name,
     lots.supplier AS lot_supplier,
     lots.lot_number AS lot_number,
     lots.target_count AS lot_target_count,
     lots.produced_count AS lot_produced_count,
     lots.is_paused AS lot_is_paused,
+    pallets.code AS pallet_code,
+    pallets.last_movement_at AS pallet_last_movement_at,
     model,
     vendor,
     technician,
@@ -1921,6 +2008,7 @@ const listReportsQuery = `
   FROM reports
   LEFT JOIN tags ON tags.id = reports.tag_id
   LEFT JOIN lots ON lots.id = reports.lot_id
+  LEFT JOIN pallets ON pallets.id = reports.pallet_id
   ORDER BY reports.last_seen DESC
 `;
 
@@ -1936,12 +2024,16 @@ const getReportByIdQuery = `
     reports.tag,
     reports.tag_id,
     reports.lot_id AS report_lot_id,
+    reports.pallet_id AS report_pallet_id,
+    reports.pallet_status AS report_pallet_status,
     COALESCE(tags.name, reports.tag) AS report_tag_name,
     report_lot.supplier AS report_lot_supplier,
     report_lot.lot_number AS report_lot_number,
     report_lot.target_count AS report_lot_target_count,
     report_lot.produced_count AS report_lot_produced_count,
     report_lot.is_paused AS report_lot_is_paused,
+    report_pallet.code AS report_pallet_code,
+    report_pallet.last_movement_at AS report_pallet_last_movement_at,
     reports.model,
     reports.vendor,
     reports.technician,
@@ -1967,11 +2059,15 @@ const getReportByIdQuery = `
     machines.tag AS machine_tag,
     machines.tag_id AS machine_tag_id,
     machines.lot_id AS machine_lot_id,
+    machines.pallet_id AS machine_pallet_id,
+    machines.pallet_status AS machine_pallet_status,
     machine_lot.supplier AS machine_lot_supplier,
     machine_lot.lot_number AS machine_lot_number,
     machine_lot.target_count AS machine_lot_target_count,
     machine_lot.produced_count AS machine_lot_produced_count,
     machine_lot.is_paused AS machine_lot_is_paused,
+    machine_pallet.code AS machine_pallet_code,
+    machine_pallet.last_movement_at AS machine_pallet_last_movement_at,
     machines.payload AS machine_payload,
     machines.components AS machine_components
   FROM reports
@@ -1979,6 +2075,8 @@ const getReportByIdQuery = `
   LEFT JOIN tags ON tags.id = reports.tag_id
   LEFT JOIN lots report_lot ON report_lot.id = reports.lot_id
   LEFT JOIN lots machine_lot ON machine_lot.id = machines.lot_id
+  LEFT JOIN pallets report_pallet ON report_pallet.id = reports.pallet_id
+  LEFT JOIN pallets machine_pallet ON machine_pallet.id = machines.pallet_id
   WHERE reports.id = $1
 `;
 
@@ -2626,6 +2724,490 @@ function mapLotRowForResponse(row) {
     updatedAt: row.updated_at || null,
     assignments: normalizeLotAssignments(row.assignments)
   };
+}
+
+function normalizePalletCode(value) {
+  const code = cleanString(value, 96);
+  if (!code) {
+    return null;
+  }
+  return code.toUpperCase();
+}
+
+function normalizePalletCodeKey(value) {
+  const code = normalizePalletCode(value);
+  return code ? code.toLowerCase() : null;
+}
+
+function normalizePalletMovementType(value) {
+  if (value == null) {
+    return null;
+  }
+  const lowered = String(value).trim().toLowerCase();
+  if (!lowered) {
+    return null;
+  }
+  if (['entry', 'entree', 'entrée', 'in', 'stock', 'in_stock'].includes(lowered)) {
+    return 'entry';
+  }
+  if (['exit', 'sortie', 'out', 'shipped', 'expedition', 'expédition'].includes(lowered)) {
+    return 'exit';
+  }
+  return null;
+}
+
+function getPalletMovementLabel(value) {
+  return normalizePalletMovementType(value) === 'exit' ? 'Sortie' : 'Entree';
+}
+
+function buildPalletLabel(code, movementType) {
+  const palletCode = normalizePalletCode(code) || 'Palette inconnue';
+  const typeLabel = movementType ? getPalletMovementLabel(movementType) : null;
+  return typeLabel ? `${palletCode} - ${typeLabel}` : palletCode;
+}
+
+function normalizePalletFromRow(row) {
+  if (!row) {
+    return null;
+  }
+  const palletId = normalizeUuid(row.pallet_id || row.report_pallet_id || row.machine_pallet_id || row.id);
+  const palletCode =
+    normalizePalletCode(
+      row.pallet_code ||
+        row.report_pallet_code ||
+        row.machine_pallet_code ||
+        row.code
+    ) || null;
+  const movementType = normalizePalletMovementType(
+    row.pallet_status ||
+      row.report_pallet_status ||
+      row.machine_pallet_status ||
+      row.movement_type ||
+      row.last_movement_type
+  );
+  const lastMovementAt =
+    row.pallet_last_movement_at ||
+    row.report_pallet_last_movement_at ||
+    row.machine_pallet_last_movement_at ||
+    row.last_movement_at ||
+    row.updated_at ||
+    null;
+  if (!palletId && !palletCode && !movementType) {
+    return null;
+  }
+  return {
+    id: palletId || null,
+    code: palletCode,
+    status: movementType || null,
+    statusLabel: movementType ? getPalletMovementLabel(movementType) : null,
+    label: buildPalletLabel(palletCode, movementType),
+    lastMovementAt,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null
+  };
+}
+
+function mapPalletRowForResponse(row) {
+  const pallet = normalizePalletFromRow(row);
+  if (!pallet) {
+    return null;
+  }
+  return {
+    ...pallet,
+    totalCount: Number.parseInt(row.total_count || '0', 10) || 0,
+    entryCount: Number.parseInt(row.entry_count || '0', 10) || 0,
+    exitCount: Number.parseInt(row.exit_count || '0', 10) || 0,
+    linkedCount: Number.parseInt(row.linked_count || '0', 10) || 0,
+    createdBy: row.created_by || null
+  };
+}
+
+function mapPalletImportRowForResponse(row) {
+  if (!row) {
+    return null;
+  }
+  const importType = normalizePalletMovementType(row.import_type);
+  return {
+    id: normalizeUuid(row.id) || null,
+    importType: importType || null,
+    importTypeLabel: importType ? getPalletMovementLabel(importType) : null,
+    fileName: row.file_name || null,
+    rowCount: Number.parseInt(row.row_count || '0', 10) || 0,
+    appliedCount: Number.parseInt(row.applied_count || '0', 10) || 0,
+    skippedCount: Number.parseInt(row.skipped_count || '0', 10) || 0,
+    createdBy: row.created_by || null,
+    createdAt: row.created_at || null,
+    summary: (() => {
+      if (!row.summary) {
+        return null;
+      }
+      try {
+        return JSON.parse(row.summary);
+      } catch (error) {
+        return null;
+      }
+    })()
+  };
+}
+
+function detectCsvDelimiter(text) {
+  const sampleLine = String(text || '')
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .find((line) => line && line.trim());
+  if (!sampleLine) {
+    return ',';
+  }
+  const counts = [
+    [',', (sampleLine.match(/,/g) || []).length],
+    [';', (sampleLine.match(/;/g) || []).length],
+    ['\t', (sampleLine.match(/\t/g) || []).length]
+  ];
+  counts.sort((a, b) => b[1] - a[1]);
+  return counts[0][1] > 0 ? counts[0][0] : ',';
+}
+
+function parseCsvRows(text, delimiter = ',') {
+  const source = String(text || '').replace(/^\uFEFF/, '');
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (inQuotes) {
+      if (char === '"') {
+        if (source[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (char === delimiter) {
+      row.push(field);
+      field = '';
+      continue;
+    }
+    if (char === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+      continue;
+    }
+    if (char === '\r') {
+      continue;
+    }
+    field += char;
+  }
+
+  row.push(field);
+  if (row.some((item) => String(item || '').trim() !== '') || rows.length === 0) {
+    rows.push(row);
+  }
+  return rows;
+}
+
+function normalizeCsvHeader(value) {
+  if (value == null) {
+    return '';
+  }
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function extractPalletCsvRows(csvText) {
+  const rows = parseCsvRows(csvText, detectCsvDelimiter(csvText))
+    .map((row) => row.map((cell) => (cell == null ? '' : String(cell).trim())))
+    .filter((row) => row.some((cell) => cell !== ''));
+  if (!rows.length) {
+    return { ok: false, error: 'empty_csv', rows: [], errors: [{ line: 1, error: 'Fichier CSV vide.' }] };
+  }
+
+  const headerCandidates = rows[0].map((cell) => normalizeCsvHeader(cell));
+  const serialHeaders = new Set([
+    'serial',
+    'serial_number',
+    'serialnumber',
+    'numero_serie',
+    'numero_de_serie',
+    'sn'
+  ]);
+  const palletHeaders = new Set([
+    'palette',
+    'palette_code',
+    'palettecode',
+    'pallet',
+    'pallet_code',
+    'palletcode'
+  ]);
+  let serialIndex = headerCandidates.findIndex((cell) => serialHeaders.has(cell));
+  let palletIndex = headerCandidates.findIndex((cell) => palletHeaders.has(cell));
+  let dataStart = 1;
+
+  if (serialIndex === -1 || palletIndex === -1) {
+    serialIndex = 0;
+    palletIndex = rows[0].length > 1 ? 1 : -1;
+    dataStart = 0;
+  }
+
+  if (serialIndex === -1 || palletIndex === -1) {
+    return {
+      ok: false,
+      error: 'invalid_columns',
+      rows: [],
+      errors: [{ line: 1, error: 'Colonnes attendues: serial_number et palette_code.' }]
+    };
+  }
+
+  const records = [];
+  const errors = [];
+  const seenSerials = new Set();
+
+  for (let index = dataStart; index < rows.length; index += 1) {
+    const lineNumber = index + 1;
+    const row = rows[index];
+    const serialNumber = normalizeSerial(row[serialIndex]);
+    const palletCode = normalizePalletCode(row[palletIndex]);
+
+    if (!serialNumber && !palletCode) {
+      continue;
+    }
+    if (!serialNumber) {
+      errors.push({ line: lineNumber, error: 'Numero de serie manquant ou invalide.' });
+      continue;
+    }
+    if (!palletCode) {
+      errors.push({ line: lineNumber, error: 'Code palette manquant ou invalide.', serialNumber });
+      continue;
+    }
+    if (seenSerials.has(serialNumber)) {
+      errors.push({ line: lineNumber, error: 'Numero de serie duplique dans le CSV.', serialNumber });
+      continue;
+    }
+    seenSerials.add(serialNumber);
+    records.push({ lineNumber, serialNumber, palletCode });
+  }
+
+  return { ok: true, rows: records, errors };
+}
+
+async function listPalletsWithStats(client) {
+  const result = await client.query(`
+    SELECT
+      pallets.id,
+      pallets.code,
+      pallets.last_movement_type,
+      pallets.last_movement_at,
+      pallets.created_by,
+      pallets.created_at,
+      pallets.updated_at,
+      COALESCE(stats.total_count, 0) AS total_count,
+      COALESCE(stats.entry_count, 0) AS entry_count,
+      COALESCE(stats.exit_count, 0) AS exit_count,
+      COALESCE(stats.linked_count, 0) AS linked_count
+    FROM pallets
+    LEFT JOIN (
+      SELECT
+        pallet_id,
+        COUNT(*)::integer AS total_count,
+        COUNT(*) FILTER (WHERE movement_type = 'entry')::integer AS entry_count,
+        COUNT(*) FILTER (WHERE movement_type = 'exit')::integer AS exit_count,
+        COUNT(*) FILTER (WHERE machine_key IS NOT NULL AND machine_key <> '')::integer AS linked_count
+      FROM pallet_serials
+      GROUP BY pallet_id
+    ) stats ON stats.pallet_id = pallets.id
+    ORDER BY pallets.last_movement_at DESC NULLS LAST, pallets.created_at DESC
+  `);
+  return result.rows || [];
+}
+
+async function listRecentPalletImports(client, limit = 12) {
+  const boundedLimit = Math.min(Math.max(Number.parseInt(limit || '12', 10) || 12, 1), 50);
+  const result = await client.query(
+    `
+      SELECT
+        id,
+        import_type,
+        file_name,
+        row_count,
+        applied_count,
+        skipped_count,
+        created_by,
+        created_at,
+        summary
+      FROM pallet_imports
+      ORDER BY created_at DESC
+      LIMIT $1
+    `,
+    [boundedLimit]
+  );
+  return result.rows || [];
+}
+
+async function syncPalletOnExistingRows(client, { serialNumber, palletId = null, palletStatus = null } = {}) {
+  const serial = normalizeSerial(serialNumber);
+  if (!serial) {
+    return;
+  }
+  await client.query(
+    'UPDATE machines SET pallet_id = $2, pallet_status = $3 WHERE serial_number = $1',
+    [serial, palletId, palletStatus]
+  );
+  await client.query(
+    'UPDATE reports SET pallet_id = $2, pallet_status = $3 WHERE serial_number = $1',
+    [serial, palletId, palletStatus]
+  );
+}
+
+async function upsertPallet(client, { code, movementType, actor = null, timestamp = null } = {}) {
+  const normalizedCode = normalizePalletCode(code);
+  const normalizedType = normalizePalletMovementType(movementType);
+  if (!normalizedCode || !normalizedType) {
+    return null;
+  }
+  const codeKey = normalizePalletCodeKey(normalizedCode);
+  const movedAt = timestamp || new Date().toISOString();
+  const result = await client.query(
+    `
+      INSERT INTO pallets (
+        id,
+        code,
+        code_key,
+        last_movement_type,
+        last_movement_at,
+        created_by,
+        created_at,
+        updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $5, $5)
+      ON CONFLICT (code_key) DO UPDATE SET
+        code = EXCLUDED.code,
+        last_movement_type = EXCLUDED.last_movement_type,
+        last_movement_at = EXCLUDED.last_movement_at,
+        updated_at = EXCLUDED.updated_at
+      RETURNING *
+    `,
+    [generateUuid(), normalizedCode, codeKey, normalizedType, movedAt, actor || null]
+  );
+  return result.rows && result.rows[0] ? result.rows[0] : null;
+}
+
+async function applyPalletAssignment(
+  client,
+  {
+    serialNumber,
+    pallet,
+    movementType,
+    importId = null,
+    machineKey = null,
+    actor = null,
+    timestamp = null
+  } = {}
+) {
+  const serial = normalizeSerial(serialNumber);
+  const normalizedType = normalizePalletMovementType(movementType);
+  const palletId = normalizeUuid(pallet && pallet.id ? pallet.id : null);
+  if (!serial || !normalizedType || !palletId) {
+    return null;
+  }
+  const movedAt = timestamp || new Date().toISOString();
+  await client.query(
+    `
+      INSERT INTO pallet_serials (
+        serial_number,
+        pallet_id,
+        movement_type,
+        machine_key,
+        last_import_id,
+        updated_by,
+        updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (serial_number) DO UPDATE SET
+        pallet_id = EXCLUDED.pallet_id,
+        movement_type = EXCLUDED.movement_type,
+        machine_key = COALESCE(EXCLUDED.machine_key, pallet_serials.machine_key),
+        last_import_id = EXCLUDED.last_import_id,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = EXCLUDED.updated_at
+    `,
+    [serial, palletId, normalizedType, machineKey || null, normalizeUuid(importId), actor || null, movedAt]
+  );
+  await client.query(
+    `
+      INSERT INTO pallet_movements (
+        pallet_id,
+        serial_number,
+        machine_key,
+        import_id,
+        movement_type,
+        created_by,
+        created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `,
+    [palletId, serial, machineKey || null, normalizeUuid(importId), normalizedType, actor || null, movedAt]
+  );
+  await syncPalletOnExistingRows(client, {
+    serialNumber: serial,
+    palletId,
+    palletStatus: normalizedType
+  });
+  return normalizedType;
+}
+
+async function resolvePalletForSerial(client, { serialNumber, machineKey = null, actor = null } = {}) {
+  const serial = normalizeSerial(serialNumber);
+  if (!serial) {
+    return null;
+  }
+  const result = await client.query(
+    `
+      SELECT
+        pallet_serials.serial_number,
+        pallet_serials.pallet_id,
+        pallet_serials.movement_type AS pallet_status,
+        pallet_serials.machine_key AS pallet_machine_key,
+        pallet_serials.updated_at AS pallet_last_movement_at,
+        pallets.code AS pallet_code,
+        pallets.last_movement_at
+      FROM pallet_serials
+      INNER JOIN pallets ON pallets.id = pallet_serials.pallet_id
+      WHERE pallet_serials.serial_number = $1
+      LIMIT 1
+    `,
+    [serial]
+  );
+  const row = result.rows && result.rows[0] ? result.rows[0] : null;
+  if (!row) {
+    return null;
+  }
+  if (machineKey && row.pallet_machine_key !== machineKey) {
+    await client.query(
+      `
+        UPDATE pallet_serials
+        SET machine_key = $2,
+            updated_by = COALESCE($3, updated_by),
+            updated_at = NOW()
+        WHERE serial_number = $1
+      `,
+      [serial, machineKey, actor || null]
+    );
+  }
+  return normalizePalletFromRow(row);
 }
 
 function detectDoubleCheck(raw) {
@@ -4282,6 +4864,26 @@ function sanitizeFilename(value) {
   return trimmed ? trimmed.slice(0, 80) : 'report';
 }
 
+function buildMachineIdentityLabel(source, { includeSerial = true, fallback = '--' } = {}) {
+  if (!source || typeof source !== 'object') {
+    return fallback;
+  }
+  const vendor = cleanString(source.vendor, 64);
+  const model = cleanString(source.model, 96);
+  const serial = includeSerial ? cleanString(source.serialNumber || source.serial_number, 128) : null;
+  const hardwareLabel = [vendor, model].filter(Boolean).join(' ');
+  if (hardwareLabel && serial) {
+    return `${hardwareLabel} - ${serial}`;
+  }
+  if (hardwareLabel) {
+    return hardwareLabel;
+  }
+  if (serial) {
+    return serial;
+  }
+  return fallback;
+}
+
 function normalizeStatusKey(value) {
   if (value == null) {
     return null;
@@ -5571,7 +6173,7 @@ function drawProductSheet(doc, x, y, width, height, data, palette) {
     paddingX: 12
   });
   const maxY = body.y + body.height;
-  const modelText = safeString(data.subtitle, '--');
+  const modelText = safeString(data.productLabel || data.subtitle, '--');
   doc.font('Helvetica-Bold').fontSize(11).fillColor(palette.cardValue).text(modelText, body.x, body.y, {
     width: body.width
   });
@@ -5721,15 +6323,19 @@ function drawReportPdf(doc, data) {
     .fillColor(palette.headerSubText)
     .font('Helvetica-Bold')
     .fontSize(7.1)
-    .text('Modèle PC', badgeX, headerY + 40, {
+    .text('Marque / modele / SN', badgeX, headerY + 40, {
       width: badgeWidth,
       align: 'right',
       lineBreak: false
     });
-  doc.fillColor(palette.headerText).font('Helvetica').fontSize(7.8).text(truncatePdfText(data.subtitle, 34), badgeX, headerY + 49, {
-    width: badgeWidth,
-    align: 'right'
-  });
+  doc
+    .fillColor(palette.headerText)
+    .font('Helvetica')
+    .fontSize(7.8)
+    .text(truncatePdfText(data.productLabel || data.subtitle, 34), badgeX, headerY + 49, {
+      width: badgeWidth,
+      align: 'right'
+    });
   doc.fillColor(palette.headerSubText).font('Helvetica').fontSize(7.6).text(`Généré: ${truncatePdfText(data.generatedAt, 32)}`, badgeX, headerY + 61, {
     width: badgeWidth,
     align: 'right',
@@ -6088,6 +6694,14 @@ app.get('/lots.html', requireAuth, requireTagEditPage, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'lots.html'));
 });
 
+app.get('/pallets', requireAuth, requireTagEditPage, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'pallets.html'));
+});
+
+app.get('/pallets.html', requireAuth, requireTagEditPage, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'pallets.html'));
+});
+
 app.get('/journal', requireAuth, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'journal.html'));
 });
@@ -6186,6 +6800,14 @@ app.get('/logout', (req, res) => {
   return req.session.destroy(() => res.redirect('/login'));
 });
 
+app.get('/guide', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'guide.html'));
+});
+
+app.get('/guide.html', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'guide.html'));
+});
+
 app.get('/patchnotes', requireAuth, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'patchnotes.html'));
 });
@@ -6214,16 +6836,23 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/barcode/serial/:serial.png', requireAuth, async (req, res) => {
   const serialValue = cleanString(req.params.serial, 128);
+  const vendorValue = cleanString(req.query?.vendor, 64);
   const modelValue = cleanString(req.query?.model, 96);
   if (!serialValue) {
     return res.status(400).json({ ok: false, error: 'invalid_serial' });
   }
-  const labelParts = [];
-  if (modelValue) {
-    labelParts.push(modelValue);
-  }
-  labelParts.push(serialValue);
-  const barcodeLabel = cleanString(labelParts.join(' - '), 160) || serialValue;
+  const barcodeLabel =
+    cleanString(
+      buildMachineIdentityLabel(
+        {
+          vendor: vendorValue,
+          model: modelValue,
+          serialNumber: serialValue
+        },
+        { includeSerial: true, fallback: serialValue }
+      ),
+      160
+    ) || serialValue;
   try {
     const imageBuffer = await bwipjs.toBuffer({
       bcid: 'code128',
@@ -6933,6 +7562,14 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     });
     const resolvedLot = lotResolution.lot;
     const resolvedLotId = resolvedLot && resolvedLot.id ? resolvedLot.id : null;
+    const resolvedPallet = await resolvePalletForSerial(client, {
+      serialNumber,
+      machineKey,
+      actor: technician || machineKey
+    });
+    const resolvedPalletId = resolvedPallet && resolvedPallet.id ? resolvedPallet.id : null;
+    const resolvedPalletStatus =
+      resolvedPallet && resolvedPallet.status ? resolvedPallet.status : null;
     const shouldCountLot = Boolean(
       resolvedLotId &&
       machineKey &&
@@ -6957,6 +7594,8 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
       resolvedLotId,
+      resolvedPalletId,
+      resolvedPalletStatus,
       model,
       vendor,
       technician,
@@ -6987,6 +7626,8 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
       resolvedLotId,
+      resolvedPalletId,
+      resolvedPalletStatus,
       model,
       vendor,
       technician,
@@ -7026,6 +7667,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       reportId: reportIdValue,
       machineKey,
       lot: normalizeLotFromRow(lotProgress && lotProgress.lot ? lotProgress.lot : resolvedLot),
+      pallet: resolvedPallet,
       lotCounted: Boolean(lotProgress && lotProgress.counted)
     });
   } catch (error) {
@@ -7110,6 +7752,8 @@ app.get('/api/reports', requireAuth, async (req, res) => {
               reports.tag,
               reports.tag_id,
               reports.lot_id,
+              reports.pallet_id,
+              reports.pallet_status,
               reports.model,
               reports.vendor,
               reports.technician,
@@ -7142,12 +7786,16 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             latest.tag,
             latest.tag_id,
             latest.lot_id,
+            latest.pallet_id,
+            latest.pallet_status,
             COALESCE(tags.name, latest.tag) AS tag_name,
             lots.supplier AS lot_supplier,
             lots.lot_number AS lot_number,
             lots.target_count AS lot_target_count,
             lots.produced_count AS lot_produced_count,
             lots.is_paused AS lot_is_paused,
+            pallets.code AS pallet_code,
+            pallets.last_movement_at AS pallet_last_movement_at,
             latest.model,
             latest.vendor,
             latest.technician,
@@ -7168,6 +7816,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
           FROM latest
           LEFT JOIN tags ON tags.id = latest.tag_id
           LEFT JOIN lots ON lots.id = latest.lot_id
+          LEFT JOIN pallets ON pallets.id = latest.pallet_id
           ORDER BY latest.last_seen DESC
           LIMIT $${values.length + 1} OFFSET $${values.length + 2}
         `,
@@ -7186,12 +7835,16 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             reports.tag,
             reports.tag_id,
             reports.lot_id,
+            reports.pallet_id,
+            reports.pallet_status,
             COALESCE(tags.name, reports.tag) AS tag_name,
             lots.supplier AS lot_supplier,
             lots.lot_number AS lot_number,
             lots.target_count AS lot_target_count,
             lots.produced_count AS lot_produced_count,
             lots.is_paused AS lot_is_paused,
+            pallets.code AS pallet_code,
+            pallets.last_movement_at AS pallet_last_movement_at,
             reports.model,
             reports.vendor,
             reports.technician,
@@ -7212,6 +7865,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
           FROM reports
           LEFT JOIN tags ON tags.id = reports.tag_id
           LEFT JOIN lots ON lots.id = reports.lot_id
+          LEFT JOIN pallets ON pallets.id = reports.pallet_id
           ${where}
           ORDER BY reports.last_seen DESC
           LIMIT $${values.length + 1} OFFSET $${values.length + 2}
@@ -7239,6 +7893,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
         tagId: row.tag_id || null,
         tagName: row.tag_name || row.tag || null,
         lot: normalizeLotFromRow(row),
+        pallet: normalizePalletFromRow(row),
         model: row.model,
         vendor: row.vendor,
         technician: row.technician,
@@ -7444,6 +8099,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
         tagId: row.tag_id || null,
         tagName: row.tag_name || row.tag || null,
         lot: normalizeLotFromRow(row),
+        pallet: normalizePalletFromRow(row),
         model: row.model,
         vendor: row.vendor,
         technician: row.technician,
@@ -7493,6 +8149,191 @@ app.get('/api/lots', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Failed to list lots', error);
     return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.get('/api/pallets', requireTagEdit, async (req, res) => {
+  try {
+    const palletRows = await listPalletsWithStats(pool);
+    const importRows = await listRecentPalletImports(pool);
+    return res.json({
+      ok: true,
+      pallets: palletRows.map((row) => mapPalletRowForResponse(row)).filter(Boolean),
+      recentImports: importRows.map((row) => mapPalletImportRowForResponse(row)).filter(Boolean)
+    });
+  } catch (error) {
+    console.error('Failed to list pallets', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.post('/api/pallets/imports', requireTagEdit, async (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const importType = normalizePalletMovementType(body.importType || body.type || body.mode);
+  const csvText = typeof body.csvText === 'string' ? body.csvText : '';
+  const fileName =
+    cleanString(body.fileName || body.filename || body.name, 255) ||
+    `${importType || 'pallets'}-${Date.now()}.csv`;
+  if (!importType || !csvText.trim()) {
+    return res.status(400).json({ ok: false, error: 'invalid_payload' });
+  }
+
+  const parsed = extractPalletCsvRows(csvText);
+  if (!parsed.ok || !parsed.rows.length) {
+    return res.status(400).json({
+      ok: false,
+      error: parsed.error || 'invalid_csv',
+      errors: Array.isArray(parsed.errors) ? parsed.errors.slice(0, 20) : []
+    });
+  }
+
+  const createdBy =
+    cleanString(
+      req.session?.user?.displayName ||
+        req.session?.user?.username ||
+        req.session?.user?.dn ||
+        req.session?.user?.mail ||
+        'systeme',
+      128
+    ) || 'systeme';
+  const totalRows = parsed.rows.length + parsed.errors.length;
+  const importId = generateUuid();
+  const now = new Date().toISOString();
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req, { actor: createdBy }));
+    await client.query(
+      `
+        INSERT INTO pallet_imports (
+          id,
+          import_type,
+          file_name,
+          row_count,
+          applied_count,
+          skipped_count,
+          created_by,
+          created_at,
+          summary
+        ) VALUES ($1, $2, $3, 0, 0, 0, $4, $5, NULL)
+      `,
+      [importId, importType, fileName, createdBy, now]
+    );
+
+    const machineLookup = await client.query(
+      `
+        SELECT DISTINCT ON (serial_number)
+          serial_number,
+          machine_key
+        FROM machines
+        WHERE serial_number = ANY($1::text[])
+        ORDER BY serial_number, last_seen DESC
+      `,
+      [parsed.rows.map((item) => item.serialNumber)]
+    );
+    const machineKeyBySerial = new Map();
+    (machineLookup.rows || []).forEach((row) => {
+      const serial = normalizeSerial(row.serial_number);
+      if (serial && row.machine_key && !machineKeyBySerial.has(serial)) {
+        machineKeyBySerial.set(serial, row.machine_key);
+      }
+    });
+
+    const palletCache = new Map();
+    let appliedCount = 0;
+    for (const row of parsed.rows) {
+      const cacheKey = normalizePalletCodeKey(row.palletCode);
+      if (!cacheKey) {
+        continue;
+      }
+      let pallet = palletCache.get(cacheKey);
+      if (!pallet) {
+        pallet = await upsertPallet(client, {
+          code: row.palletCode,
+          movementType: importType,
+          actor: createdBy,
+          timestamp: now
+        });
+        if (!pallet) {
+          continue;
+        }
+        palletCache.set(cacheKey, pallet);
+      }
+      await applyPalletAssignment(client, {
+        serialNumber: row.serialNumber,
+        pallet,
+        movementType: importType,
+        importId,
+        machineKey: machineKeyBySerial.get(row.serialNumber) || null,
+        actor: createdBy,
+        timestamp: now
+      });
+      appliedCount += 1;
+    }
+
+    const summary = {
+      importType,
+      importTypeLabel: getPalletMovementLabel(importType),
+      uniquePalletCount: palletCache.size,
+      errorCount: parsed.errors.length,
+      errors: parsed.errors.slice(0, 20)
+    };
+    await client.query(
+      `
+        UPDATE pallet_imports
+        SET row_count = $2,
+            applied_count = $3,
+            skipped_count = $4,
+            summary = $5
+        WHERE id = $1
+      `,
+      [
+        importId,
+        totalRows,
+        appliedCount,
+        parsed.errors.length,
+        JSON.stringify(summary)
+      ]
+    );
+
+    const palletRows = await listPalletsWithStats(client);
+    const importRows = await listRecentPalletImports(client);
+
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      import: {
+        id: importId,
+        importType,
+        importTypeLabel: getPalletMovementLabel(importType),
+        fileName,
+        rowCount: totalRows,
+        appliedCount,
+        skippedCount: parsed.errors.length,
+        createdBy,
+        createdAt: now,
+        summary
+      },
+      pallets: palletRows.map((row) => mapPalletRowForResponse(row)).filter(Boolean),
+      recentImports: importRows.map((row) => mapPalletImportRowForResponse(row)).filter(Boolean),
+      warnings: parsed.errors.slice(0, 20)
+    });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback pallet import', rollbackError);
+      }
+    }
+    console.error('Failed to import pallets CSV', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
   }
 });
 
@@ -7897,6 +8738,17 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
     machine_lot_is_paused: row.machine_lot_is_paused
   });
 
+  const pallet = normalizePalletFromRow({
+    report_pallet_id: row.report_pallet_id,
+    report_pallet_code: row.report_pallet_code,
+    report_pallet_status: row.report_pallet_status,
+    report_pallet_last_movement_at: row.report_pallet_last_movement_at,
+    machine_pallet_id: row.machine_pallet_id,
+    machine_pallet_code: row.machine_pallet_code,
+    machine_pallet_status: row.machine_pallet_status,
+    machine_pallet_last_movement_at: row.machine_pallet_last_movement_at
+  });
+
   res.json({
     machine: {
       id: row.id,
@@ -7910,6 +8762,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       tagId: row.tag_id || row.machine_tag_id || null,
       tagName: row.report_tag_name || row.tag || row.machine_tag || null,
       lot,
+      pallet,
       model: row.model,
       vendor: row.vendor,
       technician: row.technician,
@@ -8401,6 +9254,17 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
     });
     const resolvedLot = lotResolution.lot;
     const resolvedLotId = resolvedLot && resolvedLot.id ? resolvedLot.id : null;
+    const resolvedPallet =
+      (row.serial_number
+        ? await resolvePalletForSerial(client, {
+          serialNumber: row.serial_number,
+          machineKey: row.machine_key || null,
+          actor: row.technician || row.machine_key || null
+        })
+        : null) || normalizePalletFromRow({ pallet_id: row.pallet_id, pallet_status: row.pallet_status });
+    const resolvedPalletId = resolvedPallet && resolvedPallet.id ? resolvedPallet.id : null;
+    const resolvedPalletStatus =
+      resolvedPallet && resolvedPallet.status ? resolvedPallet.status : null;
     const reportValues = [
       reportId,
       row.machine_key,
@@ -8412,6 +9276,8 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
       resolvedLotId,
+      resolvedPalletId,
+      resolvedPalletStatus,
       row.model,
       row.vendor,
       row.technician,
@@ -8444,6 +9310,8 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
         resolvedTag.name || DEFAULT_REPORT_TAG,
         resolvedTag.id || null,
         resolvedLotId,
+        resolvedPalletId,
+        resolvedPalletStatus,
         row.model,
         row.vendor,
         row.technician,
@@ -8481,6 +9349,7 @@ app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
       ok: true,
       reportId,
       lot: normalizeLotFromRow(lotProgress && lotProgress.lot ? lotProgress.lot : resolvedLot),
+      pallet: resolvedPallet,
       lotCounted: false
     });
   } catch (error) {
@@ -8604,6 +9473,14 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
     });
     const resolvedLot = lotResolution.lot;
     const resolvedLotId = resolvedLot && resolvedLot.id ? resolvedLot.id : null;
+    const resolvedPallet = await resolvePalletForSerial(client, {
+      serialNumber,
+      machineKey,
+      actor: technician || machineKey
+    });
+    const resolvedPalletId = resolvedPallet && resolvedPallet.id ? resolvedPallet.id : null;
+    const resolvedPalletStatus =
+      resolvedPallet && resolvedPallet.status ? resolvedPallet.status : null;
     const shouldCountLot = Boolean(
       resolvedLotId &&
       machineKey &&
@@ -8621,6 +9498,8 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
       resolvedLotId,
+      resolvedPalletId,
+      resolvedPalletStatus,
       model,
       vendor,
       technician,
@@ -8651,6 +9530,8 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
       resolvedTag.name || DEFAULT_REPORT_TAG,
       resolvedTag.id || null,
       resolvedLotId,
+      resolvedPalletId,
+      resolvedPalletStatus,
       model,
       vendor,
       technician,
@@ -8687,6 +9568,7 @@ app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
       reportId,
       machineKey,
       lot: normalizeLotFromRow(lotProgress && lotProgress.lot ? lotProgress.lot : resolvedLot),
+      pallet: resolvedPallet,
       lotCounted: Boolean(lotProgress && lotProgress.counted)
     });
   } catch (error) {
@@ -9051,6 +9933,17 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
   const category = normalizeCategory(row.category);
   const title = safeString(row.hostname || row.serial_number || row.mac_address || macList[0], `Machine ${row.id}`);
   const subtitle = [row.vendor, row.model].filter(Boolean).join(' ') || 'Modele non renseigne';
+  const productLabel = buildMachineIdentityLabel(
+    {
+      vendor: row.vendor,
+      model: row.model,
+      serial_number: row.serial_number
+    },
+    {
+      includeSerial: true,
+      fallback: subtitle
+    }
+  );
   const payloadCpu = payload && payload.cpu && typeof payload.cpu === 'object' ? payload.cpu : null;
   const payloadGpu = payload && payload.gpu && typeof payload.gpu === 'object' ? payload.gpu : null;
   const diskInfoRaw = payload ? payload.disks : null;
@@ -9062,6 +9955,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
     id: row.id,
     title,
     subtitle,
+    productLabel,
     category,
     serialNumber: row.serial_number || '--',
     macPrimary,
@@ -9096,7 +9990,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
   };
 
   const downloadBaseName = safeString(
-    row.serial_number || row.hostname || row.mac_address || macList[0],
+    productLabel || row.serial_number || row.hostname || row.mac_address || macList[0],
     `Machine ${row.id}`
   );
   const filename = `rapport-atelier-${sanitizeFilename(downloadBaseName)}.pdf`;
@@ -9105,7 +9999,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
 
   const doc = new PDFDocument({ size: 'A4', margin: 40 });
-  doc.info.Title = `Rapport atelier - ${title}`;
+  doc.info.Title = `Rapport atelier - ${productLabel || title}`;
   doc.info.Author = 'Atelier Ops';
   doc.on('error', (error) => {
     console.error('PDF generation error', error);

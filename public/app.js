@@ -153,6 +153,7 @@ const drawerPrevBtn = document.getElementById('drawer-prev-btn');
 const drawerNextBtn = document.getElementById('drawer-next-btn');
 const adminLink = document.getElementById('admin-link');
 const lotsLink = document.getElementById('lots-link');
+const palletsLink = document.getElementById('pallets-link');
 const commentTimers = new Map();
 let activePatchnoteId = null;
 let infiniteObserver = null;
@@ -169,6 +170,7 @@ const categoryLabels = {
 const categoryCycle = ['desktop', 'unknown', 'laptop'];
 const DEFAULT_TAG_LABEL = 'En cours';
 const DEFAULT_LOT_LABEL = 'Aucun lot';
+const DEFAULT_PALLET_LABEL = 'Aucune palette';
 
 const statusLabels = {
   ok: 'OK',
@@ -873,6 +875,8 @@ async function loadMeta() {
     if (data.permissions && typeof data.permissions.canEditTags === 'boolean') {
       state.canEditTags = data.permissions.canEditTags;
     }
+    setLotsLinkVisible(state.canEditTags);
+    setPalletsLinkVisible(state.canEditTags);
     updatePurgeImportsVisibility();
     hydrateTagFilterFromNames();
     renderTagFilters();
@@ -1241,6 +1245,31 @@ function getMachineLot(machine) {
     }
   }
   return machine.lot;
+}
+
+function buildPalletLabel(pallet) {
+  if (!pallet || typeof pallet !== 'object') {
+    return DEFAULT_PALLET_LABEL;
+  }
+  const code = String(pallet.code || '').trim();
+  const statusLabel = String(pallet.statusLabel || '').trim();
+  if (code && statusLabel) {
+    return `${code} - ${statusLabel}`;
+  }
+  if (code) {
+    return code;
+  }
+  if (pallet.label) {
+    return String(pallet.label).trim() || DEFAULT_PALLET_LABEL;
+  }
+  return DEFAULT_PALLET_LABEL;
+}
+
+function getMachinePallet(machine) {
+  if (!machine || !machine.pallet || typeof machine.pallet !== 'object') {
+    return null;
+  }
+  return machine.pallet;
 }
 
 function getActiveLot() {
@@ -1993,8 +2022,12 @@ function sanitizeDownloadFilename(value, fallback = 'report') {
 }
 
 function buildPdfDownloadFilename(detail) {
+  const identityLabel = buildMachineIdentityLabel(detail, {
+    includeSerial: true,
+    fallback: (detail && (detail.hostname || detail.macAddress || detail.id)) || 'report'
+  });
   const baseName = sanitizeDownloadFilename(
-    (detail && (detail.serialNumber || detail.hostname || detail.macAddress || detail.id)) || '',
+    identityLabel || '',
     'report'
   );
   return `rapport-atelier-${baseName}.pdf`;
@@ -2012,6 +2045,13 @@ function setLotsLinkVisible(visible) {
     return;
   }
   lotsLink.hidden = !visible;
+}
+
+function setPalletsLinkVisible(visible) {
+  if (!palletsLink) {
+    return;
+  }
+  palletsLink.hidden = !visible;
 }
 
 function updatePurgeImportsVisibility() {
@@ -2036,11 +2076,12 @@ function canDeleteReportFromUser(user) {
 }
 
 async function initAdminLink() {
-  if (!adminLink && !lotsLink) {
+  if (!adminLink && !lotsLink && !palletsLink) {
     return;
   }
   setAdminLinkVisible(false);
   setLotsLinkVisible(false);
+  setPalletsLinkVisible(false);
   updatePurgeImportsVisibility();
   try {
     const response = await fetch('/api/me');
@@ -2061,6 +2102,7 @@ async function initAdminLink() {
         state.canDeleteReport = true;
         state.canEditTags = true;
         setLotsLinkVisible(true);
+        setPalletsLinkVisible(true);
         updatePurgeImportsVisibility();
         renderList();
       }
@@ -2068,6 +2110,7 @@ async function initAdminLink() {
   } catch (error) {
     setAdminLinkVisible(false);
     setLotsLinkVisible(false);
+    setPalletsLinkVisible(false);
     updatePurgeImportsVisibility();
   }
 }
@@ -2490,6 +2533,26 @@ function formatPrimary(machine) {
 function formatSubtitle(machine) {
   const chunks = [machine.vendor, machine.model].filter(Boolean);
   return chunks.length ? chunks.join(' ') : 'Modele non renseigne';
+}
+
+function buildMachineIdentityLabel(machine, { includeSerial = true, fallback = '--' } = {}) {
+  if (!machine || typeof machine !== 'object') {
+    return fallback;
+  }
+  const vendor = machine.vendor ? String(machine.vendor).trim() : '';
+  const model = machine.model ? String(machine.model).trim() : '';
+  const serial = includeSerial && machine.serialNumber ? String(machine.serialNumber).trim() : '';
+  const hardwareLabel = [vendor, model].filter(Boolean).join(' ');
+  if (hardwareLabel && serial) {
+    return `${hardwareLabel} - ${serial}`;
+  }
+  if (hardwareLabel) {
+    return hardwareLabel;
+  }
+  if (serial) {
+    return serial;
+  }
+  return fallback;
 }
 
 function formatMacSummary(machine) {
@@ -4531,6 +4594,10 @@ function buildDrawerDetailHtml(detail) {
   const subtitle = escapeHtml(formatSubtitle(detail));
   const lot = getMachineLot(detail);
   const lotLabel = lot ? buildLotLabel(lot) : DEFAULT_LOT_LABEL;
+  const pallet = getMachinePallet(detail);
+  const rawPalletLabel = pallet ? buildPalletLabel(pallet) : '';
+  const hasAssignedPallet = Boolean(rawPalletLabel && rawPalletLabel !== DEFAULT_PALLET_LABEL);
+  const palletLabel = hasAssignedPallet ? rawPalletLabel : DEFAULT_PALLET_LABEL;
   const lotSelectOptions = buildLotAssignmentOptions(lot);
   const summary = summarizeDetailForDrawer(detail);
   const components = resolveDetailComponents(detail);
@@ -4564,6 +4631,7 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-header-top">
         ${buildCategoryBadge(category, detailId, 'detail-category')}
         <span class="drawer-lot-pill">${escapeHtml(lotLabel)}</span>
+        ${hasAssignedPallet ? `<span class="drawer-lot-pill drawer-pallet-pill">${escapeHtml(palletLabel)}</span>` : ''}
       </div>
       <h3>${title}</h3>
       <p>${subtitle}</p>
@@ -4598,9 +4666,18 @@ function buildDrawerDetailHtml(detail) {
     ? `<button class="drawer-copy-btn" type="button" data-action="copy-autopilot-hash" data-id="${detailId}" title="Copier le hash complet">Copier</button>`
     : '';
   const serialValue = detail.serialNumber ? String(detail.serialNumber).trim() : '';
+  const vendorValue = detail.vendor ? String(detail.vendor).trim() : '';
   const modelValue = detail.model ? String(detail.model).trim() : '';
+  const barcodeLabel = buildMachineIdentityLabel(detail, { includeSerial: true, fallback: serialValue || '--' });
+  const barcodeParams = [];
+  if (vendorValue) {
+    barcodeParams.push(`vendor=${encodeURIComponent(vendorValue)}`);
+  }
+  if (modelValue) {
+    barcodeParams.push(`model=${encodeURIComponent(modelValue)}`);
+  }
   const serialBarcodeSrc = serialValue
-    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png${modelValue ? `?model=${encodeURIComponent(modelValue)}` : ''}`
+    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png${barcodeParams.length ? `?${barcodeParams.join('&')}` : ''}`
     : '';
   const lotEditorHtml = state.canEditTags
     ? `
@@ -4624,6 +4701,8 @@ function buildDrawerDetailHtml(detail) {
   const identifiersPanel = `
     <div class="drawer-table">
       ${lotEditorHtml}
+      <div><span>Palette</span><strong>${escapeHtml(palletLabel)}</strong></div>
+      <div><span>Statut palette</span><strong>${escapeHtml((pallet && pallet.statusLabel) || '--')}</strong></div>
       <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
       <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
       <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
@@ -4633,7 +4712,7 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-barcode-row"><span>Code-barres serial</span>${
         serialBarcodeSrc
           ? `<div class="drawer-barcode-wrap"><img src="${serialBarcodeSrc}" alt="Code-barres ${escapeHtml(
-              modelValue ? `${modelValue} - ${serialValue}` : serialValue
+              barcodeLabel
             )}" loading="lazy" /></div>`
           : '<strong>--</strong>'
       }</div>
@@ -4953,6 +5032,11 @@ function renderList(isScrollUpdate = false) {
       const hasAssignedLot = Boolean(rawLotLabel && rawLotLabel !== DEFAULT_LOT_LABEL);
       const lotLabel = hasAssignedLot ? rawLotLabel : DEFAULT_LOT_LABEL;
       const lotValue = escapeHtml(lotLabel);
+      const palletData = getMachinePallet(machine);
+      const rawPalletLabel = palletData ? buildPalletLabel(palletData) : '';
+      const hasAssignedPallet = Boolean(rawPalletLabel && rawPalletLabel !== DEFAULT_PALLET_LABEL);
+      const palletLabel = hasAssignedPallet ? rawPalletLabel : DEFAULT_PALLET_LABEL;
+      const palletValue = escapeHtml(palletLabel);
       const tagHtml = state.canEditTags && tagIdValue
         ? `<button class="tag-pill is-editable" type="button" title="${tagValue}" data-tag="${tagValue}" data-tag-id="${tagIdValue}">${tagValue}</button>`
         : `<span class="tag-pill" title="${tagValue}">${tagValue}</span>`;
@@ -4969,12 +5053,28 @@ function renderList(isScrollUpdate = false) {
           <span class="lot-pill-value">${lotValue}</span>
         </span>
       `;
+      const palletHtml = hasAssignedPallet
+        ? `
+          <span class="lot-pill pallet-pill" title="${palletValue}">
+            <span class="lot-pill-label">Palette</span>
+            <span class="lot-pill-value">${palletValue}</span>
+          </span>
+        `
+        : '';
       const lotInlineHtml = `
         <p class="machine-lot-line${hasAssignedLot ? '' : ' is-empty'}">
           <span>Lot en cours</span>
           <strong>${lotValue}</strong>
         </p>
       `;
+      const palletInlineHtml = hasAssignedPallet
+        ? `
+          <p class="machine-lot-line machine-pallet-line">
+            <span>Palette</span>
+            <strong>${palletValue}</strong>
+          </p>
+        `
+        : '';
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
       const commentDisplay = commentValue || 'Ajouter un commentaire';
       const isEditingComment = state.quickCommentId === machine.id;
@@ -5027,6 +5127,7 @@ function renderList(isScrollUpdate = false) {
               <div class="card-top-tags">
                 ${tagHtml}
                 ${lotHtml}
+                ${palletHtml}
               </div>
               <span class="machine-meta"><span>${lastSeen}</span></span>
             </div>
@@ -5036,6 +5137,7 @@ function renderList(isScrollUpdate = false) {
               <h3 class="machine-title">${title}</h3>
               <p class="machine-sub">${subtitle}</p>
               ${lotInlineHtml}
+              ${palletInlineHtml}
               <div class="machine-meta-row">
                 ${buildMetaChip('SN', serialValue, serialValue, 'serial', state.activeToken, machine.id)}
                 ${buildMetaChip('Tech', technicianValue, technicianValue, 'tech', state.activeToken, machine.id)}
@@ -5137,11 +5239,16 @@ function buildDetailHtml(detail) {
   const subtitle = escapeHtml(formatSubtitle(detail));
   const lot = getMachineLot(detail);
   const lotLabel = lot ? buildLotLabel(lot) : '';
+  const pallet = getMachinePallet(detail);
+  const palletLabel = pallet ? buildPalletLabel(pallet) : '';
   const technicianLine = detail.technician
     ? `<p class="detail-tech"><span>Technicien</span><strong>${escapeHtml(detail.technician)}</strong></p>`
     : '';
   const lotLine = lotLabel
     ? `<p class="detail-tech"><span>Lot</span><strong>${escapeHtml(lotLabel)}</strong></p>`
+    : '';
+  const palletLine = palletLabel
+    ? `<p class="detail-tech"><span>Palette</span><strong>${escapeHtml(palletLabel)}</strong></p>`
     : '';
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const padStatus = getPadStatus(detail);
@@ -5407,9 +5514,18 @@ function buildDetailHtml(detail) {
     ? `<button class="hash-copy-btn" type="button" data-action="copy-autopilot-hash" data-id="${detailId}" title="Copier le hash complet">Copier</button>`
     : '';
   const serialValue = detail.serialNumber ? String(detail.serialNumber).trim() : '';
+  const vendorValue = detail.vendor ? String(detail.vendor).trim() : '';
   const modelValue = detail.model ? String(detail.model).trim() : '';
+  const barcodeLabel = buildMachineIdentityLabel(detail, { includeSerial: true, fallback: serialValue || '--' });
+  const barcodeParams = [];
+  if (vendorValue) {
+    barcodeParams.push(`vendor=${encodeURIComponent(vendorValue)}`);
+  }
+  if (modelValue) {
+    barcodeParams.push(`model=${encodeURIComponent(modelValue)}`);
+  }
   const serialBarcodeSrc = serialValue
-    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png${modelValue ? `?model=${encodeURIComponent(modelValue)}` : ''}`
+    ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png${barcodeParams.length ? `?${barcodeParams.join('&')}` : ''}`
     : '';
 
   return `
@@ -5419,9 +5535,18 @@ function buildDetailHtml(detail) {
       <p class="machine-sub">${subtitle}</p>
       ${technicianLine}
       ${lotLine}
+      ${palletLine}
       ${actionBar}
     </div>
     <div class="detail-grid">
+      <div class="detail-item">
+        <span>Palette</span>
+        <strong>${escapeHtml(palletLabel || '--')}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Statut palette</span>
+        <strong>${escapeHtml((pallet && pallet.statusLabel) || '--')}</strong>
+      </div>
       <div class="detail-item">
         <span>Serial</span>
         <strong>${escapeHtml(detail.serialNumber || '--')}</strong>
@@ -5452,7 +5577,7 @@ function buildDetailHtml(detail) {
         ${
           serialBarcodeSrc
             ? `<div class="detail-barcode-wrap"><img src="${serialBarcodeSrc}" alt="Code-barres ${escapeHtml(
-                modelValue ? `${modelValue} - ${serialValue}` : serialValue
+                barcodeLabel
               )}" loading="lazy" /></div>`
             : '<strong>--</strong>'
         }

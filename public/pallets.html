@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Palettes logistiques</title>
+    <meta
+      name="description"
+      content="Gestion logistique des palettes : imports CSV entree et sortie, association automatique par numero de serie."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="/env.js?v=20250108a"></script>
+    <link rel="stylesheet" href="/styles.css?v=20260316a" />
+  </head>
+  <body class="dashboard-page admin-page pallets-page">
+    <div class="aura" aria-hidden="true"></div>
+    <main class="app app-shell">
+      <aside class="left-sidebar" aria-label="Navigation palettes">
+        <div class="sidebar-head">
+          <div class="sidebar-brand" aria-label="Identite du site">
+            <img class="sidebar-brand-logo" src="/logo.png?v=20260225b" alt="MMA Automation" />
+            <div class="sidebar-brand-copy">
+              <span class="sidebar-brand-name">MMA Automation</span>
+              <span class="sidebar-brand-tag">Ops Platform</span>
+            </div>
+          </div>
+          <h1 class="sidebar-title">Logistique palettes</h1>
+          <p class="sidebar-sub">
+            Flux entree / sortie separes des lots atelier. L'association se fait par numero de serie.
+          </p>
+        </div>
+        <nav class="sidebar-nav" aria-label="Sections palettes">
+          <a class="sidebar-nav-btn is-active" href="#section-palettes-head">Vue generale</a>
+          <a class="sidebar-nav-btn" href="#section-pallet-imports">Imports CSV</a>
+          <a class="sidebar-nav-btn" href="#section-pallet-board">Palettes</a>
+          <a class="sidebar-nav-btn" href="#section-pallet-history">Historique</a>
+        </nav>
+        <div class="sidebar-links" aria-label="Navigation pages">
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Navigation</p>
+            <a class="admin-link" href="/">Tableau de bord</a>
+            <a class="admin-link" href="/admin">Admin</a>
+            <a class="admin-link" href="/lots">Lots</a>
+            <a class="admin-link is-current" href="/pallets">Palettes</a>
+            <a class="admin-link" href="/metrics">Metrics</a>
+            <a class="admin-link" href="/legacy-imports">Imports</a>
+          </div>
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Suivi</p>
+            <a class="admin-link" href="/guide">Guide</a>
+            <a class="admin-link" href="/patchnotes">Patchnotes</a>
+            <a class="admin-link journal-link" href="/journal">Journal</a>
+          </div>
+          <div class="sidebar-link-group sidebar-link-group--session">
+            <p class="sidebar-link-title">Session</p>
+            <a class="logout-btn" href="/logout">Deconnexion</a>
+          </div>
+          <span class="dev-badge" aria-hidden="true">DEV</span>
+        </div>
+        <p class="sidebar-note">
+          Une palette logistique n'incremente pas les compteurs de lot atelier. Les deux notions restent separees.
+        </p>
+      </aside>
+
+      <section class="workspace">
+        <header class="admin-hero" id="section-palettes-head">
+          <div class="admin-hero-copy">
+            <p class="hero-kicker">Logistique</p>
+            <h1>Gestion des palettes entree / sortie</h1>
+            <p class="hero-sub">
+              Importe un CSV pour rattacher des numeros de serie a une palette. Les futurs passages MDT
+              retrouvent automatiquement la palette par serial.
+            </p>
+          </div>
+          <div class="admin-hero-actions">
+            <a class="admin-secondary" href="/">Retour au tableau</a>
+            <a class="admin-secondary" href="/guide">Guide operateur</a>
+            <button class="admin-secondary" type="button" id="pallet-reload">Recharger</button>
+          </div>
+        </header>
+
+        <section class="pallet-kpi-row" aria-label="Resume palettes">
+          <article class="pallet-kpi-card">
+            <span class="pallet-kpi-label">Palettes suivies</span>
+            <strong class="pallet-kpi-value" id="pallet-total-count">0</strong>
+          </article>
+          <article class="pallet-kpi-card">
+            <span class="pallet-kpi-label">Serials actifs</span>
+            <strong class="pallet-kpi-value" id="pallet-serial-count">0</strong>
+          </article>
+          <article class="pallet-kpi-card">
+            <span class="pallet-kpi-label">PC deja rattaches</span>
+            <strong class="pallet-kpi-value" id="pallet-linked-count">0</strong>
+          </article>
+          <article class="pallet-kpi-card">
+            <span class="pallet-kpi-label">Dernier import</span>
+            <strong class="pallet-kpi-value pallet-kpi-value--small" id="pallet-last-import">--</strong>
+          </article>
+        </section>
+
+        <section class="admin-panel">
+          <div class="pallet-import-grid" id="section-pallet-imports">
+            <div class="admin-card">
+              <div class="admin-header">
+                <div>
+                  <p class="admin-kicker">Entree entrepot</p>
+                  <h2>Importer une entree palette</h2>
+                  <p class="admin-sub">
+                    CSV attendu: `serial_number,palette_code`. Chaque ligne place un serial sur une palette.
+                  </p>
+                </div>
+                <span class="admin-status" data-status="enabled">Entree</span>
+              </div>
+              <form class="admin-form" id="pallet-entry-form">
+                <div class="admin-grid">
+                  <label class="admin-field">
+                    <span>Fichier CSV entree</span>
+                    <input type="file" id="pallet-entry-file" accept=".csv,text/csv" required />
+                  </label>
+                </div>
+                <p class="admin-hint">
+                  Colonnes reconnues automatiquement: `serial`, `serial_number`, `sn`, `palette`, `palette_code`.
+                </p>
+                <div class="admin-actions">
+                  <button type="submit" class="admin-primary" id="pallet-entry-submit">Importer l'entree</button>
+                </div>
+                <div class="admin-feedback" id="pallet-entry-feedback" role="status"></div>
+              </form>
+            </div>
+
+            <div class="admin-card">
+              <div class="admin-header">
+                <div>
+                  <p class="admin-kicker">Sortie entrepot</p>
+                  <h2>Importer une sortie palette</h2>
+                  <p class="admin-sub">
+                    Utilise un nouveau CSV pour marquer les serials qui quittent l'entrepot sur telle palette.
+                  </p>
+                </div>
+                <span class="admin-status" data-status="unknown">Sortie</span>
+              </div>
+              <form class="admin-form" id="pallet-exit-form">
+                <div class="admin-grid">
+                  <label class="admin-field">
+                    <span>Fichier CSV sortie</span>
+                    <input type="file" id="pallet-exit-file" accept=".csv,text/csv" required />
+                  </label>
+                </div>
+                <p class="admin-hint">
+                  Si un serial existe deja, le nouvel import remplace l'etat courant et conserve l'historique des mouvements.
+                </p>
+                <div class="admin-actions">
+                  <button type="submit" class="admin-primary" id="pallet-exit-submit">Importer la sortie</button>
+                </div>
+                <div class="admin-feedback" id="pallet-exit-feedback" role="status"></div>
+              </form>
+            </div>
+          </div>
+
+          <div class="admin-card" id="section-pallet-board">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Etat courant</p>
+                <h2>Palettes connues</h2>
+                <p class="admin-sub">
+                  Vue courante des palettes, des serials associes et du niveau de rattachement deja resolu cote appli.
+                </p>
+              </div>
+            </div>
+            <div class="pallet-list" id="pallet-list"></div>
+          </div>
+
+          <div class="admin-card" id="section-pallet-history">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Historique</p>
+                <h2>Derniers imports palettes</h2>
+                <p class="admin-sub">
+                  Trace des imports entree / sortie avec compteurs et warnings de parsing.
+                </p>
+              </div>
+            </div>
+            <div class="pallet-import-list" id="pallet-import-list"></div>
+            <div class="pallet-warning-box" id="pallet-warning-box" hidden>
+              <p class="admin-kicker">Warnings recents</p>
+              <ul class="pallet-warning-list" id="pallet-warning-list"></ul>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/pallets.js?v=20260316a" defer></script>
+  </body>
+</html>

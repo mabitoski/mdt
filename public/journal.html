@@ -15,75 +15,148 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/styles.css?v=20260225c" />
+    <link rel="stylesheet" href="/styles.css?v=20260316a" />
   </head>
-  <body>
+  <body class="dashboard-page admin-page journal-page">
     <div class="aura" aria-hidden="true"></div>
-    <main class="app">
-      <header class="admin-hero">
-        <div class="admin-hero-copy">
-          <p class="hero-kicker">MDT Journal</p>
-          <h1>Journal d'audit</h1>
-          <p class="hero-sub">
-            Suivi des derniers changements en base : machines, sources d'action et champs modifies.
+    <main class="app app-shell">
+      <aside class="left-sidebar" aria-label="Navigation journal">
+        <div class="sidebar-head">
+          <div class="sidebar-brand" aria-label="Identite du site">
+            <img class="sidebar-brand-logo" src="/logo.png?v=20260225b" alt="MMA Automation" />
+            <div class="sidebar-brand-copy">
+              <span class="sidebar-brand-name">MMA Automation</span>
+              <span class="sidebar-brand-tag">Ops Platform</span>
+            </div>
+          </div>
+          <h1 class="sidebar-title">Journal d'audit</h1>
+          <p class="sidebar-sub">
+            Traque les changements sur les machines, les reports et la configuration LDAP avec le meme
+            shell visuel que le reste de l'application.
           </p>
         </div>
-        <div class="admin-hero-actions">
-          <a class="admin-secondary" href="/">Retour au tableau</a>
-          <a class="admin-secondary" href="/admin">Config LDAP</a>
-          <a class="logout-btn" href="/logout">Deconnexion</a>
+        <nav class="sidebar-nav" aria-label="Sections journal">
+          <a class="sidebar-nav-btn is-active" href="#section-journal-head">Vue globale</a>
+          <a class="sidebar-nav-btn" href="#section-journal-filters">Filtres</a>
+          <a class="sidebar-nav-btn" href="#section-journal-board">Historique</a>
+        </nav>
+        <div class="sidebar-links" aria-label="Navigation pages">
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Navigation</p>
+            <a class="admin-link" href="/">Tableau de bord</a>
+            <a class="admin-link" href="/admin">Admin</a>
+            <a class="admin-link" href="/lots">Lots</a>
+            <a class="admin-link" href="/pallets">Palettes</a>
+            <a class="admin-link" href="/metrics">Metrics</a>
+            <a class="admin-link" href="/legacy-imports">Imports</a>
+          </div>
+          <div class="sidebar-link-group">
+            <p class="sidebar-link-title">Suivi</p>
+            <a class="admin-link" href="/guide">Guide</a>
+            <a class="admin-link" href="/patchnotes">Patchnotes</a>
+            <a class="admin-link is-current journal-link" href="/journal">Journal</a>
+          </div>
+          <div class="sidebar-link-group sidebar-link-group--session">
+            <p class="sidebar-link-title">Session</p>
+            <a class="logout-btn" href="/logout">Deconnexion</a>
+          </div>
+          <span class="dev-badge" aria-hidden="true">DEV</span>
         </div>
-      </header>
+        <p class="sidebar-note">
+          Le journal sert a comprendre qui a modifie quoi, pas a corriger directement les donnees.
+        </p>
+      </aside>
 
-      <section class="controls log-controls">
-        <div class="search-wrap">
-          <input
-            id="log-search"
-            type="search"
-            placeholder="Rechercher une machine, un acteur, un chemin"
-            autocomplete="off"
-          />
-        </div>
-        <div class="log-filters">
-          <label class="sort-wrap" for="log-table">
-            <span>Table</span>
-            <select id="log-table">
-              <option value="">Toutes</option>
-              <option value="machines">machines</option>
-              <option value="reports">reports</option>
-              <option value="ldap_settings">ldap_settings</option>
-            </select>
-          </label>
-          <label class="sort-wrap" for="log-action">
-            <span>Action</span>
-            <select id="log-action">
-              <option value="">Toutes</option>
-              <option value="INSERT">INSERT</option>
-              <option value="UPDATE">UPDATE</option>
-              <option value="DELETE">DELETE</option>
-            </select>
-          </label>
-          <label class="sort-wrap" for="log-limit">
-            <span>Limite</span>
-            <select id="log-limit">
-              <option value="50">50</option>
-              <option value="100" selected>100</option>
-              <option value="200">200</option>
-              <option value="500">500</option>
-            </select>
-          </label>
-        </div>
-        <div class="controls-meta">
-          <button id="refresh-btn" type="button">Rafraichir</button>
-          <span id="last-updated">Derniere mise a jour : --</span>
-        </div>
-      </section>
+      <section class="workspace">
+        <header class="admin-hero" id="section-journal-head">
+          <div class="admin-hero-copy">
+            <p class="hero-kicker">MDT Journal</p>
+            <h1>Journal d'audit</h1>
+            <p class="hero-sub">
+              Suivi des derniers changements en base : machines, sources d'action, transitions de
+              statuts et champs modifies.
+            </p>
+          </div>
+          <div class="admin-hero-actions">
+            <a class="admin-secondary" href="/">Retour au tableau</a>
+            <a class="admin-secondary" href="/guide">Guide</a>
+            <a class="admin-secondary" href="/admin">Config LDAP</a>
+          </div>
+        </header>
 
-      <section class="board">
-        <div class="list" id="log-list" aria-live="polite"></div>
+        <section class="journal-insights" aria-label="Resume journal">
+          <article class="journal-stat">
+            <p class="journal-stat-label">Entrees chargees</p>
+            <strong class="journal-stat-value" id="journal-total-logs">--</strong>
+            <p class="journal-stat-sub">Nombre de lignes actuellement affichees</p>
+          </article>
+          <article class="journal-stat">
+            <p class="journal-stat-label">Tables touchees</p>
+            <strong class="journal-stat-value" id="journal-total-tables">--</strong>
+            <p class="journal-stat-sub">Machines, reports, LDAP</p>
+          </article>
+          <article class="journal-stat">
+            <p class="journal-stat-label">Acteurs distincts</p>
+            <strong class="journal-stat-value" id="journal-total-actors">--</strong>
+            <p class="journal-stat-sub">Utilisateurs ou systeme sur le filtre courant</p>
+          </article>
+          <article class="journal-stat">
+            <p class="journal-stat-label">Derniere action</p>
+            <strong class="journal-stat-value" id="journal-last-action">--</strong>
+            <p class="journal-stat-sub">Resume de la derniere entree recue</p>
+          </article>
+        </section>
+
+        <section class="controls log-controls" id="section-journal-filters">
+          <div class="search-wrap">
+            <input
+              id="log-search"
+              type="search"
+              placeholder="Rechercher une machine, un acteur, un chemin"
+              autocomplete="off"
+            />
+          </div>
+          <div class="log-filters">
+            <label class="sort-wrap" for="log-table">
+              <span>Table</span>
+              <select id="log-table">
+                <option value="">Toutes</option>
+                <option value="machines">machines</option>
+                <option value="reports">reports</option>
+                <option value="ldap_settings">ldap_settings</option>
+              </select>
+            </label>
+            <label class="sort-wrap" for="log-action">
+              <span>Action</span>
+              <select id="log-action">
+                <option value="">Toutes</option>
+                <option value="INSERT">INSERT</option>
+                <option value="UPDATE">UPDATE</option>
+                <option value="DELETE">DELETE</option>
+              </select>
+            </label>
+            <label class="sort-wrap" for="log-limit">
+              <span>Limite</span>
+              <select id="log-limit">
+                <option value="50">50</option>
+                <option value="100" selected>100</option>
+                <option value="200">200</option>
+                <option value="500">500</option>
+              </select>
+            </label>
+          </div>
+          <div class="controls-meta">
+            <button id="refresh-btn" type="button">Rafraichir</button>
+            <span id="last-updated">Derniere mise a jour : --</span>
+          </div>
+        </section>
+
+        <section class="board" id="section-journal-board">
+          <div class="list columns-1" id="log-list" aria-live="polite"></div>
+        </section>
       </section>
     </main>
 
-    <script src="/journal.js?v=20260225a" defer></script>
+    <script src="/journal.js?v=20260316a" defer></script>
   </body>
 </html>
