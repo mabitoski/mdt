@@ -37,6 +37,13 @@ const state = {
   lastUpdated: null,
   canDeleteReport: false,
   canEditTags: false,
+  canAccessAdmin: false,
+  canCreateReportZero: false,
+  canEditReports: false,
+  canManageLots: false,
+  canManagePallets: false,
+  canManageLogistics: false,
+  canRenameTags: false,
   pageSize: 24,
   pageStart: 0,
   pages: [],
@@ -869,15 +876,7 @@ async function loadMeta() {
     state.activeTagId = data.activeTagId ? normalizeTagId(data.activeTagId) : null;
     state.lots = Array.isArray(data.lots) ? data.lots : [];
     state.activeLotId = data.activeLotId ? normalizeLotId(data.activeLotId) : null;
-    if (data.permissions && typeof data.permissions.canDeleteReport === 'boolean') {
-      state.canDeleteReport = data.permissions.canDeleteReport;
-    }
-    if (data.permissions && typeof data.permissions.canEditTags === 'boolean') {
-      state.canEditTags = data.permissions.canEditTags;
-    }
-    setLotsLinkVisible(state.canEditTags);
-    setPalletsLinkVisible(state.canEditTags);
-    updatePurgeImportsVisibility();
+    applyPermissions(data.permissions || null);
     hydrateTagFilterFromNames();
     renderTagFilters();
     renderTechFilters();
@@ -2072,6 +2071,13 @@ function setPalletsLinkVisible(visible) {
   palletsLink.hidden = !visible;
 }
 
+function setReportZeroVisible(visible) {
+  if (!reportZeroBtn) {
+    return;
+  }
+  reportZeroBtn.hidden = !visible;
+}
+
 function updatePurgeImportsVisibility() {
   if (!purgeImportsBtn) {
     return;
@@ -2084,23 +2090,32 @@ function canDeleteReportFromUser(user) {
   if (!user) {
     return false;
   }
-  if (user.permissions && user.permissions.canDeleteReport) {
-    return true;
-  }
-  if (user.type === 'local') {
-    return true;
-  }
-  return Boolean(user.isHydraAdmin);
+  return Boolean(user.permissions && user.permissions.canDeleteReport);
+}
+
+function applyPermissions(permissions) {
+  const source = permissions && typeof permissions === 'object' ? permissions : {};
+  state.canDeleteReport = source.canDeleteReport === true;
+  state.canEditTags = source.canEditTags === true;
+  state.canAccessAdmin = source.canAccessAdminPage === true;
+  state.canCreateReportZero = source.canCreateReportZero === true;
+  state.canEditReports = source.canEditReports === true;
+  state.canManageLots = source.canManageLots === true;
+  state.canManagePallets = source.canManagePallets === true;
+  state.canManageLogistics = source.canManageLogistics === true;
+  state.canRenameTags = source.canRenameTags === true;
+  setAdminLinkVisible(state.canAccessAdmin);
+  setLotsLinkVisible(state.canManageLots || state.canManageLogistics);
+  setPalletsLinkVisible(state.canManagePallets || state.canManageLogistics);
+  setReportZeroVisible(state.canCreateReportZero);
+  updatePurgeImportsVisibility();
 }
 
 async function initAdminLink() {
   if (!adminLink && !lotsLink && !palletsLink) {
     return;
   }
-  setAdminLinkVisible(false);
-  setLotsLinkVisible(false);
-  setPalletsLinkVisible(false);
-  updatePurgeImportsVisibility();
+  applyPermissions(null);
   try {
     const response = await fetch('/api/me');
     if (response.status === 401) {
@@ -2112,24 +2127,11 @@ async function initAdminLink() {
     }
     const data = await response.json();
     if (data.user) {
-      if (data.user.type === 'local') {
-        setAdminLinkVisible(true);
-      }
-      const canDelete = canDeleteReportFromUser(data.user);
-      if (canDelete) {
-        state.canDeleteReport = true;
-        state.canEditTags = true;
-        setLotsLinkVisible(true);
-        setPalletsLinkVisible(true);
-        updatePurgeImportsVisibility();
-        renderList();
-      }
+      applyPermissions(data.user.permissions || null);
+      renderList();
     }
   } catch (error) {
-    setAdminLinkVisible(false);
-    setLotsLinkVisible(false);
-    setPalletsLinkVisible(false);
-    updatePurgeImportsVisibility();
+    applyPermissions(null);
   }
 }
 
@@ -2526,12 +2528,12 @@ function buildCategoryBadge(category, id, extraClass = '') {
   const normalized = normalizeCategory(category);
   const label = categoryLabels[normalized] || categoryLabels.unknown;
   const className = extraClass ? `badge ${extraClass}` : 'badge';
-  const idAttr = id ? ` data-id="${escapeHtml(String(id))}"` : '';
-  const actionAttr = id ? ' data-action="cycle-category"' : '';
-  const typeAttr = id ? ' type="button"' : '';
-  return `<button class="${className}" data-category="${normalized}"${actionAttr}${idAttr}${typeAttr}>${escapeHtml(
-    label
-  )}</button>`;
+  if (!id || !state.canEditReports) {
+    return `<span class="${className}" data-category="${normalized}">${escapeHtml(label)}</span>`;
+  }
+  return `<button class="${className}" data-category="${normalized}" data-action="cycle-category" data-id="${escapeHtml(
+    String(id)
+  )}" type="button">${escapeHtml(label)}</button>`;
 }
 
 function formatPrimary(machine) {
@@ -3002,7 +3004,7 @@ function formatWinSatNote(score) {
 function renderStatus(status, options = null, labelOverride = null) {
   const normalized = normalizeStatusKey(status) || String(status || '').trim().toLowerCase() || 'unknown';
   const label = labelOverride || statusLabels[normalized] || '--';
-  if (options && options.id && options.key) {
+  if (options && options.id && options.key && state.canEditReports) {
     return `
       <button
         class="status-pill status-button"
@@ -3167,6 +3169,10 @@ function setUsbButtonsLoading(id, loading) {
 }
 
 async function updatePadStatus(id, status) {
+  if (!state.canEditReports) {
+    window.alert("Pas les droits pour modifier ce statut.");
+    return;
+  }
   setPadButtonsLoading(id, true);
   try {
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/pad`, {
@@ -3196,6 +3202,10 @@ async function updatePadStatus(id, status) {
 }
 
 async function updateUsbStatus(id, status) {
+  if (!state.canEditReports) {
+    window.alert("Pas les droits pour modifier ce statut.");
+    return;
+  }
   setUsbButtonsLoading(id, true);
   try {
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/usb`, {
@@ -3311,6 +3321,10 @@ function applyMachineLotUpdate(id, machineKey, lot) {
 }
 
 async function updateCategory(id, category, button) {
+  if (!state.canEditReports) {
+    window.alert("Pas les droits pour modifier la categorie.");
+    return;
+  }
   if (button) {
     button.disabled = true;
     button.classList.add('is-loading');
@@ -3347,6 +3361,10 @@ async function updateCategory(id, category, button) {
 }
 
 async function updateMachineLot(id, lotId, button) {
+  if (!state.canManageLots) {
+    window.alert("Pas les droits pour modifier le lot.");
+    return;
+  }
   if (button) {
     button.disabled = true;
     button.classList.add('is-loading');
@@ -3437,6 +3455,10 @@ function applyComponentStatusUpdate(id, key, status) {
 }
 
 async function updateComponentStatus(id, key, status, button) {
+  if (!state.canEditReports) {
+    window.alert("Pas les droits pour modifier ce statut.");
+    return;
+  }
   if (button) {
     button.disabled = true;
     button.classList.add('is-loading');
@@ -3583,6 +3605,10 @@ async function initPatchnote() {
 
 function openReportZeroModal() {
   if (!reportZeroModal || !reportZeroForm) {
+    return;
+  }
+  if (!state.canCreateReportZero) {
+    window.alert("Pas les droits pour creer un rapport.");
     return;
   }
   reportZeroModal.hidden = false;
@@ -3772,6 +3798,10 @@ function getReportZeroPayload() {
 }
 
 async function createReportZero(payload) {
+  if (!state.canCreateReportZero) {
+    showReportZeroError("Pas les droits pour creer un report 0.");
+    return;
+  }
   setReportZeroLoading(true);
   try {
     const response = await fetch('/api/reports/report-zero', {
@@ -3945,6 +3975,10 @@ function setCommentButtonsLoading(id, loading) {
 }
 
 async function updateComment(id, comment) {
+  if (!state.canEditReports) {
+    window.alert("Pas les droits pour modifier le commentaire.");
+    return;
+  }
   setCommentButtonsLoading(id, true);
   try {
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/comment`, {
@@ -4017,6 +4051,10 @@ function applyTagRename(tagId, newLabel, activeTag) {
 }
 
 async function renameTag(tagId, newTag) {
+  if (!state.canRenameTags) {
+    window.alert("Pas les droits pour renommer le tag.");
+    return;
+  }
   try {
     const response = await fetch('/api/tags/rename', {
       method: 'PUT',
@@ -4711,7 +4749,7 @@ function buildDrawerDetailHtml(detail) {
   const serialBarcodeSrc = serialValue
     ? `/api/barcode/serial/${encodeURIComponent(serialValue)}.png${barcodeParams.length ? `?${barcodeParams.join('&')}` : ''}`
     : '';
-  const lotEditorHtml = state.canEditTags
+  const lotEditorHtml = state.canManageLots
     ? `
       <div class="drawer-lot-field">
         <span>Lot</span>
@@ -4802,18 +4840,27 @@ function buildDrawerDetailHtml(detail) {
   const commentMeta = detail.commentedAt
     ? `<p class="drawer-note-meta">Derniere modif: ${escapeHtml(formatDateTime(detail.commentedAt))}</p>`
     : '';
-  const commentsPanel = `
-    <div class="drawer-comment-block">
-      <textarea class="drawer-comment-input" data-comment-id="${detailId}" maxlength="800" placeholder="Ajouter un commentaire">${escapeHtml(
-        commentValue
-      )}</textarea>
-      <div class="drawer-comment-actions">
-        <button class="drawer-action-btn" type="button" data-action="clear-comment" data-id="${detailId}">Effacer</button>
+  const commentDisplay = commentValue || '--';
+  const commentsPanel = state.canEditReports
+    ? `
+      <div class="drawer-comment-block">
+        <textarea class="drawer-comment-input" data-comment-id="${detailId}" maxlength="800" placeholder="Ajouter un commentaire">${escapeHtml(
+          commentValue
+        )}</textarea>
+        <div class="drawer-comment-actions">
+          <button class="drawer-action-btn" type="button" data-action="clear-comment" data-id="${detailId}">Effacer</button>
+        </div>
+        ${commentMeta}
       </div>
-      ${commentMeta}
-    </div>
-    ${buildReportHistory(detail)}
-  `;
+      ${buildReportHistory(detail)}
+    `
+    : `
+      <div class="drawer-comment-block">
+        <div class="drawer-comment-readonly">${escapeHtml(commentDisplay)}</div>
+        ${commentMeta}
+      </div>
+      ${buildReportHistory(detail)}
+    `;
 
   const tabs = [
     { id: 'identifiants', title: 'Identifiants', content: identifiersPanel },
@@ -5073,7 +5120,7 @@ function renderList(isScrollUpdate = false) {
       const hasAssignedPallet = Boolean(rawPalletLabel && rawPalletLabel !== DEFAULT_PALLET_LABEL);
       const palletLabel = hasAssignedPallet ? rawPalletLabel : DEFAULT_PALLET_LABEL;
       const palletValue = escapeHtml(palletLabel);
-      const tagHtml = state.canEditTags && tagIdValue
+      const tagHtml = state.canRenameTags && tagIdValue
         ? `<button class="tag-pill is-editable" type="button" title="${tagValue}" data-tag="${tagValue}" data-tag-id="${tagIdValue}">${tagValue}</button>`
         : `<span class="tag-pill" title="${tagValue}">${tagValue}</span>`;
       const lotClasses = ['lot-pill'];
@@ -5112,18 +5159,10 @@ function renderList(isScrollUpdate = false) {
         `
         : '';
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
-      const commentDisplay = commentValue || 'Ajouter un commentaire';
+      const commentDisplay = commentValue || (state.canEditReports ? 'Ajouter un commentaire' : 'Aucun commentaire');
       const isEditingComment = state.quickCommentId === machine.id;
-      const commentHtml = `
-        <div
-          class="card-comment${commentValue ? '' : ' is-empty'}${isEditingComment ? ' is-editing' : ''}"
-          data-comment-card="${machine.id}"
-          title="${escapeHtml(commentValue)}"
-        >
-          <div class="comment-view">
-            <span class="comment-label">Commentaire</span>
-            <span class="comment-text">${escapeHtml(commentDisplay)}</span>
-          </div>
+      const commentEditHtml = state.canEditReports
+        ? `
           <div class="comment-edit">
             <textarea
               class="comment-inline"
@@ -5132,6 +5171,20 @@ function renderList(isScrollUpdate = false) {
               placeholder="Ajouter un commentaire"
             >${escapeHtml(commentValue)}</textarea>
           </div>
+        `
+        : '';
+      const commentCardAttr = state.canEditReports ? ` data-comment-card="${machine.id}"` : '';
+      const commentHtml = `
+        <div
+          class="card-comment${commentValue ? '' : ' is-empty'}${isEditingComment ? ' is-editing' : ''}"
+          ${commentCardAttr}
+          title="${escapeHtml(commentValue)}"
+        >
+          <div class="comment-view">
+            <span class="comment-label">Commentaire</span>
+            <span class="comment-text">${escapeHtml(commentDisplay)}</span>
+          </div>
+          ${commentEditHtml}
         </div>
       `;
       const selected = state.expandedId === machine.id ? 'selected' : '';
@@ -5326,20 +5379,28 @@ function buildDetailHtml(detail) {
     ? `<div class="comment-meta">Derniere modif : ${escapeHtml(formatDateTime(detail.commentedAt))}</div>`
     : '';
   const commentHtml = detailId
-    ? `
-      <div class="comment-block">
-        <span class="comment-label">Commentaire</span>
-        <textarea class="comment-input" data-comment-id="${detailId}" maxlength="800">${escapeHtml(
-          commentValue
-        )}</textarea>
-        <div class="comment-actions">
-          <button class="detail-action" type="button" data-action="clear-comment" data-id="${detailId}">
-            Effacer
-          </button>
+    ? state.canEditReports
+      ? `
+        <div class="comment-block">
+          <span class="comment-label">Commentaire</span>
+          <textarea class="comment-input" data-comment-id="${detailId}" maxlength="800">${escapeHtml(
+            commentValue
+          )}</textarea>
+          <div class="comment-actions">
+            <button class="detail-action" type="button" data-action="clear-comment" data-id="${detailId}">
+              Effacer
+            </button>
+          </div>
+          ${commentMeta}
         </div>
-        ${commentMeta}
-      </div>
-    `
+      `
+      : `
+        <div class="comment-block">
+          <span class="comment-label">Commentaire</span>
+          <div class="comment-readonly">${escapeHtml(commentValue || '--')}</div>
+          ${commentMeta}
+        </div>
+      `
     : '';
   const payload =
     detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
@@ -6590,6 +6651,9 @@ listEl.addEventListener('click', (event) => {
   if (commentCard) {
     event.preventDefault();
     event.stopPropagation();
+    if (!state.canEditReports) {
+      return;
+    }
     const id = commentCard.dataset.commentCard;
     if (!id) {
       return;
@@ -6605,7 +6669,7 @@ listEl.addEventListener('click', (event) => {
   if (tagPill && tagPill.dataset.tagId) {
     event.preventDefault();
     event.stopPropagation();
-    if (!state.canEditTags) {
+    if (!state.canRenameTags) {
       return;
     }
     const tagId = tagPill.dataset.tagId;

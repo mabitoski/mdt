@@ -2,6 +2,7 @@ const manualCsvImportForm = document.getElementById('manual-csv-import-form');
 const manualCsvFileInput = document.getElementById('manual-csv-file');
 const manualCsvSubmit = document.getElementById('manual-csv-submit');
 const manualCsvFeedback = document.getElementById('manual-csv-feedback');
+let canImportManualCsv = false;
 
 function setFeedback(target, state, message) {
   if (!target) {
@@ -26,10 +27,41 @@ function readFileAsText(file) {
 
 function setManualImportLoading(loading) {
   if (manualCsvFileInput) {
-    manualCsvFileInput.disabled = loading;
+    manualCsvFileInput.disabled = loading || !canImportManualCsv;
   }
   if (manualCsvSubmit) {
-    manualCsvSubmit.disabled = loading;
+    manualCsvSubmit.disabled = loading || !canImportManualCsv;
+  }
+}
+
+async function initManualCsvPermissions() {
+  if (!manualCsvImportForm) {
+    return;
+  }
+  try {
+    const response = await fetch('/api/me');
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      return;
+    }
+    const data = await response.json();
+    canImportManualCsv = Boolean(data && data.user && data.user.permissions && data.user.permissions.canImportManualCsv);
+    if (!canImportManualCsv) {
+      setFeedback(
+        manualCsvFeedback,
+        'info',
+        "Import manuel reserve aux profils atelier autorises."
+      );
+    } else {
+      setFeedback(manualCsvFeedback, '', '');
+    }
+  } catch (error) {
+    canImportManualCsv = false;
+  } finally {
+    setManualImportLoading(false);
   }
 }
 
@@ -50,6 +82,10 @@ function formatErrorList(errors) {
 
 async function submitManualCsvImport(event) {
   event.preventDefault();
+  if (!canImportManualCsv) {
+    setFeedback(manualCsvFeedback, 'error', "Pas les droits pour importer ce CSV.");
+    return;
+  }
   if (!manualCsvFileInput || !manualCsvFileInput.files || !manualCsvFileInput.files.length) {
     setFeedback(manualCsvFeedback, 'error', 'Selectionne un fichier CSV.');
     return;
@@ -71,6 +107,10 @@ async function submitManualCsvImport(event) {
     });
     if (response.status === 401) {
       window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      setFeedback(manualCsvFeedback, 'error', "Pas les droits pour importer ce CSV.");
       return;
     }
 
@@ -108,4 +148,5 @@ async function submitManualCsvImport(event) {
 
 if (manualCsvImportForm) {
   manualCsvImportForm.addEventListener('submit', submitManualCsvImport);
+  initManualCsvPermissions();
 }

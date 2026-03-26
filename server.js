@@ -130,6 +130,11 @@ const MICROSOFT_ENTRA_CLIENT_SECRET = process.env.MICROSOFT_ENTRA_CLIENT_SECRET 
 const MICROSOFT_ENTRA_REDIRECT_URI = (process.env.MICROSOFT_ENTRA_REDIRECT_URI || '').trim();
 const MICROSOFT_ADMIN_EMAILS_RAW = process.env.MICROSOFT_ADMIN_EMAILS || '';
 const MICROSOFT_ADMIN_ROLE = (process.env.MICROSOFT_ADMIN_ROLE || '').trim();
+const MICROSOFT_READER_GROUP_IDS_RAW = process.env.MICROSOFT_READER_GROUP_IDS || '';
+const MICROSOFT_OPERATOR_GROUP_IDS_RAW = process.env.MICROSOFT_OPERATOR_GROUP_IDS || '';
+const MICROSOFT_LOGISTICS_GROUP_IDS_RAW = process.env.MICROSOFT_LOGISTICS_GROUP_IDS || '';
+const MICROSOFT_ADMIN_GROUP_IDS_RAW = process.env.MICROSOFT_ADMIN_GROUP_IDS || '';
+const MICROSOFT_PLATFORM_ADMIN_GROUP_IDS_RAW = process.env.MICROSOFT_PLATFORM_ADMIN_GROUP_IDS || '';
 const MICROSOFT_SSO_ENABLED = Boolean(
   MICROSOFT_ENTRA_TENANT_ID && MICROSOFT_ENTRA_CLIENT_ID && MICROSOFT_ENTRA_CLIENT_SECRET
 );
@@ -183,6 +188,175 @@ function generateUuid() {
   }
   const hex = crypto.randomBytes(16).toString('hex');
   return normalizeUuid(hex);
+}
+
+const ACCESS_LEVELS = Object.freeze({
+  reader: 'reader',
+  operator: 'operator',
+  logistics: 'logistics',
+  admin: 'admin',
+  platformAdmin: 'platform_admin'
+});
+
+const ACCESS_LEVEL_RANKS = Object.freeze({
+  [ACCESS_LEVELS.reader]: 0,
+  [ACCESS_LEVELS.operator]: 10,
+  [ACCESS_LEVELS.logistics]: 20,
+  [ACCESS_LEVELS.admin]: 30,
+  [ACCESS_LEVELS.platformAdmin]: 40
+});
+
+function normalizeAccessLevel(value) {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (raw === ACCESS_LEVELS.operator) {
+    return ACCESS_LEVELS.operator;
+  }
+  if (raw === ACCESS_LEVELS.logistics) {
+    return ACCESS_LEVELS.logistics;
+  }
+  if (raw === ACCESS_LEVELS.admin) {
+    return ACCESS_LEVELS.admin;
+  }
+  if (raw === ACCESS_LEVELS.platformAdmin) {
+    return ACCESS_LEVELS.platformAdmin;
+  }
+  return ACCESS_LEVELS.reader;
+}
+
+function accessLevelRank(value) {
+  return ACCESS_LEVEL_RANKS[normalizeAccessLevel(value)] || 0;
+}
+
+function maxAccessLevel(currentLevel, nextLevel) {
+  return accessLevelRank(nextLevel) > accessLevelRank(currentLevel)
+    ? normalizeAccessLevel(nextLevel)
+    : normalizeAccessLevel(currentLevel);
+}
+
+function normalizeDirectoryObjectId(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)
+    ? normalized
+    : '';
+}
+
+function parseDirectoryObjectIdList(raw) {
+  return String(raw || '')
+    .split(/[\s,;]+/)
+    .map((entry) => normalizeDirectoryObjectId(entry))
+    .filter(Boolean);
+}
+
+const MICROSOFT_GROUP_IDS = Object.freeze({
+  [ACCESS_LEVELS.reader]: parseDirectoryObjectIdList(MICROSOFT_READER_GROUP_IDS_RAW),
+  [ACCESS_LEVELS.operator]: parseDirectoryObjectIdList(MICROSOFT_OPERATOR_GROUP_IDS_RAW),
+  [ACCESS_LEVELS.logistics]: parseDirectoryObjectIdList(MICROSOFT_LOGISTICS_GROUP_IDS_RAW),
+  [ACCESS_LEVELS.admin]: parseDirectoryObjectIdList(MICROSOFT_ADMIN_GROUP_IDS_RAW),
+  [ACCESS_LEVELS.platformAdmin]: parseDirectoryObjectIdList(MICROSOFT_PLATFORM_ADMIN_GROUP_IDS_RAW)
+});
+
+function buildPermissionSet(overrides = {}) {
+  const canCreateReportZero = overrides.canCreateReportZero === true;
+  const canEditReports = overrides.canEditReports === true;
+  const canImportManualCsv = overrides.canImportManualCsv === true;
+  const canManageLots = overrides.canManageLots === true;
+  const canManagePallets = overrides.canManagePallets === true;
+  const canExportBatchReports = overrides.canExportBatchReports === true;
+  const canRenameTags = overrides.canRenameTags === true;
+  const canDeleteReport = overrides.canDeleteReport === true;
+  const canPurgeLegacyImports = overrides.canPurgeLegacyImports === true;
+  const canManageLdap = overrides.canManageLdap === true;
+  const canManageLogistics = canManageLots || canManagePallets || canExportBatchReports;
+  return {
+    canCreateReportZero,
+    canEditReports,
+    canImportManualCsv,
+    canManageLots,
+    canManagePallets,
+    canManageLogistics,
+    canExportBatchReports,
+    canRenameTags,
+    canDeleteReport,
+    canPurgeLegacyImports,
+    canManageLdap,
+    canAccessAdminPage: canManageLdap,
+    canEditTags: canManageLots || canManagePallets || canRenameTags
+  };
+}
+
+function buildPermissionsForAccessLevel(accessLevel) {
+  switch (normalizeAccessLevel(accessLevel)) {
+    case ACCESS_LEVELS.platformAdmin:
+      return buildPermissionSet({
+        canCreateReportZero: true,
+        canEditReports: true,
+        canImportManualCsv: true,
+        canManageLots: true,
+        canManagePallets: true,
+        canExportBatchReports: true,
+        canRenameTags: true,
+        canDeleteReport: true,
+        canPurgeLegacyImports: true,
+        canManageLdap: true
+      });
+    case ACCESS_LEVELS.admin:
+      return buildPermissionSet({
+        canCreateReportZero: true,
+        canEditReports: true,
+        canImportManualCsv: true,
+        canManageLots: true,
+        canManagePallets: true,
+        canExportBatchReports: true,
+        canRenameTags: true,
+        canDeleteReport: true,
+        canPurgeLegacyImports: true
+      });
+    case ACCESS_LEVELS.logistics:
+      return buildPermissionSet({
+        canCreateReportZero: true,
+        canEditReports: true,
+        canImportManualCsv: true,
+        canManageLots: true,
+        canManagePallets: true,
+        canExportBatchReports: true
+      });
+    case ACCESS_LEVELS.operator:
+      return buildPermissionSet({
+        canCreateReportZero: true,
+        canEditReports: true,
+        canImportManualCsv: true
+      });
+    default:
+      return buildPermissionSet();
+  }
+}
+
+function normalizePermissionSet(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return buildPermissionSet();
+  }
+  return buildPermissionSet(raw);
+}
+
+function getUserPermissions(user) {
+  if (!user || typeof user !== 'object') {
+    return buildPermissionSet();
+  }
+  if (user.type === 'local') {
+    return buildPermissionsForAccessLevel(ACCESS_LEVELS.platformAdmin);
+  }
+  return normalizePermissionSet(user.permissions);
+}
+
+function hasPermission(user, permissionKey) {
+  if (!permissionKey) {
+    return false;
+  }
+  return getUserPermissions(user)[permissionKey] === true;
 }
 
 function normalizeObjectStorageSegment(value) {
@@ -2515,23 +2689,11 @@ function requireAuth(req, res, next) {
 }
 
 function requireAdmin(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ ok: false, error: 'unauthorized' });
-  }
-  if (req.session.user.type !== 'local') {
-    return res.status(403).json({ ok: false, error: 'forbidden' });
-  }
-  return next();
+  return requirePermission('canManageLdap')(req, res, next);
 }
 
 function requireAdminPage(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.redirect('/login');
-  }
-  if (req.session.user.type !== 'local') {
-    return res.redirect('/');
-  }
-  return next();
+  return requirePermissionPage('canAccessAdminPage')(req, res, next);
 }
 
 function getPatchnoteUser(req) {
@@ -2625,7 +2787,12 @@ async function refreshLdapPermissions(req) {
     return req.session?.user || null;
   }
   const user = req.session.user;
-  if (user.isHydraAdmin === true && user.permissions && user.permissions.canDeleteReport === true) {
+  const currentPermissions = normalizePermissionSet(user.permissions);
+  const accessLevel = normalizeAccessLevel(user.accessLevel);
+  if (
+    (user.isHydraAdmin === true && currentPermissions.canDeleteReport === true) ||
+    (accessLevel === ACCESS_LEVELS.operator && currentPermissions.canEditReports === true)
+  ) {
     return user;
   }
   try {
@@ -2636,14 +2803,13 @@ async function refreshLdapPermissions(req) {
     }
     const groups = extractLdapGroups(ldapUser);
     const isHydraAdmin = isHydraAdminMember(groups);
+    const accessLevel = isHydraAdmin ? ACCESS_LEVELS.admin : ACCESS_LEVELS.operator;
     const updated = {
       ...user,
       groups,
+      accessLevel,
       isHydraAdmin,
-      permissions: {
-        ...(user.permissions || {}),
-        canDeleteReport: isHydraAdmin
-      }
+      permissions: buildPermissionsForAccessLevel(accessLevel)
     };
     req.session.user = updated;
     req.session.save(() => {});
@@ -2654,71 +2820,85 @@ async function refreshLdapPermissions(req) {
 }
 
 function canDeleteReports(user) {
-  if (!user) {
-    return false;
-  }
-  if (user.type === 'local') {
-    return true;
-  }
-  if (user.permissions && user.permissions.canDeleteReport) {
-    return true;
-  }
-  return Boolean(user.isHydraAdmin);
+  return hasPermission(user, 'canDeleteReport');
 }
 
 function canEditTags(user) {
-  return canDeleteReports(user);
+  return hasPermission(user, 'canEditTags');
+}
+
+function canManageLogistics(user) {
+  return hasPermission(user, 'canManageLogistics');
+}
+
+function canOperateReports(user) {
+  return hasPermission(user, 'canEditReports');
+}
+
+function canManageLdap(user) {
+  return hasPermission(user, 'canManageLdap');
+}
+
+function requirePermission(permissionKey) {
+  return (req, res, next) => {
+    if (!req.session || !req.session.user) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    if (hasPermission(req.session.user, permissionKey)) {
+      return next();
+    }
+    return refreshLdapPermissions(req)
+      .then((user) => {
+        if (!hasPermission(user, permissionKey)) {
+          return res.status(403).json({ ok: false, error: 'forbidden' });
+        }
+        return next();
+      })
+      .catch(() => res.status(403).json({ ok: false, error: 'forbidden' }));
+  };
+}
+
+function requirePermissionPage(permissionKey) {
+  return (req, res, next) => {
+    if (!req.session || !req.session.user) {
+      return res.redirect('/login');
+    }
+    if (hasPermission(req.session.user, permissionKey)) {
+      return next();
+    }
+    return refreshLdapPermissions(req)
+      .then((user) => {
+        if (!hasPermission(user, permissionKey)) {
+          return res.redirect('/');
+        }
+        return next();
+      })
+      .catch(() => res.redirect('/'));
+  };
 }
 
 function requireReportDelete(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ ok: false, error: 'unauthorized' });
-  }
-  if (canDeleteReports(req.session.user)) {
-    return next();
-  }
-  refreshLdapPermissions(req)
-    .then((user) => {
-      if (!canDeleteReports(user)) {
-        return res.status(403).json({ ok: false, error: 'forbidden' });
-      }
-      return next();
-    })
-    .catch(() => res.status(403).json({ ok: false, error: 'forbidden' }));
+  return requirePermission('canDeleteReport')(req, res, next);
+}
+
+function requireOperator(req, res, next) {
+  return requirePermission('canEditReports')(req, res, next);
+}
+
+function requireLogistics(req, res, next) {
+  return requirePermission('canManageLogistics')(req, res, next);
+}
+
+function requireLogisticsPage(req, res, next) {
+  return requirePermissionPage('canManageLogistics')(req, res, next);
 }
 
 function requireTagEdit(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ ok: false, error: 'unauthorized' });
-  }
-  if (canEditTags(req.session.user)) {
-    return next();
-  }
-  refreshLdapPermissions(req)
-    .then((user) => {
-      if (!canEditTags(user)) {
-        return res.status(403).json({ ok: false, error: 'forbidden' });
-      }
-      return next();
-    })
-    .catch(() => res.status(403).json({ ok: false, error: 'forbidden' }));
+  return requireLogistics(req, res, next);
 }
 
 function requireTagEditPage(req, res, next) {
-  if (!req.session || !req.session.user) {
-    return res.redirect('/login');
-  }
-  if (canEditTags(req.session.user)) {
-    return next();
-  }
-  refreshLdapPermissions(req)
-    .then((user) => {
-      if (!canEditTags(user)) {
-        return res.redirect('/');
-      }
-      return next();
-    })
-    .catch(() => res.redirect('/'));
+  return requireLogisticsPage(req, res, next);
 }
 
 function cleanString(value, maxLength) {
@@ -5327,19 +5507,20 @@ async function isLocalAdmin(username, password) {
 }
 
 function buildLocalSessionUser(username) {
+  const accessLevel = ACCESS_LEVELS.platformAdmin;
   return {
     username,
     type: 'local',
+    accessLevel,
     isHydraAdmin: true,
-    permissions: {
-      canDeleteReport: true
-    }
+    permissions: buildPermissionsForAccessLevel(accessLevel)
   };
 }
 
 function buildLdapSessionUser(username, ldapUser) {
   const groups = extractLdapGroups(ldapUser);
   const isHydraAdmin = isHydraAdminMember(groups);
+  const accessLevel = isHydraAdmin ? ACCESS_LEVELS.admin : ACCESS_LEVELS.operator;
   return {
     username,
     type: 'ldap',
@@ -5347,10 +5528,9 @@ function buildLdapSessionUser(username, ldapUser) {
     dn: ldapUser.dn || null,
     mail: ldapUser.mail || null,
     groups,
+    accessLevel,
     isHydraAdmin,
-    permissions: {
-      canDeleteReport: isHydraAdmin
-    }
+    permissions: buildPermissionsForAccessLevel(accessLevel)
   };
 }
 
@@ -5370,6 +5550,45 @@ function parseMicrosoftAdminEmails() {
     .split(',')
     .map((item) => normalizeEmailAddress(item))
     .filter(Boolean);
+}
+
+function normalizeMicrosoftGroupIds(values) {
+  return Array.isArray(values)
+    ? values.map((value) => normalizeDirectoryObjectId(value)).filter(Boolean)
+    : [];
+}
+
+function hasMicrosoftGroup(groups, allowedGroupIds) {
+  if (!Array.isArray(groups) || !groups.length || !Array.isArray(allowedGroupIds) || !allowedGroupIds.length) {
+    return false;
+  }
+  const known = new Set(normalizeMicrosoftGroupIds(groups));
+  return allowedGroupIds.some((groupId) => known.has(groupId));
+}
+
+function resolveMicrosoftAccessLevel(groups, roles, email) {
+  let accessLevel = ACCESS_LEVELS.reader;
+  if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.reader])) {
+    accessLevel = ACCESS_LEVELS.reader;
+  }
+  if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.operator])) {
+    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.operator);
+  }
+  if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.logistics])) {
+    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.logistics);
+  }
+  if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.admin])) {
+    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.admin);
+  }
+  if (hasMicrosoftGroup(groups, MICROSOFT_GROUP_IDS[ACCESS_LEVELS.platformAdmin])) {
+    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.platformAdmin);
+  }
+
+  const allowedEmails = parseMicrosoftAdminEmails();
+  if ((email && allowedEmails.includes(email)) || canUseMicrosoftAdminRole(roles)) {
+    accessLevel = maxAccessLevel(accessLevel, ACCESS_LEVELS.admin);
+  }
+  return accessLevel;
 }
 
 function getMicrosoftAuthority() {
@@ -5450,9 +5669,7 @@ function buildMicrosoftSessionUser(account, claims) {
   const roles = Array.isArray(sourceClaims.roles)
     ? sourceClaims.roles.map((role) => String(role || '').trim()).filter(Boolean)
     : [];
-  const groups = Array.isArray(sourceClaims.groups)
-    ? sourceClaims.groups.map((group) => String(group || '').trim()).filter(Boolean)
-    : [];
+  const groups = normalizeMicrosoftGroupIds(sourceClaims.groups);
   const email =
     normalizeEmailAddress(sourceClaims.preferred_username) ||
     normalizeEmailAddress(sourceClaims.email) ||
@@ -5462,10 +5679,9 @@ function buildMicrosoftSessionUser(account, claims) {
     sourceClaims.name || (account && (account.name || account.username)) || email || 'Utilisateur Microsoft',
     128
   );
-  const allowedEmails = parseMicrosoftAdminEmails();
-  const isHydraAdmin = Boolean(
-    (email && allowedEmails.includes(email)) || canUseMicrosoftAdminRole(roles)
-  );
+  const accessLevel = resolveMicrosoftAccessLevel(groups, roles, email);
+  const permissions = buildPermissionsForAccessLevel(accessLevel);
+  const isHydraAdmin = accessLevelRank(accessLevel) >= accessLevelRank(ACCESS_LEVELS.admin);
   return {
     username: email || cleanString((account && account.username) || displayName, 128) || 'microsoft-user',
     type: 'microsoft',
@@ -5474,12 +5690,11 @@ function buildMicrosoftSessionUser(account, claims) {
     mail: email,
     groups,
     roles,
+    accessLevel,
     tenantId: cleanString(sourceClaims.tid || (account && account.tenantId) || '', 64),
     oid: cleanString(sourceClaims.oid || (account && account.localAccountId) || '', 128),
     isHydraAdmin,
-    permissions: {
-      canDeleteReport: isHydraAdmin
-    }
+    permissions
   };
 }
 
@@ -8054,19 +8269,19 @@ app.get('/admin.html', requireAuth, requireAdminPage, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'admin.html'));
 });
 
-app.get('/lots', requireAuth, requireTagEditPage, (req, res) => {
+app.get('/lots', requireAuth, requireLogisticsPage, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'lots.html'));
 });
 
-app.get('/lots.html', requireAuth, requireTagEditPage, (req, res) => {
+app.get('/lots.html', requireAuth, requireLogisticsPage, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'lots.html'));
 });
 
-app.get('/pallets', requireAuth, requireTagEditPage, (req, res) => {
+app.get('/pallets', requireAuth, requireLogisticsPage, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'pallets.html'));
 });
 
-app.get('/pallets.html', requireAuth, requireTagEditPage, (req, res) => {
+app.get('/pallets.html', requireAuth, requireLogisticsPage, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'pallets.html'));
 });
 
@@ -8354,10 +8569,31 @@ app.get('/api/barcode/serial/:serial.png', requireAuth, async (req, res) => {
 app.get('/api/me', requireAuth, (req, res) => {
   refreshLdapPermissions(req)
     .then((user) => {
-      res.json({ ok: true, user: user || req.session.user });
+      const resolvedUser = user || req.session.user;
+      if (resolvedUser && typeof resolvedUser === 'object') {
+        res.json({
+          ok: true,
+          user: {
+            ...resolvedUser,
+            permissions: getUserPermissions(resolvedUser)
+          }
+        });
+        return;
+      }
+      res.json({ ok: true, user: resolvedUser });
     })
     .catch(() => {
-      res.json({ ok: true, user: req.session.user });
+      const resolvedUser = req.session.user;
+      res.json({
+        ok: true,
+        user:
+          resolvedUser && typeof resolvedUser === 'object'
+            ? {
+                ...resolvedUser,
+                permissions: getUserPermissions(resolvedUser)
+              }
+            : resolvedUser
+      });
     });
 });
 
@@ -9540,10 +9776,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
   let permissions = null;
   try {
     const user = await refreshLdapPermissions(req);
-    permissions = {
-      canDeleteReport: canDeleteReports(user),
-      canEditTags: canEditTags(user)
-    };
+    permissions = getUserPermissions(user);
   } catch (error) {
     permissions = null;
   }
@@ -9631,7 +9864,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/lots', requireAuth, async (req, res) => {
+app.get('/api/lots', requireLogistics, async (req, res) => {
   try {
     const lotRows = await listLotsWithAssignments(pool);
     const lots = lotRows.map((row) => mapLotRowForResponse(row)).filter(Boolean);
@@ -10305,7 +10538,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
   });
 });
 
-app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
+app.put('/api/machines/:id/pad', requireOperator, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
@@ -10367,7 +10600,7 @@ app.put('/api/machines/:id/pad', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/machines/:id/usb', requireAuth, async (req, res) => {
+app.put('/api/machines/:id/usb', requireOperator, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
@@ -10429,7 +10662,7 @@ app.put('/api/machines/:id/usb', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/reports/:id/component', requireAuth, async (req, res) => {
+app.put('/api/reports/:id/component', requireOperator, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
@@ -10510,7 +10743,7 @@ app.put('/api/reports/:id/component', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/reports/:id/category', requireAuth, async (req, res) => {
+app.put('/api/reports/:id/category', requireOperator, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
@@ -10673,7 +10906,7 @@ app.put('/api/machines/:id/lot', requireTagEdit, async (req, res) => {
   }
 });
 
-app.post('/api/machines/:id/report-zero', requireAuth, async (req, res) => {
+app.post('/api/machines/:id/report-zero', requireOperator, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
@@ -10907,7 +11140,7 @@ app.get('/api/reports/manual-template.csv', requireAuth, (req, res) => {
   return res.status(200).send(csv);
 });
 
-app.post('/api/reports/import-manual-csv', requireAuth, async (req, res) => {
+app.post('/api/reports/import-manual-csv', requireOperator, async (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const csvText = typeof body.csvText === 'string' ? body.csvText : '';
   if (!csvText.trim()) {
@@ -10980,7 +11213,7 @@ app.post('/api/reports/import-manual-csv', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/reports/report-zero', requireAuth, async (req, res) => {
+app.post('/api/reports/report-zero', requireOperator, async (req, res) => {
   const body = req.body;
   if (!body || typeof body !== 'object') {
     return res.status(400).json({ ok: false, error: 'invalid_payload' });
@@ -11314,7 +11547,7 @@ app.delete('/api/reports/:id', requireAuth, requireReportDelete, async (req, res
   }
 });
 
-app.put('/api/machines/:id/comment', requireAuth, async (req, res) => {
+app.put('/api/machines/:id/comment', requireOperator, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
@@ -11363,7 +11596,7 @@ app.put('/api/machines/:id/comment', requireAuth, async (req, res) => {
   }
 });
 
-app.put('/api/tags/rename', requireTagEdit, async (req, res) => {
+app.put('/api/tags/rename', requirePermission('canRenameTags'), async (req, res) => {
   const tagIdRaw = req.body?.tagId || req.body?.tag_id || null;
   const oldTagRaw = cleanString(req.body?.oldTag, 64);
   const newTagRaw = cleanString(req.body?.newTag || req.body?.newName, 64);
@@ -11707,7 +11940,7 @@ app.get('/api/machines/:id/report.pdf', requireAuth, async (req, res) => {
   doc.end();
 });
 
-app.get('/api/reports/export.zip', requireTagEdit, async (req, res) => {
+app.get('/api/reports/export.zip', requireLogistics, async (req, res) => {
   const filters = buildShipmentExportFilters(req.query || {});
   if (!filters.shipmentOrderNumber && !filters.shipmentPalletCode) {
     return res.status(400).json({
