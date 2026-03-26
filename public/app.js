@@ -3502,6 +3502,13 @@ function setPatchnoteBody(body) {
   patchnoteBodyEl.innerHTML = safeBody;
 }
 
+function syncModalOpenState() {
+  const hasOpenModal = [patchnoteModal, suggestionModal, reportZeroModal].some(
+    (modal) => modal && !modal.hidden
+  );
+  document.body.classList.toggle('modal-open', hasOpenModal);
+}
+
 function openPatchnoteModal(patchnote) {
   if (!patchnoteModal) {
     return;
@@ -3509,6 +3516,7 @@ function openPatchnoteModal(patchnote) {
   activePatchnoteId = patchnote && patchnote.id ? patchnote.id : null;
   setPatchnoteBody(patchnote && patchnote.body ? patchnote.body : '');
   patchnoteModal.hidden = false;
+  syncModalOpenState();
   if (patchnoteOkBtn) {
     patchnoteOkBtn.focus();
   }
@@ -3520,6 +3528,7 @@ function closePatchnoteModal() {
   }
   patchnoteModal.hidden = true;
   activePatchnoteId = null;
+  syncModalOpenState();
 }
 
 async function acknowledgePatchnote() {
@@ -3577,6 +3586,7 @@ function openReportZeroModal() {
     return;
   }
   reportZeroModal.hidden = false;
+  syncModalOpenState();
   reportZeroForm.reset();
   renderReportZeroLotOptions();
   showReportZeroError('');
@@ -3591,6 +3601,7 @@ function closeReportZeroModal() {
     return;
   }
   reportZeroModal.hidden = true;
+  syncModalOpenState();
   showReportZeroError('');
 }
 
@@ -3676,6 +3687,7 @@ function openSuggestionModal() {
     return;
   }
   suggestionModal.hidden = false;
+  syncModalOpenState();
   if (suggestionForm) {
     suggestionForm.hidden = true;
     suggestionForm.reset();
@@ -3689,6 +3701,7 @@ function closeSuggestionModal() {
     return;
   }
   suggestionModal.hidden = true;
+  syncModalOpenState();
   showSuggestionError('');
 }
 

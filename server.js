@@ -14,6 +14,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const session = require('express-session');
 const LdapAuth = require('ldapauth-fork');
+const { ConfidentialClientApplication } = require('@azure/msal-node');
 const PDFDocument = require('pdfkit');
 const { Pool } = require('pg');
 const bwipjs = require('bwip-js');
@@ -123,6 +124,15 @@ const HYDRA_ADMIN_GROUP_DN = (
   process.env.HYDRA_ADMIN_GROUP_DN ||
   'CN=HYDRA_ADMINS,OU=GROUPS,OU=TIER2,DC=nova,DC=local'
 ).toLowerCase();
+const MICROSOFT_ENTRA_TENANT_ID = (process.env.MICROSOFT_ENTRA_TENANT_ID || '').trim();
+const MICROSOFT_ENTRA_CLIENT_ID = (process.env.MICROSOFT_ENTRA_CLIENT_ID || '').trim();
+const MICROSOFT_ENTRA_CLIENT_SECRET = process.env.MICROSOFT_ENTRA_CLIENT_SECRET || '';
+const MICROSOFT_ENTRA_REDIRECT_URI = (process.env.MICROSOFT_ENTRA_REDIRECT_URI || '').trim();
+const MICROSOFT_ADMIN_EMAILS_RAW = process.env.MICROSOFT_ADMIN_EMAILS || '';
+const MICROSOFT_ADMIN_ROLE = (process.env.MICROSOFT_ADMIN_ROLE || '').trim();
+const MICROSOFT_SSO_ENABLED = Boolean(
+  MICROSOFT_ENTRA_TENANT_ID && MICROSOFT_ENTRA_CLIENT_ID && MICROSOFT_ENTRA_CLIENT_SECRET
+);
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const PGSSLMODE = (process.env.PGSSLMODE || '').toLowerCase();
 const PGSSL =
@@ -5344,6 +5354,135 @@ function buildLdapSessionUser(username, ldapUser) {
   };
 }
 
+function normalizeEmailAddress(value) {
+  if (value == null) {
+    return null;
+  }
+  const email = String(value).trim().toLowerCase();
+  if (!email || !email.includes('@')) {
+    return null;
+  }
+  return email;
+}
+
+function parseMicrosoftAdminEmails() {
+  return String(MICROSOFT_ADMIN_EMAILS_RAW || '')
+    .split(',')
+    .map((item) => normalizeEmailAddress(item))
+    .filter(Boolean);
+}
+
+function getMicrosoftAuthority() {
+  if (!MICROSOFT_ENTRA_TENANT_ID) {
+    return '';
+  }
+  return `https://login.microsoftonline.com/${MICROSOFT_ENTRA_TENANT_ID}`;
+}
+
+function buildPublicAppUrl(req, pathname = '/') {
+  if (HTTPS_PUBLIC_ORIGIN) {
+    try {
+      const base = new URL(HTTPS_PUBLIC_ORIGIN);
+      return new URL(pathname, `${base.origin}/`).toString();
+    } catch (error) {
+      // Fallback to request origin below.
+    }
+  }
+  const forwardedProto = cleanString(req.get('x-forwarded-proto'), 32);
+  const protocol =
+    (forwardedProto ? forwardedProto.split(',')[0].trim().toLowerCase() : '') ||
+    (req.secure || req.protocol === 'https' ? 'https' : 'http');
+  const host = cleanString(req.get('x-forwarded-host'), 255) || cleanString(req.get('host'), 255);
+  if (!host) {
+    return pathname;
+  }
+  return `${protocol}://${host}${pathname.startsWith('/') ? pathname : `/${pathname}`}`;
+}
+
+function getMicrosoftRedirectUri(req) {
+  if (MICROSOFT_ENTRA_REDIRECT_URI) {
+    return MICROSOFT_ENTRA_REDIRECT_URI;
+  }
+  return buildPublicAppUrl(req, '/auth/microsoft/callback');
+}
+
+function getMicrosoftPostLogoutRedirectUri(req) {
+  return buildPublicAppUrl(req, '/login');
+}
+
+function buildMicrosoftLogoutUrl(req) {
+  const authority = getMicrosoftAuthority();
+  if (!authority) {
+    return '/login';
+  }
+  const url = new URL(`${authority}/oauth2/v2.0/logout`);
+  url.searchParams.set('post_logout_redirect_uri', getMicrosoftPostLogoutRedirectUri(req));
+  return url.toString();
+}
+
+let microsoftClientApp = null;
+
+function getMicrosoftClientApp() {
+  if (!MICROSOFT_SSO_ENABLED) {
+    return null;
+  }
+  if (!microsoftClientApp) {
+    microsoftClientApp = new ConfidentialClientApplication({
+      auth: {
+        clientId: MICROSOFT_ENTRA_CLIENT_ID,
+        authority: getMicrosoftAuthority(),
+        clientSecret: MICROSOFT_ENTRA_CLIENT_SECRET
+      }
+    });
+  }
+  return microsoftClientApp;
+}
+
+function canUseMicrosoftAdminRole(roles) {
+  if (!MICROSOFT_ADMIN_ROLE) {
+    return false;
+  }
+  return Array.isArray(roles) && roles.some((role) => String(role || '').trim() === MICROSOFT_ADMIN_ROLE);
+}
+
+function buildMicrosoftSessionUser(account, claims) {
+  const sourceClaims = claims && typeof claims === 'object' ? claims : {};
+  const roles = Array.isArray(sourceClaims.roles)
+    ? sourceClaims.roles.map((role) => String(role || '').trim()).filter(Boolean)
+    : [];
+  const groups = Array.isArray(sourceClaims.groups)
+    ? sourceClaims.groups.map((group) => String(group || '').trim()).filter(Boolean)
+    : [];
+  const email =
+    normalizeEmailAddress(sourceClaims.preferred_username) ||
+    normalizeEmailAddress(sourceClaims.email) ||
+    normalizeEmailAddress(sourceClaims.upn) ||
+    normalizeEmailAddress(account && account.username);
+  const displayName = cleanString(
+    sourceClaims.name || (account && (account.name || account.username)) || email || 'Utilisateur Microsoft',
+    128
+  );
+  const allowedEmails = parseMicrosoftAdminEmails();
+  const isHydraAdmin = Boolean(
+    (email && allowedEmails.includes(email)) || canUseMicrosoftAdminRole(roles)
+  );
+  return {
+    username: email || cleanString((account && account.username) || displayName, 128) || 'microsoft-user',
+    type: 'microsoft',
+    displayName: displayName || email || 'Utilisateur Microsoft',
+    dn: null,
+    mail: email,
+    groups,
+    roles,
+    tenantId: cleanString(sourceClaims.tid || (account && account.tenantId) || '', 64),
+    oid: cleanString(sourceClaims.oid || (account && account.localAccountId) || '', 128),
+    isHydraAdmin,
+    permissions: {
+      canDeleteReport: isHydraAdmin
+    }
+  };
+}
+
 async function authenticateLdap(username, password, configOverride = null) {
   const config = configOverride || (await getEffectiveLdapConfig());
   if (!config.enabled || !config.url || !config.searchBase) {
@@ -7943,6 +8082,98 @@ app.get('/logs', requireAuth, (req, res) => {
   res.redirect('/journal');
 });
 
+app.get('/auth/microsoft/signin', async (req, res) => {
+  if (req.session && req.session.user) {
+    return res.redirect('/');
+  }
+  if (!MICROSOFT_SSO_ENABLED) {
+    return res.redirect('/login?error=1');
+  }
+
+  const clientApp = getMicrosoftClientApp();
+  if (!clientApp) {
+    return res.redirect('/login?error=1');
+  }
+
+  const state = generateRequestId();
+  req.session.microsoftAuthState = state;
+  req.session.microsoftAuthStartedAt = Date.now();
+
+  return req.session.save(async (saveError) => {
+    if (saveError) {
+      return res.redirect('/login?error=1');
+    }
+    try {
+      const authUrl = await clientApp.getAuthCodeUrl({
+        scopes: ['openid', 'profile', 'email'],
+        redirectUri: getMicrosoftRedirectUri(req),
+        state,
+        prompt: 'select_account'
+      });
+      return res.redirect(authUrl);
+    } catch (error) {
+      console.error('Failed to build Microsoft auth URL', error);
+      return res.redirect('/login?error=1');
+    }
+  });
+});
+
+app.get('/auth/microsoft/callback', async (req, res) => {
+  if (!MICROSOFT_SSO_ENABLED) {
+    return res.redirect('/login?error=1');
+  }
+
+  const code = cleanString(typeof req.query?.code === 'string' ? req.query.code : '', 8192);
+  const state = cleanString(typeof req.query?.state === 'string' ? req.query.state : '', 256);
+  const expectedState = cleanString(req.session?.microsoftAuthState || '', 256);
+  delete req.session.microsoftAuthState;
+  delete req.session.microsoftAuthStartedAt;
+
+  if (!code || !state || !expectedState || state !== expectedState) {
+    return req.session.save(() => res.redirect('/login?error=1'));
+  }
+
+  const clientApp = getMicrosoftClientApp();
+  if (!clientApp) {
+    return req.session.save(() => res.redirect('/login?error=1'));
+  }
+
+  try {
+    const tokenResponse = await clientApp.acquireTokenByCode({
+      code,
+      scopes: ['openid', 'profile', 'email'],
+      redirectUri: getMicrosoftRedirectUri(req)
+    });
+    const claims =
+      tokenResponse && tokenResponse.idTokenClaims && typeof tokenResponse.idTokenClaims === 'object'
+        ? tokenResponse.idTokenClaims
+        : {};
+    const tenantId = cleanString(
+      claims.tid || (tokenResponse.account && tokenResponse.account.tenantId) || '',
+      64
+    );
+    if (!tenantId || tenantId.toLowerCase() !== MICROSOFT_ENTRA_TENANT_ID.toLowerCase()) {
+      return req.session.save(() => res.redirect('/login?error=1'));
+    }
+
+    const user = buildMicrosoftSessionUser(tokenResponse.account || null, claims);
+    if (!user || !user.username) {
+      return req.session.save(() => res.redirect('/login?error=1'));
+    }
+
+    return req.session.regenerate((err) => {
+      if (err) {
+        return res.redirect('/login?error=1');
+      }
+      req.session.user = user;
+      return req.session.save(() => res.redirect('/'));
+    });
+  } catch (error) {
+    console.error('Failed Microsoft callback', error);
+    return req.session.save(() => res.redirect('/login?error=1'));
+  }
+});
+
 app.get('/login', (req, res) => {
   if (req.session && req.session.user) {
     return res.redirect('/');
@@ -8026,7 +8257,11 @@ app.get('/logout', (req, res) => {
   if (!req.session) {
     return res.redirect('/login');
   }
-  return req.session.destroy(() => res.redirect('/login'));
+  const nextUrl =
+    req.session.user && req.session.user.type === 'microsoft' && MICROSOFT_SSO_ENABLED
+      ? buildMicrosoftLogoutUrl(req)
+      : '/login';
+  return req.session.destroy(() => res.redirect(nextUrl));
 });
 
 app.get('/guide', requireAuth, (req, res) => {
@@ -8061,6 +8296,16 @@ app.use(express.static(PUBLIC_DIR, { extensions: ['html'], index: false }));
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true });
+});
+
+app.get('/api/auth/providers', (req, res) => {
+  res.json({
+    ok: true,
+    microsoft: {
+      enabled: MICROSOFT_SSO_ENABLED,
+      tenantOnly: true
+    }
+  });
 });
 
 app.get('/api/barcode/serial/:serial.png', requireAuth, async (req, res) => {

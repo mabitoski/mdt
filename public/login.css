@@ -238,6 +238,58 @@ body.login-body {
   display: block;
 }
 
+.login-sso {
+  display: grid;
+  gap: 10px;
+}
+
+.login-microsoft-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(15, 35, 60, 0.16);
+  background: linear-gradient(135deg, #f8fbff 0%, #eef6ff 100%);
+  color: #17324d;
+  text-decoration: none;
+  font-weight: 700;
+  box-shadow: 0 14px 28px rgba(15, 35, 60, 0.08);
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+}
+
+.login-microsoft-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(14, 165, 233, 0.42);
+  box-shadow: 0 18px 34px rgba(14, 31, 46, 0.12);
+}
+
+.login-sso-note {
+  margin: 0;
+  color: var(--login-muted);
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--login-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: rgba(80, 111, 146, 0.22);
+}
+
 .login-form {
   display: grid;
   gap: 12px;

@@ -38,9 +38,18 @@
 
       <section class="login-card" aria-labelledby="login-title">
         <h2 id="login-title">Bienvenue</h2>
-        <p class="login-card-sub">Authentification LDAP ou compte admin local.</p>
+        <p class="login-card-sub">Authentification Microsoft, LDAP ou compte admin local.</p>
         <div class="login-error" id="login-error" role="status" aria-live="polite">
           Identifiants invalides. Reessayez.
+        </div>
+        <div class="login-sso" id="login-sso">
+          <a class="login-microsoft-btn" id="login-microsoft-btn" href="/auth/microsoft/signin">
+            Se connecter avec Microsoft
+          </a>
+          <p class="login-sso-note">Comptes Microsoft 365 de l'organisation uniquement.</p>
+        </div>
+        <div class="login-divider" id="login-divider" aria-hidden="true">
+          <span>ou</span>
         </div>
         <form class="login-form" method="post" action="/login" id="login-form">
           <label class="login-field">
