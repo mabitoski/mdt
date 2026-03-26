@@ -2737,7 +2737,7 @@ function isSupportedSessionUser(user) {
   if (!username) {
     return false;
   }
-  return user.type === 'microsoft' || user.type === 'local';
+  return user.type === 'microsoft';
 }
 
 function clearSessionUser(req, callback) {
@@ -8564,53 +8564,11 @@ app.get('/login', (req, res) => {
 });
 
 app.post('/login', (req, res) => {
-  const username = cleanString(req.body?.username, 128);
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-
-  if (!username || !password) {
-    return res.redirect('/login?error=local_invalid');
-  }
-
-  return isLocalAdmin(username, password)
-    .then((ok) => {
-      if (!ok) {
-        return res.redirect('/login?error=local_invalid');
-      }
-      const user = buildLocalSessionUser(username);
-      return req.session.regenerate((err) => {
-        if (err) {
-          return res.redirect('/login?error=1');
-        }
-        req.session.user = user;
-        return req.session.save(() => res.redirect('/'));
-      });
-    })
-    .catch(() => res.redirect('/login?error=1'));
+  return res.redirect('/login?error=sso_only');
 });
 
 app.post('/api/login', (req, res) => {
-  const username = cleanString(req.body?.username, 128);
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-
-  if (!username || !password) {
-    return res.status(400).json({ ok: false, error: 'invalid_credentials' });
-  }
-
-  return isLocalAdmin(username, password)
-    .then((ok) => {
-      if (!ok) {
-        return res.status(401).json({ ok: false, error: 'invalid_credentials' });
-      }
-      const user = buildLocalSessionUser(username);
-      return req.session.regenerate((err) => {
-        if (err) {
-          return res.status(500).json({ ok: false, error: 'session_error' });
-        }
-        req.session.user = user;
-        return req.session.save(() => res.json({ ok: true, user }));
-      });
-    })
-    .catch(() => res.status(500).json({ ok: false, error: 'session_error' }));
+  return res.status(403).json({ ok: false, error: 'sso_only' });
 });
 
 app.get('/logout', (req, res) => {

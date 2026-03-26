@@ -2,20 +2,13 @@ const params = new URLSearchParams(window.location.search);
 const errorEl = document.getElementById('login-error');
 const ssoBlock = document.getElementById('login-sso');
 const microsoftBtn = document.getElementById('login-microsoft-btn');
-const dividerEl = document.getElementById('login-divider');
-const formEl = document.getElementById('login-form');
-const usernameEl = document.getElementById('login-username');
-const passwordEl = document.getElementById('login-password');
-const togglePasswordBtn = document.getElementById('toggle-password');
-const submitBtn = document.getElementById('login-submit');
 
 const errorMessages = {
   '1': 'Connexion Microsoft impossible. Reessayez.',
   group_required: "Votre compte Microsoft n'appartient a aucun groupe MDT autorise.",
   group_resolution_failed:
     "Impossible de verifier vos groupes Microsoft. Il faut probablement activer l'acces Graph pour l'application.",
-  sso_only: 'Le login par mot de passe LDAP est desactive. Utilise Microsoft ou le compte admin local.',
-  local_invalid: 'Compte admin local invalide. Reessayez.'
+  sso_only: 'Le login par mot de passe est desactive. Utilise Se connecter avec Microsoft.'
 };
 
 function showError(message) {
@@ -38,23 +31,6 @@ if (microsoftBtn) {
   });
 }
 
-if (togglePasswordBtn && passwordEl) {
-  togglePasswordBtn.addEventListener('click', () => {
-    const reveal = passwordEl.type === 'password';
-    passwordEl.type = reveal ? 'text' : 'password';
-    togglePasswordBtn.textContent = reveal ? 'Masquer' : 'Afficher';
-    togglePasswordBtn.setAttribute('aria-pressed', reveal ? 'true' : 'false');
-    passwordEl.focus();
-  });
-}
-
-if (formEl && submitBtn) {
-  formEl.addEventListener('submit', () => {
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Connexion locale...';
-  });
-}
-
 if (ssoBlock) {
   fetch('/api/auth/providers')
     .then((response) => (response.ok ? response.json() : null))
@@ -65,10 +41,7 @@ if (ssoBlock) {
           microsoftBtn.setAttribute('aria-disabled', 'true');
           microsoftBtn.textContent = 'SSO Microsoft indisponible';
         }
-        if (dividerEl) {
-          dividerEl.hidden = true;
-        }
-        showError("Le SSO Microsoft n'est pas configure sur cette instance. Le compte admin local reste disponible.");
+        showError("Le SSO Microsoft n'est pas configure sur cette instance.");
         return;
       }
       if (microsoftBtn && !errorCode) {
@@ -83,15 +56,6 @@ if (ssoBlock) {
         microsoftBtn.setAttribute('aria-disabled', 'true');
         microsoftBtn.textContent = 'SSO Microsoft indisponible';
       }
-      if (dividerEl) {
-        dividerEl.hidden = true;
-      }
-      showError("Impossible de verifier la configuration Microsoft. Le compte admin local reste disponible.");
+      showError("Impossible de verifier la configuration Microsoft.");
     });
-}
-
-if (usernameEl && (!errorCode || errorCode === 'local_invalid')) {
-  window.requestAnimationFrame(() => {
-    usernameEl.focus();
-  });
 }
