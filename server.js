@@ -75,6 +75,7 @@ const WEEKLY_RECAP_DAY_RAW = (process.env.WEEKLY_RECAP_DAY || 'monday').trim().t
 const WEEKLY_RECAP_HOUR_RAW = Number.parseInt(process.env.WEEKLY_RECAP_HOUR || '7', 10);
 const WEEKLY_RECAP_MINUTE_RAW = Number.parseInt(process.env.WEEKLY_RECAP_MINUTE || '30', 10);
 const WEEKLY_RECAP_TIMEZONE = (process.env.WEEKLY_RECAP_TIMEZONE || 'Europe/Paris').trim() || 'Europe/Paris';
+const APP_TIMEZONE = (process.env.APP_TIMEZONE || WEEKLY_RECAP_TIMEZONE || 'Europe/Paris').trim() || 'Europe/Paris';
 const WEEKLY_RECAP_BATTERY_THRESHOLD_RAW = Number.parseInt(
   process.env.WEEKLY_RECAP_BATTERY_THRESHOLD || '78',
   10
@@ -5303,22 +5304,191 @@ function isDoubleCheckPayload(body) {
 
 function getDateRange(dateFilter) {
   const now = new Date();
+  const parts = getTimeZoneParts(now, APP_TIMEZONE);
   if (dateFilter === 'today') {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    const start = makeDateInTimeZone(
+      {
+        year: parts.year,
+        month: parts.month,
+        day: parts.day,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        millisecond: 0
+      },
+      APP_TIMEZONE
+    );
+    const end = makeDateInTimeZone(
+      {
+        year: parts.year,
+        month: parts.month,
+        day: parts.day,
+        hour: 23,
+        minute: 59,
+        second: 59,
+        millisecond: 999
+      },
+      APP_TIMEZONE
+    );
     return { start: start.toISOString(), end: end.toISOString() };
   }
   if (dateFilter === 'week') {
-    const day = now.getDay();
-    const diff = (day + 6) % 7;
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(start);
-    end.setDate(start.getDate() + 6);
-    end.setHours(23, 59, 59, 999);
+    const weekday = getTimeZoneWeekday(now, APP_TIMEZONE);
+    const weekdayOffsets = {
+      monday: 0,
+      tuesday: 1,
+      wednesday: 2,
+      thursday: 3,
+      friday: 4,
+      saturday: 5,
+      sunday: 6
+    };
+    const diff = weekdayOffsets[weekday] ?? 0;
+    const start = makeDateInTimeZone(
+      {
+        year: parts.year,
+        month: parts.month,
+        day: parts.day - diff,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        millisecond: 0
+      },
+      APP_TIMEZONE
+    );
+    const end = makeDateInTimeZone(
+      {
+        year: parts.year,
+        month: parts.month,
+        day: parts.day - diff + 6,
+        hour: 23,
+        minute: 59,
+        second: 59,
+        millisecond: 999
+      },
+      APP_TIMEZONE
+    );
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+  if (dateFilter === 'month') {
+    const start = makeDateInTimeZone(
+      {
+        year: parts.year,
+        month: parts.month,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        millisecond: 0
+      },
+      APP_TIMEZONE
+    );
+    const end = makeDateInTimeZone(
+      {
+        year: parts.year,
+        month: parts.month + 1,
+        day: 0,
+        hour: 23,
+        minute: 59,
+        second: 59,
+        millisecond: 999
+      },
+      APP_TIMEZONE
+    );
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+  if (dateFilter === 'year') {
+    const start = makeDateInTimeZone(
+      {
+        year: parts.year,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        millisecond: 0
+      },
+      APP_TIMEZONE
+    );
+    const end = makeDateInTimeZone(
+      {
+        year: parts.year,
+        month: 12,
+        day: 31,
+        hour: 23,
+        minute: 59,
+        second: 59,
+        millisecond: 999
+      },
+      APP_TIMEZONE
+    );
     return { start: start.toISOString(), end: end.toISOString() };
   }
   return null;
+}
+
+function normalizeDateInputBoundary(value, endOfDay = false) {
+  if (value == null) {
+    return null;
+  }
+  const raw = String(value).trim();
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const year = Number.parseInt(match[1], 10);
+  const month = Number.parseInt(match[2], 10);
+  const day = Number.parseInt(match[3], 10);
+  const date = makeDateInTimeZone(
+    {
+      year,
+      month,
+      day,
+      hour: endOfDay ? 23 : 0,
+      minute: endOfDay ? 59 : 0,
+      second: endOfDay ? 59 : 0,
+      millisecond: endOfDay ? 999 : 0
+    },
+    APP_TIMEZONE
+  );
+  if (
+    Number.isNaN(date.getTime()) ||
+    formatLocalDateKey(date, APP_TIMEZONE) !== raw
+  ) {
+    return null;
+  }
+  return date.toISOString();
+}
+
+function getExplicitDateRange(query = {}) {
+  const startRaw = normalizeDateInputBoundary(query.dateFrom || query.startDate || query.fromDate, false);
+  const endRaw = normalizeDateInputBoundary(query.dateTo || query.endDate || query.toDate, true);
+  if (!startRaw && !endRaw) {
+    return null;
+  }
+  if (startRaw && endRaw && startRaw > endRaw) {
+    return { start: endRaw, end: startRaw };
+  }
+  return { start: startRaw, end: endRaw };
+}
+
+function getResolvedDateRange(query = {}) {
+  const explicitRange = getExplicitDateRange(query);
+  if (explicitRange) {
+    return explicitRange;
+  }
+  return getDateRange(query.date);
+}
+
+function normalizeTimelineGranularity(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'week') {
+    return 'week';
+  }
+  if (raw === 'month') {
+    return 'month';
+  }
+  return 'day';
 }
 
 function buildReportFilters(
@@ -5463,12 +5633,21 @@ function buildReportFilters(
     idx += 1;
   }
 
-  const dateFilter = query.date;
-  const range = getDateRange(dateFilter);
+  const range = getResolvedDateRange(query);
   if (range) {
-    clauses.push(`${col('last_seen')} >= $${idx} AND ${col('last_seen')} <= $${idx + 1}`);
-    values.push(range.start, range.end);
-    idx += 2;
+    if (range.start && range.end) {
+      clauses.push(`${col('last_seen')} >= $${idx} AND ${col('last_seen')} <= $${idx + 1}`);
+      values.push(range.start, range.end);
+      idx += 2;
+    } else if (range.start) {
+      clauses.push(`${col('last_seen')} >= $${idx}`);
+      values.push(range.start);
+      idx += 1;
+    } else if (range.end) {
+      clauses.push(`${col('last_seen')} <= $${idx}`);
+      values.push(range.end);
+      idx += 1;
+    }
   }
 
   const search = cleanString(query.search, 128);
@@ -11678,6 +11857,70 @@ app.get('/api/stats', requireAuth, async (req, res) => {
     });
   } catch (error) {
     console.error('Failed to fetch stats', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.get('/api/stats/timeline', requireAuth, async (req, res) => {
+  const activeTagId = Boolean(req.query.tags || req.query.tagIds)
+    ? await (async () => {
+      try {
+        const activeTag = await getActiveTag(pool);
+        return activeTag ? activeTag.id : null;
+      } catch (error) {
+        return null;
+      }
+    })()
+    : null;
+  const forcedTechKeys = getForcedReportTechKeys(req.session?.user);
+  const granularity = normalizeTimelineGranularity(req.query.granularity);
+  const explicitRange = getResolvedDateRange(req.query);
+  if (!explicitRange) {
+    return res.json({ ok: true, granularity, buckets: [] });
+  }
+  const { clauses, values } = buildReportFilters(req.query, {
+    includeCategory: true,
+    activeTagId,
+    forcedTechKeys,
+    tableAlias: 'reports'
+  });
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const timezoneParamIndex = values.length + 1;
+  const bucketExpr =
+    granularity === 'month'
+      ? `date_trunc('month', timezone($${timezoneParamIndex}, reports.last_seen))`
+      : granularity === 'week'
+        ? `date_trunc('week', timezone($${timezoneParamIndex}, reports.last_seen))`
+        : `date_trunc('day', timezone($${timezoneParamIndex}, reports.last_seen))`;
+  const limit = granularity === 'month' ? 36 : granularity === 'week' ? 104 : 120;
+  const limitParamIndex = values.length + 2;
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          to_char(${bucketExpr}, 'YYYY-MM-DD"T"HH24:MI:SS') AS bucket_start,
+          COUNT(DISTINCT reports.machine_key) AS machine_count,
+          COUNT(*) AS report_count
+        FROM reports
+        ${where}
+        GROUP BY bucket_start
+        ORDER BY bucket_start DESC
+        LIMIT $${limitParamIndex}
+      `,
+      [...values, APP_TIMEZONE, limit]
+    );
+    return res.json({
+      ok: true,
+      granularity,
+      buckets: (result.rows || []).map((row) => ({
+        bucketStart: row.bucket_start,
+        machineCount: Number.parseInt(row.machine_count || '0', 10) || 0,
+        reportCount: Number.parseInt(row.report_count || '0', 10) || 0
+      }))
+    });
+  } catch (error) {
+    console.error('Failed to fetch timeline stats', error);
     return res.status(500).json({ ok: false, error: 'db_error' });
   }
 });

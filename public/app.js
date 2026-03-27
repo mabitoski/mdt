@@ -27,6 +27,10 @@ const state = {
   componentFilter: 'all',
   commentFilter: 'all',
   dateFilter: 'all',
+  dateFrom: '',
+  dateTo: '',
+  timelineGranularity: 'day',
+  timelineBuckets: [],
   quickFilter: null,
   activeToken: null,
   quickCommentId: null,
@@ -151,6 +155,14 @@ const testFilterButtons = document.querySelectorAll('.test-filter-btn');
 const commentFilterButtons = document.querySelectorAll('.comment-filter-btn');
 const testFiltersEl = document.querySelector('.test-filters');
 const commentFiltersEl = document.querySelector('.comment-filters');
+const dateFilterButtons = document.querySelectorAll('.date-filter-btn[data-date-filter]');
+const timelineGranularityButtons = document.querySelectorAll('.timeline-granularity-btn[data-granularity]');
+const dateFromInput = document.getElementById('date-from-input');
+const dateToInput = document.getElementById('date-to-input');
+const applyDateRangeBtn = document.getElementById('apply-date-range-btn');
+const timelineCustomRangeEl = document.getElementById('timeline-custom-range');
+const timelineSummaryEl = document.getElementById('timeline-summary');
+const timelineListEl = document.getElementById('timeline-list');
 const resetFiltersBtn = document.getElementById('reset-filters-btn');
 const activeFiltersChip = document.getElementById('active-filters-chip');
 const filterHubEl = document.getElementById('section-filters');
@@ -274,12 +286,17 @@ const storedLayout = window.localStorage ? localStorage.getItem(layoutStorageKey
 if (storedLayout && layoutOptions.has(storedLayout)) {
   state.layout = storedLayout;
 }
-const dateFilterOrder = ['all', 'today', 'week'];
+const datePresetCycleOrder = ['all', 'today', 'week', 'month', 'year'];
+const dateFilterOrder = ['all', 'today', 'week', 'month', 'year', 'custom'];
 const dateFilterLabels = {
   all: 'Tous',
   today: "Aujourd'hui",
-  week: 'Cette semaine'
+  week: 'Cette semaine',
+  month: 'Ce mois',
+  year: 'Cette annee',
+  custom: 'Periode perso'
 };
+const timelineGranularityOptions = new Set(['day', 'week', 'month']);
 
 const prefsStorageKey = `mdt-ui-preferences${storageSuffix}`;
 const tagFilterStorageKey = `mdt-tag-filter${storageSuffix}`;
@@ -335,6 +352,9 @@ function savePreferences() {
     componentFilter: state.componentFilter,
     commentFilter: state.commentFilter,
     dateFilter: state.dateFilter,
+    dateFrom: state.dateFrom,
+    dateTo: state.dateTo,
+    timelineGranularity: state.timelineGranularity,
     boardView: state.boardView,
     search: state.search,
     quickFilter: state.quickFilter
@@ -396,6 +416,15 @@ function applyPreferences() {
   }
   if (dateFilterOrder.includes(prefs.dateFilter)) {
     state.dateFilter = prefs.dateFilter;
+  }
+  if (typeof prefs.dateFrom === 'string') {
+    state.dateFrom = prefs.dateFrom;
+  }
+  if (typeof prefs.dateTo === 'string') {
+    state.dateTo = prefs.dateTo;
+  }
+  if (timelineGranularityOptions.has(prefs.timelineGranularity)) {
+    state.timelineGranularity = prefs.timelineGranularity;
   }
   if (typeof prefs.search === 'string') {
     state.search = prefs.search;
@@ -474,6 +503,16 @@ function buildQueryParams({ includeCategory = true, includeTech = true } = {}) {
   if (state.dateFilter && state.dateFilter !== 'all') {
     params.set('date', state.dateFilter);
   }
+  if (state.dateFilter === 'custom') {
+    const from = normalizeDateInputValue(state.dateFrom);
+    const to = normalizeDateInputValue(state.dateTo);
+    if (from) {
+      params.set('dateFrom', from);
+    }
+    if (to) {
+      params.set('dateTo', to);
+    }
+  }
   if (state.commentFilter && state.commentFilter !== 'all') {
     params.set('comment', state.commentFilter);
   }
@@ -487,6 +526,135 @@ function buildQueryParams({ includeCategory = true, includeTech = true } = {}) {
     params.set('search', state.search.trim());
   }
   return params;
+}
+
+function updateDateFilterButtons() {
+  if (!dateFilterButtons.length) {
+    return;
+  }
+  dateFilterButtons.forEach((button) => {
+    const filter = button.dataset.dateFilter || 'all';
+    const active = filter === state.dateFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  if (timelineGranularityButtons.length) {
+    timelineGranularityButtons.forEach((button) => {
+      const active = (button.dataset.granularity || 'day') === state.timelineGranularity;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+  if (timelineCustomRangeEl) {
+    timelineCustomRangeEl.classList.toggle('is-active', state.dateFilter === 'custom');
+  }
+  if (dateFromInput) {
+    dateFromInput.value = normalizeDateInputValue(state.dateFrom);
+  }
+  if (dateToInput) {
+    dateToInput.value = normalizeDateInputValue(state.dateTo);
+  }
+  updateTimeFilterLabel();
+  updateFilterDockState();
+}
+
+function syncDateFilterControls() {
+  updateDateFilterButtons();
+  renderTimeline();
+}
+
+function formatTimelineBucketLabel(value, granularity) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '--';
+  }
+  if (granularity === 'month') {
+    return date.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' });
+  }
+  if (granularity === 'week') {
+    const end = new Date(date);
+    end.setDate(date.getDate() + 6);
+    return `${date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })} -> ${end.toLocaleDateString('fr-FR', {
+      day: '2-digit',
+      month: '2-digit'
+    })}`;
+  }
+  return date.toLocaleDateString('fr-FR', {
+    day: '2-digit',
+    month: '2-digit'
+  });
+}
+
+function renderTimeline() {
+  if (!timelineListEl || !timelineSummaryEl) {
+    return;
+  }
+  if (!hasActiveDateFilter()) {
+    timelineSummaryEl.textContent = 'Active un filtre de periode pour compter les postes par jour, semaine ou mois.';
+    timelineListEl.innerHTML = '<div class="timeline-empty">Aucune periode selectionnee.</div>';
+    return;
+  }
+  const buckets = Array.isArray(state.timelineBuckets) ? state.timelineBuckets : [];
+  const granularityLabel =
+    state.timelineGranularity === 'month'
+      ? 'mois'
+      : state.timelineGranularity === 'week'
+        ? 'semaines'
+        : 'jours';
+  timelineSummaryEl.textContent = `${buildDateFilterSummary()} · aggregation par ${granularityLabel}.`;
+  if (!buckets.length) {
+    timelineListEl.innerHTML = '<div class="timeline-empty">Aucun poste sur cette periode.</div>';
+    return;
+  }
+  const maxCount = buckets.reduce((max, item) => Math.max(max, item.machineCount || 0), 0) || 1;
+  timelineListEl.innerHTML = buckets
+    .map((item) => {
+      const machineCount = Number.parseInt(String(item.machineCount || 0), 10) || 0;
+      const reportCount = Number.parseInt(String(item.reportCount || 0), 10) || 0;
+      const width = Math.max(8, Math.round((machineCount / maxCount) * 100));
+      return `
+        <article class="timeline-bucket">
+          <div class="timeline-bucket-head">
+            <strong>${escapeHtml(formatTimelineBucketLabel(item.bucketStart, state.timelineGranularity))}</strong>
+            <span>${escapeHtml(`${machineCount} poste${machineCount > 1 ? 's' : ''}`)}</span>
+          </div>
+          <div class="timeline-bucket-bar" aria-hidden="true"><span style="width:${width}%"></span></div>
+          <p class="timeline-bucket-meta">${escapeHtml(`${reportCount} passage${reportCount > 1 ? 's' : ''}`)}</p>
+        </article>
+      `;
+    })
+    .join('');
+}
+
+async function loadTimeline() {
+  if (!hasActiveDateFilter()) {
+    state.timelineBuckets = [];
+    renderTimeline();
+    return;
+  }
+  if (timelineListEl) {
+    timelineListEl.innerHTML = '<div class="timeline-empty">Chargement de la chronologie...</div>';
+  }
+  try {
+    const params = buildQueryParams({ includeCategory: true, includeTech: true });
+    params.set('granularity', state.timelineGranularity);
+    const response = await fetch(`/api/stats/timeline?${params.toString()}`);
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('timeline_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('timeline_failed');
+    }
+    state.timelineBuckets = Array.isArray(data.buckets) ? data.buckets : [];
+  } catch (error) {
+    state.timelineBuckets = [];
+  }
+  renderTimeline();
 }
 
 function resetPagination() {
@@ -1088,7 +1256,7 @@ async function reloadReports() {
   } else {
     window.scrollTo({ top: 0 });
   }
-  await Promise.all([loadStats(), loadReportsPage(0)]);
+  await Promise.all([loadStats(), loadReportsPage(0), loadTimeline()]);
   renderTagFilters();
   renderTechnicianOptions();
   updateCommentFilterButtons();
@@ -1845,6 +2013,10 @@ function updateTimeFilterLabel() {
   if (!statTimeLabel) {
     return;
   }
+  if (state.dateFilter === 'custom' && hasActiveDateFilter()) {
+    statTimeLabel.textContent = buildDateFilterSummary();
+    return;
+  }
   statTimeLabel.textContent = dateFilterLabels[state.dateFilter] || 'Tous';
 }
 
@@ -1853,7 +2025,7 @@ function getActiveFilterCount() {
   if (state.filter && state.filter !== 'all') {
     count += 1;
   }
-  if (state.dateFilter && state.dateFilter !== 'all') {
+  if (hasActiveDateFilter()) {
     count += 1;
   }
   if (!isTechnicianFilterLocked() && state.techFilter && state.techFilter !== 'all') {
@@ -2028,27 +2200,116 @@ function getEndOfWeek() {
   return end;
 }
 
-function passesDateFilter(dateValue) {
+function getStartOfMonth() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), 1);
+}
+
+function getEndOfMonth() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+}
+
+function getStartOfYear() {
+  const now = new Date();
+  return new Date(now.getFullYear(), 0, 1);
+}
+
+function getEndOfYear() {
+  const now = new Date();
+  return new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+}
+
+function normalizeDateInputValue(value) {
+  const raw = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
+}
+
+function getStateDateRange() {
   if (state.dateFilter === 'all') {
+    return null;
+  }
+  if (state.dateFilter === 'today') {
+    return { start: getStartOfToday(), end: getEndOfToday() };
+  }
+  if (state.dateFilter === 'week') {
+    return { start: getStartOfWeek(), end: getEndOfWeek() };
+  }
+  if (state.dateFilter === 'month') {
+    return { start: getStartOfMonth(), end: getEndOfMonth() };
+  }
+  if (state.dateFilter === 'year') {
+    return { start: getStartOfYear(), end: getEndOfYear() };
+  }
+  if (state.dateFilter === 'custom') {
+    const from = normalizeDateInputValue(state.dateFrom);
+    const to = normalizeDateInputValue(state.dateTo);
+    if (!from && !to) {
+      return null;
+    }
+    const start = from ? new Date(`${from}T00:00:00`) : null;
+    const end = to ? new Date(`${to}T23:59:59.999`) : null;
+    if (start && Number.isNaN(start.getTime())) {
+      return null;
+    }
+    if (end && Number.isNaN(end.getTime())) {
+      return null;
+    }
+    if (start && end && start > end) {
+      return { start: end, end: start };
+    }
+    return { start, end };
+  }
+  return null;
+}
+
+function hasActiveDateFilter() {
+  if (state.dateFilter === 'all') {
+    return false;
+  }
+  if (state.dateFilter !== 'custom') {
     return true;
   }
-  if (!dateValue) {
-    return false;
+  return Boolean(normalizeDateInputValue(state.dateFrom) || normalizeDateInputValue(state.dateTo));
+}
+
+function formatDateFilterDate(value) {
+  if (!value) {
+    return '--';
   }
-  const date = new Date(dateValue);
+  const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
-    return false;
+    return '--';
   }
-  const start = state.dateFilter === 'today' ? getStartOfToday() : getStartOfWeek();
-  const end = state.dateFilter === 'today' ? getEndOfToday() : getEndOfWeek();
-  return date >= start && date <= end;
+  return date.toLocaleDateString('fr-FR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
+  });
+}
+
+function buildDateFilterSummary() {
+  const range = getStateDateRange();
+  if (!range) {
+    return 'Tous';
+  }
+  if (state.dateFilter !== 'custom') {
+    return dateFilterLabels[state.dateFilter] || 'Tous';
+  }
+  const from = range.start ? formatDateFilterDate(range.start) : 'debut';
+  const to = range.end ? formatDateFilterDate(range.end) : 'maintenant';
+  return `${from} -> ${to}`;
 }
 
 function cycleDateFilter(render = true) {
-  const currentIndex = dateFilterOrder.indexOf(state.dateFilter);
-  const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % dateFilterOrder.length;
-  state.dateFilter = dateFilterOrder[nextIndex];
-  updateTimeFilterLabel();
+  const currentIndex = datePresetCycleOrder.indexOf(state.dateFilter);
+  const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % datePresetCycleOrder.length;
+  state.dateFilter = datePresetCycleOrder[nextIndex];
+  if (state.dateFilter !== 'custom') {
+    state.dateFrom = '';
+    state.dateTo = '';
+  }
+  syncDateFilterControls();
   savePreferences();
   if (render) {
     reloadReports();
@@ -4504,6 +4765,10 @@ function resetAllFilters() {
   state.componentFilter = 'all';
   state.commentFilter = 'all';
   state.dateFilter = 'all';
+  state.dateFrom = '';
+  state.dateTo = '';
+  state.timelineGranularity = 'day';
+  state.timelineBuckets = [];
   state.quickFilter = null;
   state.activeToken = null;
   state.search = '';
@@ -4524,6 +4789,7 @@ function resetAllFilters() {
   updateCommentFilterButtons();
   renderTagFilters();
   renderTechFilters();
+  syncDateFilterControls();
   updateTimeFilterLabel();
   savePreferences();
   reloadReports();
@@ -5285,6 +5551,8 @@ function renderList(isScrollUpdate = false) {
     componentFilter: state.componentFilter,
     commentFilter: state.commentFilter,
     dateFilter: state.dateFilter,
+    dateFrom: state.dateFrom,
+    dateTo: state.dateTo,
     search: state.search,
     quickFilter: state.quickFilter,
     sort: state.sort
@@ -6530,7 +6798,7 @@ async function loadMachines() {
     state.tagFilter = state.tagFilter.map((value) => normalizeTagId(value)).filter(Boolean);
   }
   await loadMeta();
-  await Promise.all([loadStats(), loadReportsPage(0)]);
+  await Promise.all([loadStats(), loadReportsPage(0), loadTimeline()]);
   renderTechnicianOptions();
   updateCommentFilterButtons();
   if (state.expandedId) {
@@ -6805,12 +7073,77 @@ commentFilterButtons.forEach((button) => {
   });
 });
 
+dateFilterButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const next = button.dataset.dateFilter || 'all';
+    if (!dateFilterOrder.includes(next)) {
+      return;
+    }
+    state.dateFilter = next;
+    if (next !== 'custom') {
+      state.dateFrom = '';
+      state.dateTo = '';
+    }
+    syncDateFilterControls();
+    savePreferences();
+    if (next !== 'custom') {
+      reloadReports();
+    }
+  });
+});
+
+timelineGranularityButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const next = button.dataset.granularity || 'day';
+    if (!timelineGranularityOptions.has(next) || next === state.timelineGranularity) {
+      return;
+    }
+    state.timelineGranularity = next;
+    syncDateFilterControls();
+    savePreferences();
+    loadTimeline();
+  });
+});
+
+if (dateFromInput) {
+  dateFromInput.addEventListener('change', (event) => {
+    state.dateFrom = normalizeDateInputValue(event.target.value);
+    if (state.dateFilter !== 'custom') {
+      state.dateFilter = 'custom';
+    }
+    syncDateFilterControls();
+    savePreferences();
+  });
+}
+
+if (dateToInput) {
+  dateToInput.addEventListener('change', (event) => {
+    state.dateTo = normalizeDateInputValue(event.target.value);
+    if (state.dateFilter !== 'custom') {
+      state.dateFilter = 'custom';
+    }
+    syncDateFilterControls();
+    savePreferences();
+  });
+}
+
+if (applyDateRangeBtn) {
+  applyDateRangeBtn.addEventListener('click', () => {
+    state.dateFrom = normalizeDateInputValue(dateFromInput ? dateFromInput.value : state.dateFrom);
+    state.dateTo = normalizeDateInputValue(dateToInput ? dateToInput.value : state.dateTo);
+    state.dateFilter = 'custom';
+    syncDateFilterControls();
+    savePreferences();
+    reloadReports();
+  });
+}
+
 updateLayoutButtons();
 updateTestFilterButtons();
 updateCommentFilterButtons();
 updateTagFilterButtons();
 applyLayout();
-updateTimeFilterLabel();
+syncDateFilterControls();
 updateStatFilterCards();
 initSidebarNavigation();
 initFilterHub();

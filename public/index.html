@@ -258,8 +258,75 @@
                   </button>
                 </div>
               </div>
+              <div class="workspace-filter-card timeline-filter-card">
+                <div class="timeline-filter-head">
+                  <div>
+                    <span class="controls-label">Periode</span>
+                    <p class="timeline-filter-sub">Filtre les postes et active le comptage par jour, semaine ou mois.</p>
+                  </div>
+                  <div class="pill-group timeline-granularity-group" id="timeline-granularity" role="group" aria-label="Granularite de la chronologie">
+                    <button class="filter-btn timeline-granularity-btn" data-granularity="day" type="button" aria-pressed="true">
+                      Jour
+                    </button>
+                    <button class="filter-btn timeline-granularity-btn" data-granularity="week" type="button" aria-pressed="false">
+                      Semaine
+                    </button>
+                    <button class="filter-btn timeline-granularity-btn" data-granularity="month" type="button" aria-pressed="false">
+                      Mois
+                    </button>
+                  </div>
+                </div>
+                <div class="pill-group timeline-date-presets" id="timeline-date-presets" role="group" aria-label="Filtrer par periode">
+                  <button class="filter-btn date-filter-btn" data-date-filter="all" type="button" aria-pressed="true">
+                    Tout
+                  </button>
+                  <button class="filter-btn date-filter-btn" data-date-filter="today" type="button" aria-pressed="false">
+                    Jour
+                  </button>
+                  <button class="filter-btn date-filter-btn" data-date-filter="week" type="button" aria-pressed="false">
+                    Semaine
+                  </button>
+                  <button class="filter-btn date-filter-btn" data-date-filter="month" type="button" aria-pressed="false">
+                    Mois
+                  </button>
+                  <button class="filter-btn date-filter-btn" data-date-filter="year" type="button" aria-pressed="false">
+                    Annee
+                  </button>
+                  <button class="filter-btn date-filter-btn" data-date-filter="custom" type="button" aria-pressed="false">
+                    Perso
+                  </button>
+                </div>
+                <div class="timeline-custom-range" id="timeline-custom-range">
+                  <label class="timeline-date-field">
+                    <span>Du</span>
+                    <input id="date-from-input" type="date" />
+                  </label>
+                  <label class="timeline-date-field">
+                    <span>Au</span>
+                    <input id="date-to-input" type="date" />
+                  </label>
+                  <button class="filter-toggle-btn timeline-apply-btn" id="apply-date-range-btn" type="button">
+                    Appliquer
+                  </button>
+                </div>
+              </div>
             </section>
           </div>
+          </section>
+
+          <section class="timeline-panel" id="timeline-panel" aria-live="polite">
+            <div class="timeline-panel-head">
+              <div>
+                <p class="timeline-panel-kicker">Chronologie</p>
+                <h3>Volumes de postes sur la periode</h3>
+                <p class="timeline-panel-sub" id="timeline-summary">
+                  Active un filtre de periode pour compter les postes par jour, semaine ou mois.
+                </p>
+              </div>
+            </div>
+            <div class="timeline-panel-body" id="timeline-list">
+              <div class="timeline-empty">Aucune periode selectionnee.</div>
+            </div>
           </section>
 
           <section class="board" id="section-board">
