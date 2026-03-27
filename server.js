@@ -178,6 +178,30 @@ const LOT_TARGET_COUNT_MAX = Number.parseInt(process.env.LOT_TARGET_COUNT_MAX ||
 const LOT_PRIORITY_DEFAULT = Number.parseInt(process.env.LOT_PRIORITY_DEFAULT || '100', 10);
 const LOT_PRIORITY_MIN = 1;
 const LOT_PRIORITY_MAX = Number.parseInt(process.env.LOT_PRIORITY_MAX || '9999', 10);
+const ALERT_BATTERY_THRESHOLD = Math.max(
+  1,
+  Math.min(
+    100,
+    Number.parseInt(
+      process.env.BATTERY_ALERT_THRESHOLD || process.env.WEEKLY_RECAP_BATTERY_THRESHOLD || '78',
+      10
+    ) || 78
+  )
+);
+const BIOS_CLOCK_DRIFT_ALERT_THRESHOLD_SECONDS = Math.max(
+  60,
+  Number.parseInt(process.env.BIOS_CLOCK_DRIFT_ALERT_THRESHOLD_SECONDS || '300', 10) || 300
+);
+const BIOS_CLOCK_DELTA_ALERT_THRESHOLD_SECONDS = Math.max(
+  60,
+  Number.parseInt(process.env.BIOS_CLOCK_DELTA_ALERT_THRESHOLD_SECONDS || '300', 10) || 300
+);
+const BIOS_CLOCK_BACKWARD_GRACE_SECONDS = 60;
+const CLOCK_ALERT_REASON_ORDER = Object.freeze([
+  'clock_backwards',
+  'clock_drift',
+  'delta_mismatch'
+]);
 
 if (!Number.isFinite(PORT)) {
   throw new Error('PORT must be a number');
@@ -1016,8 +1040,14 @@ async function backfillReportsFromMachines() {
         keyboard_status,
         pad_status,
         badge_reader_status,
+        client_generated_at,
+        first_client_generated_at,
         last_seen,
         created_at,
+        clock_drift_seconds,
+        clock_delta_seconds,
+        bios_clock_alert,
+        bios_clock_alert_code,
         components,
         payload,
         last_ip
@@ -1060,15 +1090,21 @@ async function backfillReportsFromMachines() {
               keyboard_status,
               pad_status,
               badge_reader_status,
+              client_generated_at,
               last_seen,
               created_at,
+              clock_drift_seconds,
+              clock_delta_seconds,
+              bios_clock_alert,
+              bios_clock_alert_code,
               components,
               payload,
               last_ip
             ) VALUES (
               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-            $21, $22, $23, $24, $25, $26, $27, $28
+            $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+            $31, $32, $33
           )
         `,
         [
@@ -1095,8 +1131,13 @@ async function backfillReportsFromMachines() {
           row.keyboard_status,
           row.pad_status,
           row.badge_reader_status,
+          row.client_generated_at,
           row.last_seen,
           row.created_at,
+          row.clock_drift_seconds,
+          row.clock_delta_seconds,
+          row.bios_clock_alert,
+          row.bios_clock_alert_code,
           row.components,
           row.payload,
           row.last_ip
@@ -1117,6 +1158,163 @@ async function backfillReportsFromMachines() {
     }
   } catch (error) {
     console.error('Report backfill check failed', error);
+  }
+}
+
+async function backfillClockSignals() {
+  try {
+    await pool.query(
+      `
+        UPDATE reports
+        SET client_generated_at = COALESCE(
+          client_generated_at,
+          safe_timestamptz(safe_jsonb(payload) ->> 'generated_at'),
+          safe_timestamptz(safe_jsonb(payload) ->> 'generatedAt'),
+          safe_timestamptz(safe_jsonb(payload) -> 'diag' ->> 'completedAt'),
+          safe_timestamptz(safe_jsonb(payload) -> 'diag' ->> 'generatedAt'),
+          safe_timestamptz(safe_jsonb(payload) -> 'diag' ->> 'generated_at'),
+          safe_timestamptz(safe_jsonb(payload) -> 'rawArtifacts' ->> 'generated_at'),
+          safe_timestamptz(safe_jsonb(payload) -> 'rawArtifacts' ->> 'generatedAt')
+        )
+        WHERE payload IS NOT NULL
+          AND payload <> ''
+      `
+    );
+
+    await pool.query(
+      `
+        WITH ordered AS (
+          SELECT
+            reports.id,
+            reports.machine_key,
+            reports.last_seen,
+            reports.client_generated_at,
+            LAG(reports.last_seen) OVER (
+              PARTITION BY reports.machine_key
+              ORDER BY reports.last_seen ASC, reports.id ASC
+            ) AS previous_server_seen_at,
+            LAG(reports.client_generated_at) OVER (
+              PARTITION BY reports.machine_key
+              ORDER BY reports.last_seen ASC, reports.id ASC
+            ) AS previous_client_generated_at
+          FROM reports
+        ),
+        metrics AS (
+          SELECT
+            ordered.id,
+            CASE
+              WHEN ordered.client_generated_at IS NOT NULL
+                THEN ROUND(ABS(EXTRACT(EPOCH FROM (ordered.last_seen - ordered.client_generated_at))))::integer
+              ELSE NULL
+            END AS clock_drift_seconds,
+            CASE
+              WHEN ordered.client_generated_at IS NOT NULL
+                AND ordered.previous_server_seen_at IS NOT NULL
+                AND ordered.previous_client_generated_at IS NOT NULL
+                THEN ROUND(
+                  ABS(
+                    EXTRACT(
+                      EPOCH FROM (
+                        (ordered.last_seen - ordered.previous_server_seen_at) -
+                        (ordered.client_generated_at - ordered.previous_client_generated_at)
+                      )
+                    )
+                  )
+                )::integer
+              ELSE NULL
+            END AS clock_delta_seconds,
+            CASE
+              WHEN ordered.client_generated_at IS NOT NULL
+                AND ordered.previous_client_generated_at IS NOT NULL
+                THEN ROUND(EXTRACT(EPOCH FROM (ordered.client_generated_at - ordered.previous_client_generated_at)))::integer
+              ELSE NULL
+            END AS client_delta_seconds
+          FROM ordered
+        ),
+        flags AS (
+          SELECT
+            metrics.id,
+            metrics.clock_drift_seconds,
+            metrics.clock_delta_seconds,
+            array_to_string(
+              array_remove(
+                ARRAY[
+                  CASE
+                    WHEN metrics.client_delta_seconds IS NOT NULL
+                      AND metrics.client_delta_seconds < -${BIOS_CLOCK_BACKWARD_GRACE_SECONDS}
+                      THEN 'clock_backwards'
+                    ELSE NULL
+                  END,
+                  CASE
+                    WHEN metrics.clock_drift_seconds IS NOT NULL
+                      AND metrics.clock_drift_seconds >= ${BIOS_CLOCK_DRIFT_ALERT_THRESHOLD_SECONDS}
+                      THEN 'clock_drift'
+                    ELSE NULL
+                  END,
+                  CASE
+                    WHEN metrics.clock_delta_seconds IS NOT NULL
+                      AND metrics.clock_delta_seconds >= ${BIOS_CLOCK_DELTA_ALERT_THRESHOLD_SECONDS}
+                      THEN 'delta_mismatch'
+                    ELSE NULL
+                  END
+                ],
+                NULL
+              ),
+              ','
+            ) AS bios_clock_alert_code
+          FROM metrics
+        )
+        UPDATE reports
+        SET
+          clock_drift_seconds = flags.clock_drift_seconds,
+          clock_delta_seconds = flags.clock_delta_seconds,
+          bios_clock_alert = COALESCE(flags.bios_clock_alert_code, '') <> '',
+          bios_clock_alert_code = NULLIF(flags.bios_clock_alert_code, '')
+        FROM flags
+        WHERE reports.id = flags.id
+      `
+    );
+
+    await pool.query(
+      `
+        WITH latest AS (
+          SELECT DISTINCT ON (reports.machine_key)
+            reports.machine_key,
+            reports.client_generated_at,
+            reports.clock_drift_seconds,
+            reports.clock_delta_seconds,
+            reports.bios_clock_alert,
+            reports.bios_clock_alert_code
+          FROM reports
+          ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+        ),
+        firsts AS (
+          SELECT DISTINCT ON (reports.machine_key)
+            reports.machine_key,
+            reports.client_generated_at AS first_client_generated_at
+          FROM reports
+          WHERE reports.client_generated_at IS NOT NULL
+          ORDER BY reports.machine_key, reports.client_generated_at ASC, reports.last_seen ASC, reports.id ASC
+        )
+        UPDATE machines
+        SET
+          client_generated_at = COALESCE(latest.client_generated_at, machines.client_generated_at),
+          first_client_generated_at = COALESCE(
+            machines.first_client_generated_at,
+            firsts.first_client_generated_at,
+            latest.client_generated_at
+          ),
+          clock_drift_seconds = latest.clock_drift_seconds,
+          clock_delta_seconds = latest.clock_delta_seconds,
+          bios_clock_alert = COALESCE(latest.bios_clock_alert, false),
+          bios_clock_alert_code = latest.bios_clock_alert_code
+        FROM latest
+        LEFT JOIN firsts ON firsts.machine_key = latest.machine_key
+        WHERE machines.machine_key = latest.machine_key
+      `
+    );
+  } catch (error) {
+    console.error('Clock signal backfill failed', error);
   }
 }
 
@@ -1265,8 +1463,14 @@ async function initDb() {
       keyboard_status TEXT,
       pad_status TEXT,
       badge_reader_status TEXT,
+      client_generated_at TIMESTAMPTZ,
+      first_client_generated_at TIMESTAMPTZ,
       last_seen TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL,
+      clock_drift_seconds INTEGER,
+      clock_delta_seconds INTEGER,
+      bios_clock_alert BOOLEAN NOT NULL DEFAULT false,
+      bios_clock_alert_code TEXT,
       components TEXT,
       payload TEXT,
       last_ip TEXT
@@ -1304,8 +1508,13 @@ async function initDb() {
       keyboard_status TEXT,
       pad_status TEXT,
       badge_reader_status TEXT,
+      client_generated_at TIMESTAMPTZ,
       last_seen TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL,
+      clock_drift_seconds INTEGER,
+      clock_delta_seconds INTEGER,
+      bios_clock_alert BOOLEAN NOT NULL DEFAULT false,
+      bios_clock_alert_code TEXT,
       components TEXT,
       payload TEXT,
       comment TEXT,
@@ -1522,6 +1731,24 @@ async function initDb() {
     $$;
   `);
 
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION safe_timestamptz(input_text TEXT)
+    RETURNS TIMESTAMPTZ
+    LANGUAGE plpgsql
+    IMMUTABLE
+    AS $$
+    BEGIN
+      IF input_text IS NULL OR btrim(input_text) = '' THEN
+        RETURN NULL;
+      END IF;
+      RETURN input_text::timestamptz;
+    EXCEPTION
+      WHEN others THEN
+        RETURN NULL;
+    END;
+    $$;
+  `);
+
   const columns = [
     ['ram_mb', 'INTEGER'],
     ['ram_slots_total', 'INTEGER'],
@@ -1533,6 +1760,8 @@ async function initDb() {
     ['keyboard_status', 'TEXT'],
     ['pad_status', 'TEXT'],
     ['badge_reader_status', 'TEXT'],
+    ['client_generated_at', 'TIMESTAMPTZ'],
+    ['first_client_generated_at', 'TIMESTAMPTZ'],
     ['technician', 'TEXT'],
     ['tag', 'TEXT'],
     ['tag_id', 'UUID'],
@@ -1541,6 +1770,10 @@ async function initDb() {
     ['shipment_client', 'TEXT'],
     ['shipment_order_number', 'TEXT'],
     ['shipment_pallet_code', 'TEXT'],
+    ['clock_drift_seconds', 'INTEGER'],
+    ['clock_delta_seconds', 'INTEGER'],
+    ['bios_clock_alert', 'BOOLEAN NOT NULL DEFAULT false'],
+    ['bios_clock_alert_code', 'TEXT'],
     ['last_ip', 'TEXT'],
     ['components', 'TEXT'],
     ['payload', 'TEXT'],
@@ -1579,8 +1812,13 @@ async function initDb() {
     ['keyboard_status', 'TEXT'],
     ['pad_status', 'TEXT'],
     ['badge_reader_status', 'TEXT'],
+    ['client_generated_at', 'TIMESTAMPTZ'],
     ['last_seen', 'TIMESTAMPTZ NOT NULL'],
     ['created_at', 'TIMESTAMPTZ NOT NULL'],
+    ['clock_drift_seconds', 'INTEGER'],
+    ['clock_delta_seconds', 'INTEGER'],
+    ['bios_clock_alert', 'BOOLEAN NOT NULL DEFAULT false'],
+    ['bios_clock_alert_code', 'TEXT'],
     ['components', 'TEXT'],
     ['payload', 'TEXT'],
     ['comment', 'TEXT'],
@@ -1618,6 +1856,8 @@ async function initDb() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_shipment_client ON machines(shipment_client)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_shipment_order_number ON machines(shipment_order_number)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_shipment_pallet_code ON machines(shipment_pallet_code)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_client_generated_at ON machines(client_generated_at)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_bios_clock_alert ON machines(bios_clock_alert)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_machines_last_seen ON machines(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_machine_key ON reports(machine_key)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_category ON reports(category)');
@@ -1629,6 +1869,8 @@ async function initDb() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_shipment_client ON reports(shipment_client)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_shipment_order_number ON reports(shipment_order_number)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_shipment_pallet_code ON reports(shipment_pallet_code)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_client_generated_at ON reports(client_generated_at)');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_bios_clock_alert ON reports(bios_clock_alert)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_last_seen ON reports(last_seen)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_reports_technician ON reports(technician)');
   await pool.query(
@@ -2170,6 +2412,7 @@ async function initDb() {
 
   await backfillReportsFromMachines();
   await backfillTags();
+  await backfillClockSignals();
 }
 
 const upsertMachineQuery = `
@@ -2202,8 +2445,14 @@ const upsertMachineQuery = `
     keyboard_status,
     pad_status,
     badge_reader_status,
+    client_generated_at,
+    first_client_generated_at,
     last_seen,
     created_at,
+    clock_drift_seconds,
+    clock_delta_seconds,
+    bios_clock_alert,
+    bios_clock_alert_code,
     components,
     payload,
     last_ip
@@ -2240,7 +2489,13 @@ const upsertMachineQuery = `
     $30,
     $31,
     $32,
-    $33
+    $33,
+    $34,
+    $35,
+    $36,
+    $37,
+    $38,
+    $39
   )
   ON CONFLICT(machine_key) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, machines.hostname),
@@ -2273,7 +2528,13 @@ const upsertMachineQuery = `
     keyboard_status = COALESCE(excluded.keyboard_status, machines.keyboard_status),
     pad_status = COALESCE(excluded.pad_status, machines.pad_status),
     badge_reader_status = COALESCE(excluded.badge_reader_status, machines.badge_reader_status),
+    client_generated_at = excluded.client_generated_at,
+    first_client_generated_at = COALESCE(machines.first_client_generated_at, excluded.first_client_generated_at),
     last_seen = excluded.last_seen,
+    clock_drift_seconds = excluded.clock_drift_seconds,
+    clock_delta_seconds = excluded.clock_delta_seconds,
+    bios_clock_alert = COALESCE(excluded.bios_clock_alert, false),
+    bios_clock_alert_code = excluded.bios_clock_alert_code,
     components = CASE
       WHEN excluded.components IS NULL THEN machines.components
       ELSE (
@@ -2317,8 +2578,13 @@ const upsertReportQuery = `
     keyboard_status,
     pad_status,
     badge_reader_status,
+    client_generated_at,
     last_seen,
     created_at,
+    clock_drift_seconds,
+    clock_delta_seconds,
+    bios_clock_alert,
+    bios_clock_alert_code,
     components,
     payload,
     last_ip
@@ -2356,7 +2622,12 @@ const upsertReportQuery = `
     $31,
     $32,
     $33,
-    $34
+    $34,
+    $35,
+    $36,
+    $37,
+    $38,
+    $39
   )
   ON CONFLICT(id) DO UPDATE SET
     hostname = COALESCE(excluded.hostname, reports.hostname),
@@ -2389,7 +2660,12 @@ const upsertReportQuery = `
     keyboard_status = COALESCE(excluded.keyboard_status, reports.keyboard_status),
     pad_status = COALESCE(excluded.pad_status, reports.pad_status),
     badge_reader_status = COALESCE(excluded.badge_reader_status, reports.badge_reader_status),
+    client_generated_at = excluded.client_generated_at,
     last_seen = excluded.last_seen,
+    clock_drift_seconds = excluded.clock_drift_seconds,
+    clock_delta_seconds = excluded.clock_delta_seconds,
+    bios_clock_alert = COALESCE(excluded.bios_clock_alert, false),
+    bios_clock_alert_code = excluded.bios_clock_alert_code,
     components = CASE
       WHEN excluded.components IS NULL THEN reports.components
       ELSE (
@@ -2441,7 +2717,12 @@ const listReportsQuery = `
     keyboard_status,
     pad_status,
     badge_reader_status,
+    client_generated_at,
     last_seen,
+    clock_drift_seconds,
+    clock_delta_seconds,
+    bios_clock_alert,
+    bios_clock_alert_code,
     last_ip,
     components,
     comment
@@ -2491,15 +2772,26 @@ const getReportByIdQuery = `
     reports.keyboard_status,
     reports.pad_status,
     reports.badge_reader_status,
+    reports.client_generated_at AS report_client_generated_at,
     reports.last_seen AS report_last_seen,
     reports.created_at AS report_created_at,
+    reports.clock_drift_seconds AS report_clock_drift_seconds,
+    reports.clock_delta_seconds AS report_clock_delta_seconds,
+    reports.bios_clock_alert AS report_bios_clock_alert,
+    reports.bios_clock_alert_code AS report_bios_clock_alert_code,
     reports.components,
     reports.payload,
     reports.last_ip,
     reports.comment,
     reports.commented_at,
+    machines.client_generated_at AS machine_client_generated_at,
+    machines.first_client_generated_at AS machine_first_client_generated_at,
     machines.last_seen AS machine_last_seen,
     machines.created_at AS machine_created_at,
+    machines.clock_drift_seconds AS machine_clock_drift_seconds,
+    machines.clock_delta_seconds AS machine_clock_delta_seconds,
+    machines.bios_clock_alert AS machine_bios_clock_alert,
+    machines.bios_clock_alert_code AS machine_bios_clock_alert_code,
     machines.tag AS machine_tag,
     machines.tag_id AS machine_tag_id,
     machines.lot_id AS machine_lot_id,
@@ -3499,6 +3791,166 @@ function normalizeShipmentFromRow(row) {
   };
 }
 
+function normalizeNullableInteger(value) {
+  if (value == null || value === '') {
+    return null;
+  }
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseClockAlertCodes(value) {
+  if (!value) {
+    return [];
+  }
+  const parts = Array.isArray(value)
+    ? value
+    : String(value)
+        .split(',')
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean);
+  const normalized = Array.from(new Set(parts));
+  return CLOCK_ALERT_REASON_ORDER.filter((code) => normalized.includes(code));
+}
+
+function normalizeClientGeneratedAt(value) {
+  if (value == null) {
+    return null;
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+  const raw = cleanString(value, 96);
+  if (!raw) {
+    return null;
+  }
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+  return new Date(timestamp).toISOString();
+}
+
+function extractClientGeneratedAt(body, extraSources = []) {
+  const nestedDiag =
+    body && body.diag && typeof body.diag === 'object' && !Array.isArray(body.diag) ? body.diag : null;
+  const nestedRawArtifacts =
+    body && body.rawArtifacts && typeof body.rawArtifacts === 'object' && !Array.isArray(body.rawArtifacts)
+      ? body.rawArtifacts
+      : null;
+  const sources = [
+    body,
+    ...(Array.isArray(extraSources) ? extraSources : []),
+    nestedDiag,
+    nestedRawArtifacts
+  ].filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+  return normalizeClientGeneratedAt(
+    pickFirstFromSources(sources, [
+      'clientGeneratedAt',
+      'client_generated_at',
+      'generatedAt',
+      'generated_at',
+      'completedAt',
+      'completed_at',
+      'collectedAt',
+      'collected_at',
+      'timestamp',
+      'reportTime',
+      'report_time'
+    ])
+  );
+}
+
+function buildClockAlertAssessment({
+  serverSeenAt,
+  clientGeneratedAt,
+  previousServerSeenAt = null,
+  previousClientGeneratedAt = null
+} = {}) {
+  const currentServerMs = Date.parse(serverSeenAt || '');
+  const currentClientMs = Date.parse(clientGeneratedAt || '');
+  if (!Number.isFinite(currentServerMs) || !Number.isFinite(currentClientMs)) {
+    return {
+      clientGeneratedAt: normalizeClientGeneratedAt(clientGeneratedAt),
+      driftSeconds: null,
+      deltaSeconds: null,
+      active: false,
+      code: null,
+      reasons: []
+    };
+  }
+
+  const reasons = [];
+  const driftSeconds = Math.round(Math.abs(currentServerMs - currentClientMs) / 1000);
+  if (driftSeconds >= BIOS_CLOCK_DRIFT_ALERT_THRESHOLD_SECONDS) {
+    reasons.push('clock_drift');
+  }
+
+  let deltaSeconds = null;
+  const previousServerMs = Date.parse(previousServerSeenAt || '');
+  const previousClientMs = Date.parse(previousClientGeneratedAt || '');
+  if (Number.isFinite(previousServerMs) && Number.isFinite(previousClientMs)) {
+    const serverDeltaSeconds = Math.round((currentServerMs - previousServerMs) / 1000);
+    const clientDeltaSeconds = Math.round((currentClientMs - previousClientMs) / 1000);
+    deltaSeconds = Math.round(Math.abs(serverDeltaSeconds - clientDeltaSeconds));
+    if (clientDeltaSeconds < -BIOS_CLOCK_BACKWARD_GRACE_SECONDS) {
+      reasons.push('clock_backwards');
+    }
+    if (deltaSeconds >= BIOS_CLOCK_DELTA_ALERT_THRESHOLD_SECONDS) {
+      reasons.push('delta_mismatch');
+    }
+  }
+
+  const orderedReasons = CLOCK_ALERT_REASON_ORDER.filter((reason) => reasons.includes(reason));
+  return {
+    clientGeneratedAt: new Date(currentClientMs).toISOString(),
+    driftSeconds,
+    deltaSeconds: Number.isFinite(deltaSeconds) ? deltaSeconds : null,
+    active: orderedReasons.length > 0,
+    code: orderedReasons.length ? orderedReasons.join(',') : null,
+    reasons: orderedReasons
+  };
+}
+
+function normalizeClockAlertFromRow(row) {
+  if (!row || typeof row !== 'object') {
+    return null;
+  }
+  const clientGeneratedAt = normalizeClientGeneratedAt(
+    row.client_generated_at || row.report_client_generated_at || row.machine_client_generated_at
+  );
+  const firstClientGeneratedAt = normalizeClientGeneratedAt(
+    row.first_client_generated_at || row.machine_first_client_generated_at
+  ) || clientGeneratedAt;
+  const driftSeconds = normalizeNullableInteger(
+    row.clock_drift_seconds || row.report_clock_drift_seconds || row.machine_clock_drift_seconds
+  );
+  const deltaSeconds = normalizeNullableInteger(
+    row.clock_delta_seconds || row.report_clock_delta_seconds || row.machine_clock_delta_seconds
+  );
+  const reasons = parseClockAlertCodes(
+    row.bios_clock_alert_code || row.report_bios_clock_alert_code || row.machine_bios_clock_alert_code
+  );
+  const active =
+    parseBooleanFlag(
+      row.bios_clock_alert ?? row.report_bios_clock_alert ?? row.machine_bios_clock_alert,
+      false
+    ) || reasons.length > 0;
+  if (!clientGeneratedAt && !firstClientGeneratedAt && driftSeconds == null && deltaSeconds == null && !active) {
+    return null;
+  }
+  return {
+    active,
+    reasons,
+    clientGeneratedAt,
+    firstClientGeneratedAt,
+    serverSeenAt: row.report_last_seen || row.machine_last_seen || row.last_seen || null,
+    firstServerSeenAt: row.machine_created_at || row.report_created_at || row.created_at || null,
+    driftSeconds,
+    deltaSeconds
+  };
+}
+
 function normalizePalletFromRow(row) {
   if (!row) {
     return null;
@@ -4438,8 +4890,13 @@ async function insertManualCsvReportRow(client, req, row) {
     row.keyboardStatus,
     row.padStatus,
     row.badgeReaderStatus,
+    null,
     now,
     now,
+    null,
+    null,
+    false,
+    null,
     components ? JSON.stringify(components) : null,
     payloadText,
     getClientIp(req)
@@ -4473,8 +4930,14 @@ async function insertManualCsvReportRow(client, req, row) {
     row.keyboardStatus,
     row.padStatus,
     row.badgeReaderStatus,
+    null,
+    null,
     now,
     now,
+    null,
+    null,
+    false,
+    null,
     components ? JSON.stringify(components) : null,
     payloadText,
     getClientIp(req)
@@ -4863,12 +5326,16 @@ function buildReportFilters(
   {
     includeCategory = true,
     activeTagId = null,
-    forcedTechKeys = null
+    forcedTechKeys = null,
+    tableAlias = ''
   } = {}
 ) {
   const clauses = [];
   const values = [];
   let idx = 1;
+  const prefix = tableAlias ? `${tableAlias}.` : '';
+  const col = (name) => `${prefix}${name}`;
+  const normalizedTextColumn = (name) => normalizeTextSql(col(name));
 
   const forcedTechList = Array.isArray(forcedTechKeys)
     ? Array.from(new Set(forcedTechKeys.map((value) => normalizeTechKey(value)).filter(Boolean)))
@@ -4877,7 +5344,7 @@ function buildReportFilters(
     if (!forcedTechList.length) {
       clauses.push('1 = 0');
     } else {
-      clauses.push(`${normalizeTextSql('technician')} = ANY($${idx}::text[])`);
+      clauses.push(`${normalizedTextColumn('technician')} = ANY($${idx}::text[])`);
       values.push(forcedTechList);
       idx += 1;
     }
@@ -4886,7 +5353,7 @@ function buildReportFilters(
   const techRaw = cleanString(query.tech, 64);
   const tech = techRaw ? normalizeTechKey(techRaw) : '';
   if (tech) {
-    clauses.push(`${normalizeTextSql('technician')} = $${idx}`);
+    clauses.push(`${normalizedTextColumn('technician')} = $${idx}`);
     values.push(tech);
     idx += 1;
   }
@@ -4896,9 +5363,9 @@ function buildReportFilters(
     const activeId = normalizeUuid(activeTagId);
     const includeNull = activeId && tagIds.includes(activeId);
     if (includeNull) {
-      clauses.push(`(tag_id = ANY($${idx}::uuid[]) OR tag_id IS NULL)`);
+      clauses.push(`(${col('tag_id')} = ANY($${idx}::uuid[]) OR ${col('tag_id')} IS NULL)`);
     } else {
-      clauses.push(`tag_id = ANY($${idx}::uuid[])`);
+      clauses.push(`${col('tag_id')} = ANY($${idx}::uuid[])`);
     }
     values.push(tagIds);
     idx += 1;
@@ -4906,16 +5373,18 @@ function buildReportFilters(
 
   const legacyFlag = String(query.legacy || '').toLowerCase();
   if (legacyFlag === '1' || legacyFlag === 'true') {
-    clauses.push(`payload IS NOT NULL AND payload <> '' AND payload::jsonb ? 'legacy'`);
+    clauses.push(`${col('payload')} IS NOT NULL AND ${col('payload')} <> '' AND ${col('payload')}::jsonb ? 'legacy'`);
   } else if (legacyFlag === '0' || legacyFlag === 'false') {
-    clauses.push(`(payload IS NULL OR payload = '' OR NOT (payload::jsonb ? 'legacy'))`);
+    clauses.push(
+      `(${col('payload')} IS NULL OR ${col('payload')} = '' OR NOT (${col('payload')}::jsonb ? 'legacy'))`
+    );
   }
 
   if (includeCategory) {
     const categoryRaw = cleanString(query.category, 32);
     if (categoryRaw && categoryRaw !== 'all') {
       const category = normalizeCategory(categoryRaw);
-      clauses.push(`category = $${idx}`);
+      clauses.push(`${col('category')} = $${idx}`);
       values.push(category);
       idx += 1;
     }
@@ -4923,16 +5392,16 @@ function buildReportFilters(
 
   const commentFilter = query.comment;
   if (commentFilter === 'with') {
-    clauses.push(`(comment IS NOT NULL AND comment <> '')`);
+    clauses.push(`(${col('comment')} IS NOT NULL AND ${col('comment')} <> '')`);
   } else if (commentFilter === 'without') {
-    clauses.push(`(comment IS NULL OR comment = '')`);
+    clauses.push(`(${col('comment')} IS NULL OR ${col('comment')} = '')`);
   }
 
   const shipmentDate = normalizeShipmentDate(
     query.shipmentDate || query.dateExpedition || query.expeditionDate || query.shippingDate
   );
   if (shipmentDate) {
-    clauses.push(`shipment_date = $${idx}`);
+    clauses.push(`${col('shipment_date')} = $${idx}`);
     values.push(shipmentDate);
     idx += 1;
   }
@@ -4941,7 +5410,7 @@ function buildReportFilters(
     normalizeShipmentClient(query.shipmentClient || query.client || query.customer) || ''
   );
   if (shipmentClient) {
-    clauses.push(`${normalizeTextSql('shipment_client')} = $${idx}`);
+    clauses.push(`${normalizedTextColumn('shipment_client')} = $${idx}`);
     values.push(shipmentClient);
     idx += 1;
   }
@@ -4951,7 +5420,7 @@ function buildReportFilters(
       ''
   );
   if (shipmentOrderNumber) {
-    clauses.push(`${normalizeTextSql('shipment_order_number')} = $${idx}`);
+    clauses.push(`${normalizedTextColumn('shipment_order_number')} = $${idx}`);
     values.push(shipmentOrderNumber);
     idx += 1;
   }
@@ -4960,7 +5429,7 @@ function buildReportFilters(
     normalizePalletCode(query.shipmentPalletCode || query.palletCode || query.pallet || query.palette) || ''
   );
   if (shipmentPalletCode) {
-    clauses.push(`${normalizeTextSql('shipment_pallet_code')} = $${idx}`);
+    clauses.push(`${normalizedTextColumn('shipment_pallet_code')} = $${idx}`);
     values.push(shipmentPalletCode);
     idx += 1;
   }
@@ -4968,7 +5437,7 @@ function buildReportFilters(
   const component = cleanString(query.component, 64);
   if (component && component !== 'all') {
     clauses.push(
-      `lower(COALESCE(NULLIF(components, ''), '{}')::jsonb ->> $${idx}) = 'nok'`
+      `lower(COALESCE(NULLIF(${col('components')}, ''), '{}')::jsonb ->> $${idx}) = 'nok'`
     );
     values.push(component);
     idx += 1;
@@ -4978,15 +5447,26 @@ function buildReportFilters(
     query.batteryUnder ?? query.batteryBelow ?? query.batteryHealthBelow ?? query.lowBattery;
   const batteryUnder = Number.parseInt(String(batteryUnderRaw || '').trim(), 10);
   if (Number.isFinite(batteryUnder) && batteryUnder >= 0 && batteryUnder <= 100) {
-    clauses.push(`battery_health IS NOT NULL AND battery_health < $${idx}`);
+    clauses.push(`${col('battery_health')} IS NOT NULL AND ${col('battery_health')} < $${idx}`);
     values.push(batteryUnder);
+    idx += 1;
+  }
+
+  const alertModeRaw = String(query.alertMode || query.alerts || '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(alertModeRaw)) {
+    clauses.push(
+      `((${col('battery_health')} IS NOT NULL AND ${col('battery_health')} < $${idx}) OR COALESCE(${col(
+        'bios_clock_alert'
+      )}, false))`
+    );
+    values.push(ALERT_BATTERY_THRESHOLD);
     idx += 1;
   }
 
   const dateFilter = query.date;
   const range = getDateRange(dateFilter);
   if (range) {
-    clauses.push(`last_seen >= $${idx} AND last_seen <= $${idx + 1}`);
+    clauses.push(`${col('last_seen')} >= $${idx} AND ${col('last_seen')} <= $${idx + 1}`);
     values.push(range.start, range.end);
     idx += 2;
   }
@@ -4995,10 +5475,18 @@ function buildReportFilters(
   if (search) {
     clauses.push(
       `lower(` +
-        `coalesce(hostname,'') || ' ' || coalesce(serial_number,'') || ' ' || coalesce(mac_address,'') || ' ' || ` +
-        `coalesce(mac_addresses,'') || ' ' || coalesce(machine_key,'') || ' ' || coalesce(technician,'') || ' ' || ` +
-        `coalesce(vendor,'') || ' ' || coalesce(model,'') || ' ' || coalesce(comment,'') || ' ' || coalesce(tag,'') || ' ' || ` +
-        `coalesce(shipment_client,'') || ' ' || coalesce(shipment_order_number,'') || ' ' || coalesce(shipment_pallet_code,'') || ' ' || coalesce(shipment_date::text,'')` +
+        `coalesce(${col('hostname')},'') || ' ' || coalesce(${col('serial_number')},'') || ' ' || coalesce(${col(
+          'mac_address'
+        )},'') || ' ' || ` +
+        `coalesce(${col('mac_addresses')},'') || ' ' || coalesce(${col('machine_key')},'') || ' ' || coalesce(${col(
+          'technician'
+        )},'') || ' ' || ` +
+        `coalesce(${col('vendor')},'') || ' ' || coalesce(${col('model')},'') || ' ' || coalesce(${col(
+          'comment'
+        )},'') || ' ' || coalesce(${col('tag')},'') || ' ' || ` +
+        `coalesce(${col('shipment_client')},'') || ' ' || coalesce(${col('shipment_order_number')},'') || ' ' || coalesce(${col(
+          'shipment_pallet_code'
+        )},'') || ' ' || coalesce(${col('shipment_date')}::text,'')` +
         `) LIKE $${idx}`
     );
     values.push(`%${search.toLowerCase()}%`);
@@ -10528,6 +11016,7 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
 
   const machineKey = buildMachineKey(serialNumber, macAddress, hostname);
 
+  const clientGeneratedAt = extractClientGeneratedAt(body, [bodyComponents, bodyHardware, bodyWifi, bodyNetwork]);
   const now = new Date().toISOString();
   const reportIdRaw = pickFirstFromSources([body, body.diag], [
     'reportId',
@@ -10571,6 +11060,45 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
     const resolvedPalletStatus =
       resolvedPallet && resolvedPallet.status ? resolvedPallet.status : null;
     const resolvedShipment = normalizeShipmentFromRow(resolvedPallet);
+    const previousClockResult = machineKey
+      ? await client.query(
+        `
+          SELECT client_generated_at, last_seen
+          FROM reports
+          WHERE machine_key = $1
+            AND id <> $2
+            AND client_generated_at IS NOT NULL
+          ORDER BY last_seen DESC, id DESC
+          LIMIT 1
+        `,
+        [machineKey, reportId]
+      )
+      : { rows: [] };
+    const previousClockRow =
+      previousClockResult.rows && previousClockResult.rows[0] ? previousClockResult.rows[0] : null;
+    const existingMachineResult = machineKey
+      ? await client.query(
+        `
+          SELECT first_client_generated_at
+          FROM machines
+          WHERE machine_key = $1
+          LIMIT 1
+        `,
+        [machineKey]
+      )
+      : { rows: [] };
+    const existingMachineRow =
+      existingMachineResult.rows && existingMachineResult.rows[0] ? existingMachineResult.rows[0] : null;
+    const clockAssessment = buildClockAlertAssessment({
+      serverSeenAt: now,
+      clientGeneratedAt,
+      previousServerSeenAt: previousClockRow ? previousClockRow.last_seen : null,
+      previousClientGeneratedAt: previousClockRow ? previousClockRow.client_generated_at : null
+    });
+    const firstClientGeneratedAt =
+      normalizeClientGeneratedAt(existingMachineRow ? existingMachineRow.first_client_generated_at : null) ||
+      clockAssessment.clientGeneratedAt ||
+      null;
     const shouldCountLot = Boolean(
       resolvedLotId &&
       machineKey &&
@@ -10614,8 +11142,13 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       keyboardStatus,
       padStatus,
       badgeReaderStatus,
+      clockAssessment.clientGeneratedAt,
       now,
       now,
+      clockAssessment.driftSeconds,
+      clockAssessment.deltaSeconds,
+      clockAssessment.active,
+      clockAssessment.code,
       mergedComponents ? JSON.stringify(mergedComponents) : null,
       payload,
       ipAddress
@@ -10650,8 +11183,14 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
       keyboardStatus,
       padStatus,
       badgeReaderStatus,
+      clockAssessment.clientGeneratedAt,
+      firstClientGeneratedAt,
       now,
       now,
+      clockAssessment.driftSeconds,
+      clockAssessment.deltaSeconds,
+      clockAssessment.active,
+      clockAssessment.code,
       mergedComponents ? JSON.stringify(mergedComponents) : null,
       payload,
       ipAddress
@@ -10714,13 +11253,14 @@ app.get('/api/reports', requireAuth, async (req, res) => {
       activeTagId = null;
     }
   }
+  const useLatest = shouldUseLatest(req.query);
   const { clauses, values } = buildReportFilters(req.query, {
     includeCategory: true,
     activeTagId,
-    forcedTechKeys: getForcedReportTechKeys(req.session?.user)
+    forcedTechKeys: getForcedReportTechKeys(req.session?.user),
+    tableAlias: useLatest ? 'latest' : 'reports'
   });
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const useLatest = shouldUseLatest(req.query);
 
   try {
     let total = null;
@@ -10728,8 +11268,34 @@ app.get('/api/reports', requireAuth, async (req, res) => {
       if (useLatest) {
         const countResult = await pool.query(
           `
-            SELECT COUNT(DISTINCT machine_key) AS total
-            FROM reports
+            WITH latest AS (
+              SELECT DISTINCT ON (reports.machine_key)
+                reports.machine_key,
+                reports.hostname,
+                reports.serial_number,
+                reports.mac_address,
+                reports.mac_addresses,
+                reports.category,
+                reports.tag,
+                reports.tag_id,
+                reports.technician,
+                reports.vendor,
+                reports.model,
+                reports.comment,
+                reports.shipment_date,
+                reports.shipment_client,
+                reports.shipment_order_number,
+                reports.shipment_pallet_code,
+                reports.battery_health,
+                reports.bios_clock_alert,
+                reports.components,
+                reports.payload,
+                reports.last_seen
+              FROM reports
+              ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+            )
+            SELECT COUNT(*) AS total
+            FROM latest
             ${where}
           `,
           values
@@ -10781,12 +11347,17 @@ app.get('/api/reports', requireAuth, async (req, res) => {
               reports.keyboard_status,
               reports.pad_status,
               reports.badge_reader_status,
+              reports.client_generated_at,
               reports.last_seen,
+              reports.clock_drift_seconds,
+              reports.clock_delta_seconds,
+              reports.bios_clock_alert,
+              reports.bios_clock_alert_code,
               reports.last_ip,
               reports.components,
-              reports.comment
+              reports.comment,
+              reports.payload
             FROM reports
-            ${where}
             ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
           )
           SELECT
@@ -10827,7 +11398,12 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             latest.keyboard_status,
             latest.pad_status,
             latest.badge_reader_status,
+            latest.client_generated_at,
             latest.last_seen,
+            latest.clock_drift_seconds,
+            latest.clock_delta_seconds,
+            latest.bios_clock_alert,
+            latest.bios_clock_alert_code,
             latest.last_ip,
             latest.components,
             latest.comment
@@ -10835,6 +11411,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
           LEFT JOIN tags ON tags.id = latest.tag_id
           LEFT JOIN lots ON lots.id = latest.lot_id
           LEFT JOIN pallets ON pallets.id = latest.pallet_id
+          ${where}
           ORDER BY latest.last_seen DESC
           LIMIT $${values.length + 1} OFFSET $${values.length + 2}
         `,
@@ -10880,7 +11457,12 @@ app.get('/api/reports', requireAuth, async (req, res) => {
             reports.keyboard_status,
             reports.pad_status,
             reports.badge_reader_status,
+            reports.client_generated_at,
             reports.last_seen,
+            reports.clock_drift_seconds,
+            reports.clock_delta_seconds,
+            reports.bios_clock_alert,
+            reports.bios_clock_alert_code,
             reports.last_ip,
             reports.components,
             reports.comment
@@ -10930,6 +11512,7 @@ app.get('/api/reports', requireAuth, async (req, res) => {
         keyboardStatus: row.keyboard_status,
         padStatus: row.pad_status,
         badgeReaderStatus: row.badge_reader_status,
+        clockAlert: normalizeClockAlertFromRow(row),
         lastSeen: row.last_seen,
         lastIp: row.last_ip,
         comment: row.comment,
@@ -10963,21 +11546,23 @@ app.get('/api/stats', requireAuth, async (req, res) => {
     }
   }
   const forcedTechKeys = getForcedReportTechKeys(req.session?.user);
+  const useLatest = shouldUseLatest(req.query);
   const { clauses, values } = buildReportFilters(req.query, {
     includeCategory: false,
     activeTagId,
-    forcedTechKeys
+    forcedTechKeys,
+    tableAlias: useLatest ? 'latest' : 'reports'
   });
   const queryWithoutTech = { ...req.query };
   delete queryWithoutTech.tech;
   const { clauses: techClauses, values: techValues } = buildReportFilters(queryWithoutTech, {
     includeCategory: false,
     activeTagId,
-    forcedTechKeys
+    forcedTechKeys,
+    tableAlias: useLatest ? 'latest' : 'reports'
   });
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const techWhere = techClauses.length ? `WHERE ${techClauses.join(' AND ')}` : '';
-  const useLatest = shouldUseLatest(req.query);
 
   try {
     const result = useLatest
@@ -10988,9 +11573,25 @@ app.get('/api/stats', requireAuth, async (req, res) => {
               reports.machine_key,
               reports.category,
               reports.technician,
+              reports.hostname,
+              reports.serial_number,
+              reports.mac_address,
+              reports.mac_addresses,
+              reports.tag,
+              reports.tag_id,
+              reports.vendor,
+              reports.model,
+              reports.comment,
+              reports.shipment_date,
+              reports.shipment_client,
+              reports.shipment_order_number,
+              reports.shipment_pallet_code,
+              reports.battery_health,
+              reports.bios_clock_alert,
+              reports.components,
+              reports.payload,
               reports.last_seen
             FROM reports
-            ${where}
             ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
           )
           SELECT
@@ -10999,6 +11600,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
             COUNT(*) FILTER (WHERE category = 'desktop') AS desktop,
             COUNT(*) FILTER (WHERE category = 'unknown') AS unknown
           FROM latest
+          ${where}
         `,
         values
       )
@@ -11022,14 +11624,30 @@ app.get('/api/stats', requireAuth, async (req, res) => {
             SELECT DISTINCT ON (reports.machine_key)
               reports.machine_key,
               reports.technician,
+              reports.hostname,
+              reports.serial_number,
+              reports.mac_address,
+              reports.mac_addresses,
+              reports.tag,
+              reports.tag_id,
+              reports.vendor,
+              reports.model,
+              reports.comment,
+              reports.shipment_date,
+              reports.shipment_client,
+              reports.shipment_order_number,
+              reports.shipment_pallet_code,
+              reports.battery_health,
+              reports.bios_clock_alert,
+              reports.components,
+              reports.payload,
               reports.last_seen
             FROM reports
-            ${techWhere}
             ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
           )
           SELECT DISTINCT technician
           FROM latest
-          WHERE technician IS NOT NULL AND technician <> ''
+          ${techWhere ? `${techWhere} AND technician IS NOT NULL AND technician <> ''` : `WHERE technician IS NOT NULL AND technician <> ''`}
           ORDER BY technician
         `,
         techValues
@@ -11141,6 +11759,7 @@ app.get('/api/machines', requireAuth, async (req, res) => {
         keyboardStatus: row.keyboard_status,
         padStatus: row.pad_status,
         badgeReaderStatus: row.badge_reader_status,
+        clockAlert: normalizeClockAlertFromRow(row),
         lastSeen: row.last_seen,
         lastIp: row.last_ip,
         comment: row.comment,
@@ -11825,6 +12444,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       keyboardStatus: row.keyboard_status,
       padStatus: row.pad_status,
       badgeReaderStatus: row.badge_reader_status,
+      clockAlert: normalizeClockAlertFromRow(row),
       lastSeen: row.machine_last_seen || row.report_last_seen,
       createdAt: row.machine_created_at || row.report_created_at,
       reportLastSeen: row.report_last_seen,
@@ -12363,8 +12983,13 @@ app.post('/api/machines/:id/report-zero', requireOperator, async (req, res) => {
       zeroStatus,
       zeroStatus,
       zeroStatus,
+      null,
       now,
       now,
+      null,
+      null,
+      false,
+      null,
       JSON.stringify(components),
       payload,
       row.last_ip
@@ -12401,8 +13026,14 @@ app.post('/api/machines/:id/report-zero', requireOperator, async (req, res) => {
         zeroStatus,
         zeroStatus,
         zeroStatus,
+        null,
+        null,
         now,
         row.created_at || now,
+        null,
+        null,
+        false,
+        null,
         JSON.stringify(components),
         payload,
         row.last_ip
@@ -12683,8 +13314,13 @@ app.post('/api/reports/report-zero', requireOperator, async (req, res) => {
       zeroStatus,
       zeroStatus,
       zeroStatus,
+      null,
       now,
       now,
+      null,
+      null,
+      false,
+      null,
       JSON.stringify(components),
       payload,
       getClientIp(req)
@@ -12719,8 +13355,14 @@ app.post('/api/reports/report-zero', requireOperator, async (req, res) => {
       zeroStatus,
       zeroStatus,
       zeroStatus,
+      null,
+      null,
       now,
       now,
+      null,
+      null,
+      false,
+      null,
       JSON.stringify(components),
       payload,
       getClientIp(req)

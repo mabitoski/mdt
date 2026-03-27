@@ -2030,12 +2030,30 @@ button.admin-link {
   background: rgba(184, 63, 32, 0.2);
 }
 
+.bios-clock-pill {
+  border-color: rgba(132, 74, 18, 0.34);
+  background: rgba(132, 74, 18, 0.12);
+  color: #6a3a11;
+}
+
+.bios-clock-pill .lot-pill-label {
+  background: rgba(132, 74, 18, 0.18);
+}
+
 .machine-card.is-battery-alert {
   border-color: rgba(184, 63, 32, 0.28);
 }
 
 .machine-card.is-battery-alert:hover {
   border-color: rgba(184, 63, 32, 0.45);
+}
+
+.machine-card.is-clock-alert {
+  border-color: rgba(132, 74, 18, 0.28);
+}
+
+.machine-card.is-clock-alert:hover {
+  border-color: rgba(132, 74, 18, 0.42);
 }
 
 .machine-lot-line {
@@ -5761,6 +5779,11 @@ body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-mini-card strong
   color: #0e1726;
 }
 
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-mini-card.is-alert {
+  border-color: rgba(164, 91, 22, 0.26);
+  background: #fff7ee;
+}
+
 body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-tabs {
   display: grid;
   gap: 10px;
@@ -5808,6 +5831,17 @@ body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table {
 body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table div {
   display: grid;
   gap: 2px;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table .drawer-alert-cell--wide {
+  grid-column: 1 / -1;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table .drawer-alert-cell.is-alert {
+  border: 1px solid rgba(164, 91, 22, 0.22);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #fff7ee;
 }
 
 body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-table .drawer-lot-field {
@@ -5983,6 +6017,17 @@ body.dashboard-page:not(.admin-page):not(.metrics-page) .drawer-note-meta {
   margin: 8px 0 0;
   color: #607086;
   font-size: 0.76rem;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .detail-item--wide {
+  grid-column: 1 / -1;
+}
+
+body.dashboard-page:not(.admin-page):not(.metrics-page) .detail-item.is-alert {
+  border: 1px solid rgba(164, 91, 22, 0.24);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #fff7ee;
 }
 
 @media (max-width: 1200px) {

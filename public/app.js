@@ -457,7 +457,7 @@ function applyCurrentUser(user) {
 function buildQueryParams({ includeCategory = true, includeTech = true } = {}) {
   const params = new URLSearchParams();
   if (isBatteryAlertsView()) {
-    params.set('batteryUnder', String(BATTERY_ALERT_THRESHOLD));
+    params.set('alertMode', '1');
   }
   if (includeTech && !isTechnicianFilterLocked() && state.techFilter !== 'all') {
     params.set('tech', state.techFilter);
@@ -2226,7 +2226,7 @@ function renderBoardTabs() {
   }
   if (boardSubEl) {
     boardSubEl.textContent = isBatteryAlertsView()
-      ? 'Vue dediee aux postes qui doivent etre controles ou batteries remplacees en priorite.'
+      ? 'Vue dediee aux postes a traiter en priorite: batterie faible ou derive d horloge BIOS / RTC.'
       : 'Vue operationnelle en temps reel avec suivi clair des machines et du lot prioritaire.';
   }
   if (boardScopeBannerEl) {
@@ -3099,6 +3099,129 @@ function parseBatteryHealthValue(value) {
   }
   const parsed = Number.parseFloat(String(value || '').replace('%', '').trim());
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeClockAlert(alert) {
+  if (!alert || typeof alert !== 'object' || Array.isArray(alert)) {
+    return null;
+  }
+  const reasonsSource = Array.isArray(alert.reasons)
+    ? alert.reasons
+    : typeof alert.reasons === 'string'
+      ? alert.reasons.split(',')
+      : [];
+  const normalizedReasons = ['clock_backwards', 'clock_drift', 'delta_mismatch'].filter((reason) =>
+    reasonsSource.map((item) => String(item || '').trim().toLowerCase()).includes(reason)
+  );
+  const driftSeconds = Number.parseInt(String(alert.driftSeconds ?? ''), 10);
+  const deltaSeconds = Number.parseInt(String(alert.deltaSeconds ?? ''), 10);
+  const normalized = {
+    active: alert.active === true || normalizedReasons.length > 0,
+    reasons: normalizedReasons,
+    clientGeneratedAt: alert.clientGeneratedAt || null,
+    firstClientGeneratedAt: alert.firstClientGeneratedAt || null,
+    serverSeenAt: alert.serverSeenAt || null,
+    firstServerSeenAt: alert.firstServerSeenAt || null,
+    driftSeconds: Number.isFinite(driftSeconds) ? driftSeconds : null,
+    deltaSeconds: Number.isFinite(deltaSeconds) ? deltaSeconds : null
+  };
+  if (
+    !normalized.active &&
+    !normalized.clientGeneratedAt &&
+    !normalized.firstClientGeneratedAt &&
+    normalized.driftSeconds == null &&
+    normalized.deltaSeconds == null
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function formatDurationSeconds(value) {
+  const seconds = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return '--';
+  }
+  if (seconds < 60) {
+    return `${seconds} s`;
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  if (hours > 0) {
+    return minutes > 0 ? `${hours} h ${minutes} min` : `${hours} h`;
+  }
+  if (minutes > 0) {
+    return remainingSeconds > 0 ? `${minutes} min ${remainingSeconds} s` : `${minutes} min`;
+  }
+  return `${seconds} s`;
+}
+
+function formatClockAlertSummary(alert) {
+  const normalized = normalizeClockAlert(alert);
+  if (!normalized) {
+    return 'Aucune derive RTC detectee.';
+  }
+  const parts = [];
+  if (normalized.reasons.includes('clock_backwards')) {
+    parts.push('Horloge poste revenue en arriere');
+  }
+  if (normalized.reasons.includes('clock_drift')) {
+    parts.push(
+      normalized.driftSeconds != null
+        ? `Ecart horloge ${formatDurationSeconds(normalized.driftSeconds)}`
+        : 'Horloge poste decalee'
+    );
+  }
+  if (normalized.reasons.includes('delta_mismatch')) {
+    parts.push(
+      normalized.deltaSeconds != null
+        ? `Delta passages ${formatDurationSeconds(normalized.deltaSeconds)}`
+        : 'Delta passages incoherent'
+    );
+  }
+  if (parts.length) {
+    return parts.join(' · ');
+  }
+  return normalized.active ? 'Controle pile BIOS recommande.' : 'Aucune derive RTC detectee.';
+}
+
+function buildClockAlertFields(alert, mode = 'detail') {
+  const normalized = normalizeClockAlert(alert);
+  if (!normalized) {
+    return '';
+  }
+  const wrapperClass = mode === 'drawer' ? 'drawer-alert-cell' : 'detail-item';
+  const wideClass = mode === 'drawer' ? ' drawer-alert-cell--wide' : ' detail-item--wide';
+  const alertClass = normalized.active ? ' is-alert' : '';
+  const statusLabel = normalized.active ? 'Controle requis' : 'RAS';
+  const rows = [
+    ['Alerte pile BIOS', statusLabel, false],
+    ['Heure poste', formatDateTime(normalized.clientGeneratedAt), false],
+    ['Heure serveur', formatDateTime(normalized.serverSeenAt), false],
+    ['Ecart horloge', formatDurationSeconds(normalized.driftSeconds), false],
+    ['1er passage poste', formatDateTime(normalized.firstClientGeneratedAt), false],
+    ['1er passage serveur', formatDateTime(normalized.firstServerSeenAt), false],
+    ['Delta passages', formatDurationSeconds(normalized.deltaSeconds), false],
+    ['Diagnostic RTC', formatClockAlertSummary(normalized), true]
+  ];
+  return rows
+    .map(([label, value, wide]) => {
+      const classes = [wrapperClass];
+      if (wide) {
+        classes.push(wideClass.trim());
+      }
+      if (label === 'Alerte pile BIOS' && normalized.active) {
+        classes.push('is-alert');
+      }
+      return `
+        <div class="${classes.join(' ')}">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value || '--')}</strong>
+        </div>
+      `;
+    })
+    .join('');
 }
 
 function formatMetric(value, unit) {
@@ -4817,6 +4940,7 @@ function buildDrawerDetailHtml(detail) {
   const lotSelectOptions = buildLotAssignmentOptions(lot);
   const summary = summarizeDetailForDrawer(detail);
   const components = resolveDetailComponents(detail);
+  const clockAlert = normalizeClockAlert(detail.clockAlert);
 
   const payload =
     detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
@@ -4871,6 +4995,9 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-mini-card"><span>Stockage</span><strong>${escapeHtml(formatTotalStorage(diskInfo, volumeInfo))}</strong></div>
       <div class="drawer-mini-card"><span>GPU</span><strong>${escapeHtml((gpuInfo && gpuInfo.name) || '--')}</strong></div>
       <div class="drawer-mini-card"><span>Batterie</span><strong>${escapeHtml(formatBatteryHealth(detail.batteryHealth))}</strong></div>
+      <div class="drawer-mini-card${clockAlert && clockAlert.active ? ' is-alert' : ''}"><span>Pile BIOS</span><strong>${escapeHtml(
+        clockAlert && clockAlert.active ? 'Controle requis' : 'RAS'
+      )}</strong></div>
     </div>
   `;
 
@@ -4938,6 +5065,7 @@ function buildDrawerDetailHtml(detail) {
       }</div>
       <div><span>Premier passage</span><strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong></div>
       <div><span>Dernier passage</span><strong>${escapeHtml(formatDateTime(detail.lastSeen))}</strong></div>
+      ${buildClockAlertFields(clockAlert, 'drawer')}
     </div>
   `;
 
@@ -5179,7 +5307,7 @@ function renderList(isScrollUpdate = false) {
       listEl.classList.remove('is-virtual');
     }
     listEl.innerHTML = isBatteryAlertsView()
-      ? `<div class="empty">Aucune machine avec une batterie inferieure a ${BATTERY_ALERT_THRESHOLD}%.</div>`
+      ? `<div class="empty">Aucune machine avec batterie inferieure a ${BATTERY_ALERT_THRESHOLD}% ou derive RTC detectee.</div>`
       : '<div class="empty">Aucun poste ne correspond a ce filtre.</div>';
     return;
   }
@@ -5257,6 +5385,8 @@ function renderList(isScrollUpdate = false) {
       const technicianValue = machine.technician || '';
       const batteryValue = parseBatteryHealthValue(machine.batteryHealth);
       const isBatteryAlert = batteryValue != null && batteryValue < BATTERY_ALERT_THRESHOLD;
+      const clockAlert = normalizeClockAlert(machine.clockAlert);
+      const isClockAlert = Boolean(clockAlert && clockAlert.active);
       const lastSeen = escapeHtml(timeAgo(machine.lastSeen));
       const tagLabel = getTagLabel(machine);
       const tagValue = escapeHtml(tagLabel);
@@ -5302,6 +5432,14 @@ function renderList(isScrollUpdate = false) {
           )}">
             <span class="lot-pill-label">Batterie</span>
             <span class="lot-pill-value">${escapeHtml(formatBatteryHealth(batteryValue))}</span>
+          </span>
+        `
+        : '';
+      const biosAlertHtml = isClockAlert
+        ? `
+          <span class="lot-pill bios-clock-pill" title="${escapeHtml(formatClockAlertSummary(clockAlert))}">
+            <span class="lot-pill-label">Alerte</span>
+            <span class="lot-pill-value">Horloge BIOS</span>
           </span>
         `
         : '';
@@ -5370,7 +5508,7 @@ function renderList(isScrollUpdate = false) {
       const toggleLabel = 'Voir details';
 
       return `
-        <article class="machine-card ${delayClass} ${selected}${isBatteryAlert ? ' is-battery-alert' : ''}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="false">
+        <article class="machine-card ${delayClass} ${selected}${isBatteryAlert ? ' is-battery-alert' : ''}${isClockAlert ? ' is-clock-alert' : ''}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="false">
           <div class="card-top">
             ${categoryBadge}
             <div class="card-top-right">
@@ -5379,6 +5517,7 @@ function renderList(isScrollUpdate = false) {
                 ${lotHtml}
                 ${palletHtml}
                 ${batteryHtml}
+                ${biosAlertHtml}
               </div>
               <span class="machine-meta"><span>${lastSeen}</span></span>
             </div>
@@ -5580,6 +5719,7 @@ function buildDetailHtml(detail) {
         .map((mac) => `<span class="mac-chip">${escapeHtml(mac)}</span>`)
         .join('')}</div>`
     : '<strong>--</strong>';
+  const clockAlert = normalizeClockAlert(detail.clockAlert);
 
   const componentEntries = Object.entries(components).filter(([key]) => !hiddenComponents.has(key));
   const componentOrderMap = new Map(componentOrder.map((key, index) => [key, index]));
@@ -5870,6 +6010,7 @@ function buildDetailHtml(detail) {
         <span>IP</span>
         <strong>${escapeHtml(detail.lastIp || '--')}</strong>
       </div>
+      ${buildClockAlertFields(clockAlert, 'detail')}
     </div>
     ${historyHtml}
     ${commentHtml}
