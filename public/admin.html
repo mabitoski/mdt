@@ -11,7 +11,7 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/styles.css?v=20260326b" />
+    <link rel="stylesheet" href="/styles.css?v=20260327b" />
   </head>
   <body class="dashboard-page admin-page">
     <div class="aura" aria-hidden="true"></div>
@@ -33,6 +33,7 @@
         <nav class="sidebar-nav" aria-label="Sections administration">
           <a class="sidebar-nav-btn" href="#section-admin-head">Vue generale</a>
           <a class="sidebar-nav-btn is-active" href="#section-access">Acces Microsoft</a>
+          <a class="sidebar-nav-btn" href="#section-weekly-recap">Recap hebdo</a>
           <a class="sidebar-nav-btn" href="#section-lots">Gestion des lots</a>
         </nav>
         <div class="sidebar-links" aria-label="Navigation pages">
@@ -129,6 +130,68 @@
             </div>
           </div>
 
+          <div class="admin-card" id="section-weekly-recap">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Pilotage</p>
+                <h2>Recap hebdo admins</h2>
+                <p class="admin-sub">
+                  Envoi automatique d'un recap professionnel avec l'activite atelier, les alertes
+                  batterie, les NOK et le detail des actions par operateur.
+                </p>
+              </div>
+              <div class="admin-meta">
+                <span class="admin-status" id="weekly-recap-status" data-status="unknown">Chargement</span>
+              </div>
+            </div>
+            <div class="admin-form">
+              <div class="admin-grid">
+                <div class="admin-field">
+                  <span>Destinataires</span>
+                  <p id="weekly-recap-recipients">--</p>
+                </div>
+                <div class="admin-field">
+                  <span>Planification</span>
+                  <p id="weekly-recap-schedule">--</p>
+                </div>
+                <div class="admin-field">
+                  <span>Seuil batterie</span>
+                  <p id="weekly-recap-threshold">--</p>
+                </div>
+                <div class="admin-field">
+                  <span>Dernier envoi</span>
+                  <p id="weekly-recap-last-run">--</p>
+                </div>
+              </div>
+              <div class="admin-actions">
+                <button type="button" class="admin-primary" id="weekly-recap-send">Envoyer maintenant</button>
+                <button type="button" class="admin-secondary" id="weekly-recap-reload">Recharger</button>
+              </div>
+              <div class="admin-feedback" id="weekly-recap-feedback" role="status"></div>
+            </div>
+            <div class="admin-form">
+              <div class="admin-grid recap-kpis" id="weekly-recap-kpis"></div>
+              <div class="recap-preview-grid">
+                <section class="recap-preview-card">
+                  <h3>Activite par operateur</h3>
+                  <div class="recap-preview-body" id="weekly-recap-operators"></div>
+                </section>
+                <section class="recap-preview-card">
+                  <h3>Alertes batterie ouvertes</h3>
+                  <div class="recap-preview-body" id="weekly-recap-alerts"></div>
+                </section>
+                <section class="recap-preview-card">
+                  <h3>Regressions recentes</h3>
+                  <div class="recap-preview-body" id="weekly-recap-regressions"></div>
+                </section>
+              </div>
+              <p class="admin-note">
+                Le scheduler envoie le recap sur la plage precedente complete. Le bouton ci-dessus
+                permet un envoi manuel immediat avec le meme contenu.
+              </p>
+            </div>
+          </div>
+
           <div class="admin-card" id="section-lots">
             <div class="admin-header">
               <div>
@@ -170,6 +233,6 @@
       </section>
     </main>
 
-    <script src="/admin.js?v=20260223c" defer></script>
+    <script src="/admin.js?v=20260327b" defer></script>
   </body>
 </html>

@@ -598,3 +598,286 @@ if (lotListEl) {
 }
 
 loadLots();
+
+const weeklyRecapStatusEl = document.getElementById('weekly-recap-status');
+const weeklyRecapRecipientsEl = document.getElementById('weekly-recap-recipients');
+const weeklyRecapScheduleEl = document.getElementById('weekly-recap-schedule');
+const weeklyRecapThresholdEl = document.getElementById('weekly-recap-threshold');
+const weeklyRecapLastRunEl = document.getElementById('weekly-recap-last-run');
+const weeklyRecapFeedbackEl = document.getElementById('weekly-recap-feedback');
+const weeklyRecapReloadBtn = document.getElementById('weekly-recap-reload');
+const weeklyRecapSendBtn = document.getElementById('weekly-recap-send');
+const weeklyRecapKpisEl = document.getElementById('weekly-recap-kpis');
+const weeklyRecapOperatorsEl = document.getElementById('weekly-recap-operators');
+const weeklyRecapAlertsEl = document.getElementById('weekly-recap-alerts');
+const weeklyRecapRegressionsEl = document.getElementById('weekly-recap-regressions');
+
+function setWeeklyRecapFeedback(state, message) {
+  if (!weeklyRecapFeedbackEl) {
+    return;
+  }
+  if (state) {
+    weeklyRecapFeedbackEl.dataset.state = state;
+  } else {
+    delete weeklyRecapFeedbackEl.dataset.state;
+  }
+  weeklyRecapFeedbackEl.textContent = message || '';
+}
+
+function setWeeklyRecapDisabled(disabled) {
+  [weeklyRecapReloadBtn, weeklyRecapSendBtn].forEach((button) => {
+    if (button) {
+      button.disabled = disabled;
+    }
+  });
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return '--';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '--';
+  }
+  return date.toLocaleString('fr-FR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function renderWeeklyRecapKpis(summary) {
+  if (!weeklyRecapKpisEl) {
+    return;
+  }
+  if (!summary) {
+    weeklyRecapKpisEl.innerHTML = '';
+    return;
+  }
+  const cards = [
+    ['Periode', summary.periodLabel || '--'],
+    ['Parc suivi', summary.snapshot ? summary.snapshot.totalMachines : 0],
+    ['Alertes actives', summary.snapshot ? summary.snapshot.batteryAlertsActive : 0],
+    ['NOK actifs', summary.snapshot ? summary.snapshot.nokMachinesActive : 0],
+    ['Regressions semaine', summary.weekly ? summary.weekly.regressionCount : 0],
+    ['Corrections semaine', summary.weekly ? summary.weekly.correctedCount : 0]
+  ];
+  weeklyRecapKpisEl.innerHTML = cards
+    .map(
+      ([label, value]) => `
+        <article class="recap-kpi-card">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(value)}</strong>
+        </article>
+      `
+    )
+    .join('');
+}
+
+function renderWeeklyRecapOperatorActivity(items) {
+  if (!weeklyRecapOperatorsEl) {
+    return;
+  }
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    weeklyRecapOperatorsEl.innerHTML = '<p class="admin-note">Aucune action manuelle sur la periode.</p>';
+    return;
+  }
+  weeklyRecapOperatorsEl.innerHTML = `
+    <table class="recap-table">
+      <thead>
+        <tr>
+          <th>Operateur</th>
+          <th>Actions</th>
+          <th>Composants</th>
+          <th>Commentaires</th>
+          <th>Report 0</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${list
+          .map(
+            (item) => `
+              <tr>
+                <td>${escapeHtml(item.actor || '--')}</td>
+                <td>${escapeHtml(item.totalActions || 0)}</td>
+                <td>${escapeHtml(item.componentUpdates || 0)}</td>
+                <td>${escapeHtml(item.commentsCount || 0)}</td>
+                <td>${escapeHtml(item.reportZeroCount || 0)}</td>
+              </tr>
+            `
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderWeeklyRecapBatteryAlerts(items) {
+  if (!weeklyRecapAlertsEl) {
+    return;
+  }
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    weeklyRecapAlertsEl.innerHTML = '<p class="admin-note">Aucune alerte batterie active.</p>';
+    return;
+  }
+  weeklyRecapAlertsEl.innerHTML = `
+    <ul class="recap-list">
+      ${list
+        .map(
+          (item) => `
+            <li>
+              <strong>${escapeHtml(item.label || item.machineKey || '--')}</strong>
+              <span>Tech ${escapeHtml(item.technician || '--')} · Batterie ${escapeHtml(item.batteryHealth || 0)}% · Vu ${escapeHtml(
+                formatDateTime(item.lastSeen)
+              )}</span>
+            </li>
+          `
+        )
+        .join('')}
+    </ul>
+  `;
+}
+
+function renderWeeklyRecapRegressions(items) {
+  if (!weeklyRecapRegressionsEl) {
+    return;
+  }
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    weeklyRecapRegressionsEl.innerHTML = '<p class="admin-note">Aucune regression sur la periode.</p>';
+    return;
+  }
+  weeklyRecapRegressionsEl.innerHTML = `
+    <ul class="recap-list">
+      ${list
+        .map(
+          (item) => `
+            <li>
+              <strong>${escapeHtml(item.machineKey || '--')}</strong>
+              <span>${escapeHtml(item.componentLabel || '--')} · ${escapeHtml(item.actor || '--')} · ${escapeHtml(
+                item.sourceLabel || '--'
+              )} · ${escapeHtml(formatDateTime(item.eventTime))}</span>
+            </li>
+          `
+        )
+        .join('')}
+    </ul>
+  `;
+}
+
+function renderWeeklyRecap(recap) {
+  const source = recap && typeof recap === 'object' ? recap : null;
+  const enabled = Boolean(source && source.enabled);
+  if (weeklyRecapStatusEl) {
+    weeklyRecapStatusEl.dataset.status = enabled ? 'enabled' : 'disabled';
+    weeklyRecapStatusEl.textContent = enabled ? 'Actif' : 'Desactive';
+  }
+  if (weeklyRecapRecipientsEl) {
+    weeklyRecapRecipientsEl.textContent =
+      source && Array.isArray(source.recipients) && source.recipients.length
+        ? source.recipients.join(', ')
+        : 'Aucun destinataire configure';
+  }
+  if (weeklyRecapScheduleEl) {
+    weeklyRecapScheduleEl.textContent = source && source.schedule ? source.schedule.label || '--' : '--';
+  }
+  if (weeklyRecapThresholdEl) {
+    weeklyRecapThresholdEl.textContent = source ? `< ${source.batteryThreshold || 78}%` : '--';
+  }
+  if (weeklyRecapLastRunEl) {
+    const latestRun = source && source.latestRun ? source.latestRun : null;
+    if (!latestRun) {
+      weeklyRecapLastRunEl.textContent = 'Aucun envoi enregistre';
+    } else {
+      const status = latestRun.status || 'inconnu';
+      weeklyRecapLastRunEl.textContent = `${formatDateTime(latestRun.sentAt)} · ${status}`;
+    }
+  }
+
+  const summary = source && source.preview ? source.preview : null;
+  renderWeeklyRecapKpis(summary);
+  renderWeeklyRecapOperatorActivity(summary ? summary.operatorActivity : []);
+  renderWeeklyRecapBatteryAlerts(summary ? summary.activeBatteryAlerts : []);
+  renderWeeklyRecapRegressions(summary ? summary.recentRegressions : []);
+}
+
+async function loadWeeklyRecap() {
+  if (!weeklyRecapStatusEl) {
+    return;
+  }
+  setWeeklyRecapFeedback('info', 'Chargement du recap...');
+  setWeeklyRecapDisabled(true);
+  try {
+    const response = await fetch('/api/admin/weekly-recap');
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.location.href = '/';
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'weekly_recap_load_failed');
+    }
+    renderWeeklyRecap(data.recap || null);
+    setWeeklyRecapFeedback('success', 'Recap charge.');
+  } catch (error) {
+    setWeeklyRecapFeedback('error', 'Impossible de charger le recap hebdo.');
+  } finally {
+    setWeeklyRecapDisabled(false);
+  }
+}
+
+async function sendWeeklyRecapNow() {
+  if (!weeklyRecapSendBtn) {
+    return;
+  }
+  setWeeklyRecapFeedback('info', 'Envoi du recap en cours...');
+  setWeeklyRecapDisabled(true);
+  try {
+    const response = await fetch('/api/admin/weekly-recap/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.location.href = '/';
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'weekly_recap_send_failed');
+    }
+    setWeeklyRecapFeedback('success', `Recap envoye a ${Array.isArray(data.recipients) ? data.recipients.length : 0} destinataire(s).`);
+    await loadWeeklyRecap();
+  } catch (error) {
+    setWeeklyRecapFeedback('error', "Impossible d'envoyer le recap.");
+  } finally {
+    setWeeklyRecapDisabled(false);
+  }
+}
+
+if (weeklyRecapReloadBtn) {
+  weeklyRecapReloadBtn.addEventListener('click', () => {
+    loadWeeklyRecap();
+  });
+}
+
+if (weeklyRecapSendBtn) {
+  weeklyRecapSendBtn.addEventListener('click', () => {
+    sendWeeklyRecapNow();
+  });
+}
+
+loadWeeklyRecap();

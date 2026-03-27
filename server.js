@@ -67,6 +67,24 @@ const SUGGESTION_VAULT_USER_FIELD =
   process.env.SUGGESTION_VAULT_USER_FIELD || 'username';
 const SUGGESTION_VAULT_PASSWORD_FIELD =
   process.env.SUGGESTION_VAULT_PASSWORD_FIELD || 'password';
+const WEEKLY_RECAP_ENABLED = process.env.WEEKLY_RECAP_ENABLED !== '0';
+const WEEKLY_RECAP_RECIPIENTS_RAW =
+  process.env.WEEKLY_RECAP_RECIPIENTS || process.env.SUGGESTION_EMAIL_TO || '';
+const WEEKLY_RECAP_FROM = process.env.WEEKLY_RECAP_FROM || '';
+const WEEKLY_RECAP_DAY_RAW = (process.env.WEEKLY_RECAP_DAY || 'monday').trim().toLowerCase();
+const WEEKLY_RECAP_HOUR_RAW = Number.parseInt(process.env.WEEKLY_RECAP_HOUR || '7', 10);
+const WEEKLY_RECAP_MINUTE_RAW = Number.parseInt(process.env.WEEKLY_RECAP_MINUTE || '30', 10);
+const WEEKLY_RECAP_TIMEZONE = (process.env.WEEKLY_RECAP_TIMEZONE || 'Europe/Paris').trim() || 'Europe/Paris';
+const WEEKLY_RECAP_BATTERY_THRESHOLD_RAW = Number.parseInt(
+  process.env.WEEKLY_RECAP_BATTERY_THRESHOLD || '78',
+  10
+);
+const WEEKLY_RECAP_CHECK_INTERVAL_MS = Number.parseInt(
+  process.env.WEEKLY_RECAP_CHECK_INTERVAL_MS || '300000',
+  10
+);
+const OPERATOR_TECHNICIAN_SCOPE_ENABLED =
+  String(process.env.OPERATOR_TECHNICIAN_SCOPE_ENABLED || '0').trim() === '1';
 const OBJECT_STORAGE_ENDPOINT =
   process.env.OBJECT_STORAGE_ENDPOINT || process.env.MDT_OBJECT_STORAGE_ENDPOINT || '';
 const OBJECT_STORAGE_BUCKET =
@@ -393,6 +411,9 @@ function extractPrimaryTechnicianLabel(value) {
 
 function getUserTechnicianScope(user) {
   if (!user || typeof user !== 'object') {
+    return null;
+  }
+  if (!OPERATOR_TECHNICIAN_SCOPE_ENABLED) {
     return null;
   }
   if (normalizeAccessLevel(user.accessLevel) !== ACCESS_LEVELS.operator) {
@@ -1468,6 +1489,22 @@ async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS weekly_recap_runs (
+      id UUID PRIMARY KEY,
+      period_key TEXT NOT NULL,
+      period_start TIMESTAMPTZ NOT NULL,
+      period_end TIMESTAMPTZ NOT NULL,
+      trigger_source TEXT NOT NULL,
+      created_by TEXT,
+      recipients TEXT NOT NULL,
+      status TEXT NOT NULL,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      summary TEXT,
+      error TEXT
+    );
+  `);
+
+  await pool.query(`
     CREATE OR REPLACE FUNCTION safe_jsonb(input_text TEXT)
     RETURNS JSONB
     LANGUAGE plpgsql
@@ -1631,6 +1668,9 @@ async function initDb() {
   );
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_patchnote_views_user ON patchnote_views(username, user_type)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_weekly_recap_runs_period_sent ON weekly_recap_runs(period_key, sent_at DESC)'
   );
 
   await pool.query(`
@@ -1854,6 +1894,12 @@ async function initDb() {
     await pool.query(`
       CREATE TRIGGER audit_log_reports
       AFTER INSERT OR UPDATE OR DELETE ON reports
+      FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
+    `);
+    await pool.query('DROP TRIGGER IF EXISTS audit_log_weekly_recap_runs ON weekly_recap_runs');
+    await pool.query(`
+      CREATE TRIGGER audit_log_weekly_recap_runs
+      AFTER INSERT OR UPDATE OR DELETE ON weekly_recap_runs
       FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
     `);
     await pool.query(`
@@ -5568,7 +5614,7 @@ async function sendSmtpCommand(socket, command, expectCodes) {
   return response;
 }
 
-async function sendSmtpMail({ from, to, subject, text, authUser, authPass }) {
+async function sendSmtpMail({ from, to, subject, text, html, authUser, authPass }) {
   return new Promise((resolve, reject) => {
     let finished = false;
     const timeout = setTimeout(() => {
@@ -5622,14 +5668,39 @@ async function sendSmtpMail({ from, to, subject, text, authUser, authPass }) {
         await sendSmtpCommand(socket, `MAIL FROM:<${from}>`, ['250']);
         await sendSmtpCommand(socket, `RCPT TO:<${to}>`, ['250', '251']);
         await sendSmtpCommand(socket, 'DATA', '354');
-        const lines = [
-          `From: MDT Live Ops <${from}>`,
-          `To: ${to}`,
-          `Subject: ${subject}`,
-          'Content-Type: text/plain; charset=utf-8',
-          '',
-          text
-        ];
+        const boundary = `mdt-${crypto.randomBytes(12).toString('hex')}`;
+        const lines = html
+          ? [
+            `From: MDT Live Ops <${from}>`,
+            `To: ${to}`,
+            `Subject: ${subject}`,
+            'MIME-Version: 1.0',
+            `Content-Type: multipart/alternative; boundary="${boundary}"`,
+            '',
+            `--${boundary}`,
+            'Content-Type: text/plain; charset=utf-8',
+            'Content-Transfer-Encoding: 8bit',
+            '',
+            text || '',
+            '',
+            `--${boundary}`,
+            'Content-Type: text/html; charset=utf-8',
+            'Content-Transfer-Encoding: 8bit',
+            '',
+            html,
+            '',
+            `--${boundary}--`
+          ]
+          : [
+            `From: MDT Live Ops <${from}>`,
+            `To: ${to}`,
+            `Subject: ${subject}`,
+            'MIME-Version: 1.0',
+            'Content-Type: text/plain; charset=utf-8',
+            'Content-Transfer-Encoding: 8bit',
+            '',
+            text || ''
+          ];
         const message = lines.join('\r\n').replace(/\n\./g, '\n..');
         socket.write(`${message}\r\n.\r\n`);
         await sendSmtpCommand(socket, null, '250');
@@ -5683,6 +5754,834 @@ async function sendSuggestionEmail({ title, body, createdBy, pageLabel }) {
   } catch (error) {
     console.error('Failed to send suggestion email', error);
     return { ok: false, error: 'send_failed' };
+  }
+}
+
+function escapeHtmlEmail(value) {
+  if (value == null) {
+    return '';
+  }
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeRecapCount(value) {
+  const parsed = Number.parseInt(String(value || '0'), 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mapWeeklyRecapRunRow(row) {
+  if (!row) {
+    return null;
+  }
+  let summary = null;
+  if (row.summary) {
+    try {
+      summary = JSON.parse(row.summary);
+    } catch (error) {
+      summary = null;
+    }
+  }
+  return {
+    id: row.id || null,
+    periodKey: row.period_key || null,
+    periodStart: row.period_start || null,
+    periodEnd: row.period_end || null,
+    triggerSource: row.trigger_source || null,
+    createdBy: row.created_by || null,
+    recipients: parseEmailAddressList(row.recipients || ''),
+    status: row.status || null,
+    sentAt: row.sent_at || null,
+    summary,
+    error: row.error || null
+  };
+}
+
+async function getLatestWeeklyRecapRun(client = pool) {
+  const result = await client.query(
+    `
+      SELECT
+        id,
+        period_key,
+        period_start,
+        period_end,
+        trigger_source,
+        created_by,
+        recipients,
+        status,
+        sent_at,
+        summary,
+        error
+      FROM weekly_recap_runs
+      ORDER BY sent_at DESC, id DESC
+      LIMIT 1
+    `
+  );
+  return mapWeeklyRecapRunRow(result.rows && result.rows[0] ? result.rows[0] : null);
+}
+
+async function hasSchedulerWeeklyRecapRunForPeriod(client, periodKey) {
+  const result = await client.query(
+    `
+      SELECT 1
+      FROM weekly_recap_runs
+      WHERE period_key = $1
+        AND trigger_source = 'scheduler'
+        AND status IN ('sent', 'partial')
+      LIMIT 1
+    `,
+    [periodKey]
+  );
+  return Boolean(result.rows && result.rows[0]);
+}
+
+function buildWeeklyRecapIdentity(row) {
+  const primary =
+    cleanString(row.hostname || '', 64) ||
+    cleanString(row.serial_number || '', 64) ||
+    cleanString(row.machine_key || '', 64) ||
+    'Poste';
+  const secondary = cleanString(row.serial_number || row.machine_key || '', 64);
+  return secondary && secondary !== primary ? `${primary} (${secondary})` : primary;
+}
+
+async function collectWeeklyRecapSummary(client, { now = new Date() } = {}) {
+  const window = computeWeeklyRecapWindow(now, WEEKLY_RECAP_TIMEZONE);
+  const startIso = window.periodStart.toISOString();
+  const endIso = window.periodEnd.toISOString();
+
+  const snapshotResult = await client.query(
+    `
+      WITH latest AS (
+        SELECT DISTINCT ON (reports.machine_key)
+          reports.machine_key,
+          reports.battery_health,
+          reports.components
+        FROM reports
+        WHERE COALESCE(reports.machine_key, '') <> ''
+        ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+      )
+      SELECT
+        COUNT(*)::integer AS total_machines,
+        COUNT(*) FILTER (
+          WHERE latest.battery_health IS NOT NULL
+            AND latest.battery_health < $1
+        )::integer AS battery_alerts_active,
+        COUNT(*) FILTER (
+          WHERE EXISTS (
+            SELECT 1
+            FROM jsonb_each_text(safe_jsonb(latest.components)) comp
+            WHERE comp.key NOT IN ('diskSmart', 'networkTest', 'memDiag', 'thermal')
+              AND lower(comp.value) IN ('nok', 'timeout', 'denied', 'absent')
+          )
+        )::integer AS nok_machines_active
+      FROM latest
+    `,
+    [WEEKLY_RECAP_BATTERY_THRESHOLD]
+  );
+
+  const insertStatsResult = await client.query(
+    `
+      SELECT
+        COUNT(*) FILTER (
+          WHERE source ~* '^POST /api/ingest'
+        )::integer AS ingest_reports,
+        COUNT(*) FILTER (
+          WHERE source ~* '^POST /api/reports/report-zero$'
+        )::integer AS manual_report_zero,
+        COUNT(*) FILTER (
+          WHERE source ~* '^POST /api/machines/.+/report-zero$'
+        )::integer AS cloned_report_zero,
+        COUNT(*) FILTER (
+          WHERE source ~* '^POST /api/reports/import-manual-csv$'
+        )::integer AS manual_csv_reports
+      FROM audit_log
+      WHERE table_name = 'reports'
+        AND action = 'INSERT'
+        AND occurred_at >= $1
+        AND occurred_at < $2
+    `,
+    [startIso, endIso]
+  );
+
+  const manualActivityResult = await client.query(
+    `
+      SELECT
+        COUNT(*) FILTER (
+          WHERE source ~* '^PUT /api/machines/.+/comment$'
+        )::integer AS comments_count,
+        COUNT(*) FILTER (
+          WHERE source ~* '^PUT /api/reports/.+/component$'
+            OR source ~* '^PUT /api/machines/.+/(pad|usb)$'
+        )::integer AS component_updates,
+        COUNT(*) FILTER (
+          WHERE source ~* '^PUT /api/reports/.+/category$'
+        )::integer AS category_updates,
+        COUNT(*) FILTER (
+          WHERE source ~* '^PUT /api/machines/.+/lot$'
+        )::integer AS lot_updates
+      FROM audit_log
+      WHERE occurred_at >= $1
+        AND occurred_at < $2
+    `,
+    [startIso, endIso]
+  );
+
+  const batterySeenResult = await client.query(
+    `
+      WITH affected AS (
+        SELECT DISTINCT ON (COALESCE(NULLIF(machine_key, ''), id::text))
+          COALESCE(NULLIF(machine_key, ''), id::text) AS scope_key
+        FROM reports
+        WHERE last_seen >= $1
+          AND last_seen < $2
+          AND battery_health IS NOT NULL
+          AND battery_health < $3
+        ORDER BY COALESCE(NULLIF(machine_key, ''), id::text), last_seen DESC, id DESC
+      )
+      SELECT COUNT(*)::integer AS battery_alerts_seen
+      FROM affected
+    `,
+    [startIso, endIso, WEEKLY_RECAP_BATTERY_THRESHOLD]
+  );
+
+  const correctionResult = await client.query(
+    `
+      SELECT
+        COUNT(*) FILTER (WHERE is_corrected)::integer AS corrected_count,
+        COUNT(*) FILTER (WHERE is_regressed)::integer AS manual_regression_count
+      FROM report_component_manual_changes
+      WHERE occurred_at >= $1
+        AND occurred_at < $2
+    `,
+    [startIso, endIso]
+  );
+
+  const regressionResult = await client.query(
+    `
+      SELECT
+        COUNT(*)::integer AS regression_count,
+        COUNT(DISTINCT machine_key)::integer AS regressed_machines
+      FROM report_component_regressions
+      WHERE event_time >= $1
+        AND event_time < $2
+    `,
+    [startIso, endIso]
+  );
+
+  const palletImportResult = await client.query(
+    `
+      SELECT
+        COUNT(*)::integer AS import_count,
+        COALESCE(SUM(applied_count), 0)::integer AS imported_rows
+      FROM pallet_imports
+      WHERE created_at >= $1
+        AND created_at < $2
+    `,
+    [startIso, endIso]
+  );
+
+  const operatorActivityResult = await client.query(
+    `
+      WITH activity AS (
+        SELECT
+          COALESCE(NULLIF(actor, ''), 'systeme') AS actor,
+          COUNT(*) FILTER (
+            WHERE source ~* '^PUT /api/machines/.+/comment$'
+          )::integer AS comments_count,
+          COUNT(*) FILTER (
+            WHERE source ~* '^PUT /api/reports/.+/component$'
+              OR source ~* '^PUT /api/machines/.+/(pad|usb)$'
+          )::integer AS component_updates,
+          COUNT(*) FILTER (
+            WHERE source ~* '^PUT /api/reports/.+/category$'
+          )::integer AS category_updates,
+          COUNT(*) FILTER (
+            WHERE source ~* '^POST /api/reports/report-zero$'
+              OR source ~* '^POST /api/machines/.+/report-zero$'
+          )::integer AS report_zero_count,
+          COUNT(*) FILTER (
+            WHERE source ~* '^POST /api/reports/import-manual-csv$'
+          )::integer AS manual_csv_reports,
+          COUNT(*) FILTER (
+            WHERE source ~* '^PUT /api/machines/.+/lot$'
+          )::integer AS lot_updates,
+          COUNT(*) FILTER (
+            WHERE source ~* '^POST /api/pallets/imports$'
+          )::integer AS pallet_imports,
+          COUNT(*)::integer AS total_actions
+        FROM audit_log
+        WHERE occurred_at >= $1
+          AND occurred_at < $2
+          AND COALESCE(NULLIF(actor, ''), '') <> ''
+          AND actor_type IN ('microsoft', 'local')
+          AND (
+            source ~* '^PUT /api/machines/.+/comment$'
+            OR source ~* '^PUT /api/reports/.+/component$'
+            OR source ~* '^PUT /api/machines/.+/(pad|usb)$'
+            OR source ~* '^PUT /api/reports/.+/category$'
+            OR source ~* '^POST /api/reports/report-zero$'
+            OR source ~* '^POST /api/machines/.+/report-zero$'
+            OR source ~* '^POST /api/reports/import-manual-csv$'
+            OR source ~* '^PUT /api/machines/.+/lot$'
+            OR source ~* '^POST /api/pallets/imports$'
+          )
+        GROUP BY actor
+      )
+      SELECT *
+      FROM activity
+      WHERE total_actions > 0
+      ORDER BY total_actions DESC, actor
+      LIMIT 12
+    `,
+    [startIso, endIso]
+  );
+
+  const batteryAlertListResult = await client.query(
+    `
+      WITH latest AS (
+        SELECT DISTINCT ON (reports.machine_key)
+          reports.machine_key,
+          reports.hostname,
+          reports.serial_number,
+          reports.technician,
+          reports.battery_health,
+          reports.last_seen
+        FROM reports
+        WHERE COALESCE(reports.machine_key, '') <> ''
+        ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+      )
+      SELECT
+        machine_key,
+        hostname,
+        serial_number,
+        technician,
+        battery_health,
+        last_seen
+      FROM latest
+      WHERE battery_health IS NOT NULL
+        AND battery_health < $1
+      ORDER BY battery_health ASC, last_seen DESC
+      LIMIT 12
+    `,
+    [WEEKLY_RECAP_BATTERY_THRESHOLD]
+  );
+
+  const recentRegressionsResult = await client.query(
+    `
+      SELECT
+        event_time,
+        machine_key,
+        component_label,
+        previous_status_key,
+        current_status_key,
+        technician,
+        actor,
+        source_label
+      FROM report_component_regressions
+      WHERE event_time >= $1
+        AND event_time < $2
+      ORDER BY event_time DESC
+      LIMIT 12
+    `,
+    [startIso, endIso]
+  );
+
+  const snapshotRow = snapshotResult.rows && snapshotResult.rows[0] ? snapshotResult.rows[0] : {};
+  const insertRow = insertStatsResult.rows && insertStatsResult.rows[0] ? insertStatsResult.rows[0] : {};
+  const activityRow = manualActivityResult.rows && manualActivityResult.rows[0] ? manualActivityResult.rows[0] : {};
+  const batterySeenRow = batterySeenResult.rows && batterySeenResult.rows[0] ? batterySeenResult.rows[0] : {};
+  const correctionRow = correctionResult.rows && correctionResult.rows[0] ? correctionResult.rows[0] : {};
+  const regressionRow = regressionResult.rows && regressionResult.rows[0] ? regressionResult.rows[0] : {};
+  const palletImportRow = palletImportResult.rows && palletImportResult.rows[0] ? palletImportResult.rows[0] : {};
+
+  return {
+    generatedAt: new Date().toISOString(),
+    periodKey: window.periodKey,
+    periodLabel: window.label,
+    periodStart: startIso,
+    periodEnd: endIso,
+    timeZone: window.timeZone,
+    batteryThreshold: WEEKLY_RECAP_BATTERY_THRESHOLD,
+    scheduleLabel: getWeeklyRecapScheduleLabel(),
+    recipients: WEEKLY_RECAP_RECIPIENTS,
+    snapshot: {
+      totalMachines: safeRecapCount(snapshotRow.total_machines),
+      batteryAlertsActive: safeRecapCount(snapshotRow.battery_alerts_active),
+      nokMachinesActive: safeRecapCount(snapshotRow.nok_machines_active)
+    },
+    weekly: {
+      ingestReports: safeRecapCount(insertRow.ingest_reports),
+      manualReportZero: safeRecapCount(insertRow.manual_report_zero),
+      clonedReportZero: safeRecapCount(insertRow.cloned_report_zero),
+      manualCsvReports: safeRecapCount(insertRow.manual_csv_reports),
+      commentsCount: safeRecapCount(activityRow.comments_count),
+      componentUpdates: safeRecapCount(activityRow.component_updates),
+      categoryUpdates: safeRecapCount(activityRow.category_updates),
+      lotUpdates: safeRecapCount(activityRow.lot_updates),
+      palletImportCount: safeRecapCount(palletImportRow.import_count),
+      palletImportedRows: safeRecapCount(palletImportRow.imported_rows),
+      batteryAlertsSeen: safeRecapCount(batterySeenRow.battery_alerts_seen),
+      correctedCount: safeRecapCount(correctionRow.corrected_count),
+      manualRegressionCount: safeRecapCount(correctionRow.manual_regression_count),
+      regressionCount: safeRecapCount(regressionRow.regression_count),
+      regressedMachines: safeRecapCount(regressionRow.regressed_machines)
+    },
+    operatorActivity: (operatorActivityResult.rows || []).map((row) => ({
+      actor: row.actor || 'systeme',
+      commentsCount: safeRecapCount(row.comments_count),
+      componentUpdates: safeRecapCount(row.component_updates),
+      categoryUpdates: safeRecapCount(row.category_updates),
+      reportZeroCount: safeRecapCount(row.report_zero_count),
+      manualCsvReports: safeRecapCount(row.manual_csv_reports),
+      lotUpdates: safeRecapCount(row.lot_updates),
+      palletImports: safeRecapCount(row.pallet_imports),
+      totalActions: safeRecapCount(row.total_actions)
+    })),
+    activeBatteryAlerts: (batteryAlertListResult.rows || []).map((row) => ({
+      machineKey: row.machine_key || null,
+      hostname: row.hostname || null,
+      serialNumber: row.serial_number || null,
+      technician: row.technician || null,
+      batteryHealth: safeRecapCount(row.battery_health),
+      lastSeen: row.last_seen || null,
+      label: buildWeeklyRecapIdentity(row)
+    })),
+    recentRegressions: (recentRegressionsResult.rows || []).map((row) => ({
+      eventTime: row.event_time || null,
+      machineKey: row.machine_key || null,
+      componentLabel: row.component_label || null,
+      previousStatusKey: row.previous_status_key || null,
+      currentStatusKey: row.current_status_key || null,
+      technician: row.technician || null,
+      actor: row.actor || null,
+      sourceLabel: row.source_label || null
+    }))
+  };
+}
+
+function renderWeeklyRecapText(summary) {
+  const lines = [
+    `Recap hebdo MDT`,
+    `Periode: ${summary.periodLabel}`,
+    `Genere le: ${formatLocalDateTimeFr(new Date(summary.generatedAt), summary.timeZone)}`,
+    '',
+    'Synthese parc',
+    `- Machines suivies: ${summary.snapshot.totalMachines}`,
+    `- Alertes batterie actives (< ${summary.batteryThreshold}%): ${summary.snapshot.batteryAlertsActive}`,
+    `- Machines NOK actives: ${summary.snapshot.nokMachinesActive}`,
+    '',
+    'Activite sur 7 jours',
+    `- Remontees MDT: ${summary.weekly.ingestReports}`,
+    `- Report 0 manuels: ${summary.weekly.manualReportZero}`,
+    `- Report 0 clones: ${summary.weekly.clonedReportZero}`,
+    `- Imports CSV manuels: ${summary.weekly.manualCsvReports}`,
+    `- Commentaires saisis: ${summary.weekly.commentsCount}`,
+    `- Mises a jour composants: ${summary.weekly.componentUpdates}`,
+    `- Changements de categorie: ${summary.weekly.categoryUpdates}`,
+    `- Affectations de lot: ${summary.weekly.lotUpdates}`,
+    `- Imports palettes: ${summary.weekly.palletImportCount} fichier(s) / ${summary.weekly.palletImportedRows} ligne(s) appliquee(s)`,
+    `- Alertes batterie remontees dans la semaine: ${summary.weekly.batteryAlertsSeen}`,
+    `- Regressions de composants: ${summary.weekly.regressionCount}`,
+    `- Corrections manuelles de composants: ${summary.weekly.correctedCount}`,
+    ''
+  ];
+
+  lines.push('Activite par operateur');
+  if (summary.operatorActivity.length) {
+    summary.operatorActivity.forEach((item) => {
+      lines.push(
+        `- ${item.actor}: ${item.totalActions} action(s) ` +
+          `(commentaires ${item.commentsCount}, composants ${item.componentUpdates}, ` +
+          `report 0 ${item.reportZeroCount}, categories ${item.categoryUpdates}, ` +
+          `imports CSV ${item.manualCsvReports}, lots ${item.lotUpdates}, palettes ${item.palletImports})`
+      );
+    });
+  } else {
+    lines.push('- Aucune action manuelle tracee sur la periode.');
+  }
+
+  lines.push('', 'Alertes batterie ouvertes');
+  if (summary.activeBatteryAlerts.length) {
+    summary.activeBatteryAlerts.forEach((item) => {
+      lines.push(
+        `- ${item.label} | Tech ${item.technician || '--'} | Batterie ${item.batteryHealth}% | Vu ${formatLocalDateTimeFr(
+          new Date(item.lastSeen),
+          summary.timeZone
+        )}`
+      );
+    });
+  } else {
+    lines.push('- Aucune alerte batterie active.');
+  }
+
+  lines.push('', 'Regressions recentes');
+  if (summary.recentRegressions.length) {
+    summary.recentRegressions.forEach((item) => {
+      lines.push(
+        `- ${formatLocalDateTimeFr(new Date(item.eventTime), summary.timeZone)} | ${item.machineKey || '--'} | ${item.componentLabel || '--'} | ${item.actor || '--'} | ${item.sourceLabel || '--'}`
+      );
+    });
+  } else {
+    lines.push('- Aucune regression sur la periode.');
+  }
+
+  return lines.join('\n');
+}
+
+function renderWeeklyRecapHtml(summary) {
+  const operatorRows = summary.operatorActivity.length
+    ? summary.operatorActivity
+        .map(
+          (item) => `
+            <tr>
+              <td style="padding:8px 10px;border-bottom:1px solid #e6edf4;">${escapeHtmlEmail(item.actor)}</td>
+              <td style="padding:8px 10px;border-bottom:1px solid #e6edf4;text-align:right;">${item.totalActions}</td>
+              <td style="padding:8px 10px;border-bottom:1px solid #e6edf4;text-align:right;">${item.componentUpdates}</td>
+              <td style="padding:8px 10px;border-bottom:1px solid #e6edf4;text-align:right;">${item.commentsCount}</td>
+              <td style="padding:8px 10px;border-bottom:1px solid #e6edf4;text-align:right;">${item.reportZeroCount}</td>
+            </tr>
+          `
+        )
+        .join('')
+    : `
+      <tr>
+        <td colspan="5" style="padding:10px;color:#5a7182;">Aucune action manuelle tracee.</td>
+      </tr>
+    `;
+  const batteryRows = summary.activeBatteryAlerts.length
+    ? summary.activeBatteryAlerts
+        .map(
+          (item) => `
+            <li style="margin:0 0 8px;">
+              <strong>${escapeHtmlEmail(item.label)}</strong>
+              <span style="color:#5a7182;"> | Tech ${escapeHtmlEmail(item.technician || '--')} | Batterie ${item.batteryHealth}% | Vu ${escapeHtmlEmail(
+                formatLocalDateTimeFr(new Date(item.lastSeen), summary.timeZone)
+              )}</span>
+            </li>
+          `
+        )
+        .join('')
+    : '<li style="color:#5a7182;">Aucune alerte batterie active.</li>';
+  const regressionRows = summary.recentRegressions.length
+    ? summary.recentRegressions
+        .map(
+          (item) => `
+            <li style="margin:0 0 8px;">
+              <strong>${escapeHtmlEmail(item.machineKey || '--')}</strong>
+              <span style="color:#5a7182;"> | ${escapeHtmlEmail(item.componentLabel || '--')} | ${escapeHtmlEmail(
+                item.actor || '--'
+              )} | ${escapeHtmlEmail(item.sourceLabel || '--')} | ${escapeHtmlEmail(
+                formatLocalDateTimeFr(new Date(item.eventTime), summary.timeZone)
+              )}</span>
+            </li>
+          `
+        )
+        .join('')
+    : '<li style="color:#5a7182;">Aucune regression sur la periode.</li>';
+
+  return `
+    <div style="font-family:IBM Plex Sans,Arial,sans-serif;background:#f4f8fb;color:#173042;padding:24px;">
+      <div style="max-width:960px;margin:0 auto;background:#ffffff;border:1px solid #d9e4ec;border-radius:18px;overflow:hidden;box-shadow:0 12px 30px rgba(21,41,57,0.08);">
+        <div style="padding:24px 28px;background:linear-gradient(135deg,#0f2b3f,#13556a);color:#ffffff;">
+          <div style="font-size:12px;letter-spacing:0.18em;text-transform:uppercase;opacity:0.76;">MMA Automation</div>
+          <h1 style="margin:10px 0 8px;font-family:'Space Grotesk',Arial,sans-serif;font-size:32px;line-height:1.1;">Recap hebdo MDT</h1>
+          <p style="margin:0;font-size:15px;opacity:0.92;">Periode ${escapeHtmlEmail(summary.periodLabel)} · Genere le ${escapeHtmlEmail(
+            formatLocalDateTimeFr(new Date(summary.generatedAt), summary.timeZone)
+          )}</p>
+        </div>
+        <div style="padding:24px 28px;">
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:22px;">
+            <div style="border:1px solid #d9e4ec;border-radius:14px;padding:14px 16px;background:#f9fbfd;">
+              <div style="font-size:12px;letter-spacing:0.14em;text-transform:uppercase;color:#5a7182;">Machines suivies</div>
+              <div style="margin-top:8px;font-size:34px;font-weight:700;">${summary.snapshot.totalMachines}</div>
+            </div>
+            <div style="border:1px solid #f0d3ce;border-radius:14px;padding:14px 16px;background:#fff7f5;">
+              <div style="font-size:12px;letter-spacing:0.14em;text-transform:uppercase;color:#8c3d2c;">Alertes batterie actives</div>
+              <div style="margin-top:8px;font-size:34px;font-weight:700;color:#8c3d2c;">${summary.snapshot.batteryAlertsActive}</div>
+            </div>
+            <div style="border:1px solid #f0d3ce;border-radius:14px;padding:14px 16px;background:#fff7f5;">
+              <div style="font-size:12px;letter-spacing:0.14em;text-transform:uppercase;color:#8c3d2c;">Machines NOK actives</div>
+              <div style="margin-top:8px;font-size:34px;font-weight:700;color:#8c3d2c;">${summary.snapshot.nokMachinesActive}</div>
+            </div>
+          </div>
+          <div style="margin-bottom:22px;">
+            <h2 style="margin:0 0 12px;font-size:18px;">Synthese semaine glissante</h2>
+            <table style="width:100%;border-collapse:collapse;border:1px solid #e6edf4;border-radius:14px;overflow:hidden;">
+              <tbody>
+                <tr><td style="padding:10px;border-bottom:1px solid #e6edf4;">Remontees MDT</td><td style="padding:10px;border-bottom:1px solid #e6edf4;text-align:right;">${summary.weekly.ingestReports}</td></tr>
+                <tr><td style="padding:10px;border-bottom:1px solid #e6edf4;">Report 0 manuels</td><td style="padding:10px;border-bottom:1px solid #e6edf4;text-align:right;">${summary.weekly.manualReportZero}</td></tr>
+                <tr><td style="padding:10px;border-bottom:1px solid #e6edf4;">Imports CSV manuels</td><td style="padding:10px;border-bottom:1px solid #e6edf4;text-align:right;">${summary.weekly.manualCsvReports}</td></tr>
+                <tr><td style="padding:10px;border-bottom:1px solid #e6edf4;">Commentaires</td><td style="padding:10px;border-bottom:1px solid #e6edf4;text-align:right;">${summary.weekly.commentsCount}</td></tr>
+                <tr><td style="padding:10px;border-bottom:1px solid #e6edf4;">Mises a jour composants</td><td style="padding:10px;border-bottom:1px solid #e6edf4;text-align:right;">${summary.weekly.componentUpdates}</td></tr>
+                <tr><td style="padding:10px;border-bottom:1px solid #e6edf4;">Alertes batterie remontees</td><td style="padding:10px;border-bottom:1px solid #e6edf4;text-align:right;">${summary.weekly.batteryAlertsSeen}</td></tr>
+                <tr><td style="padding:10px;border-bottom:1px solid #e6edf4;">Regressions</td><td style="padding:10px;border-bottom:1px solid #e6edf4;text-align:right;">${summary.weekly.regressionCount}</td></tr>
+                <tr><td style="padding:10px;">Corrections manuelles</td><td style="padding:10px;text-align:right;">${summary.weekly.correctedCount}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="margin-bottom:22px;">
+            <h2 style="margin:0 0 12px;font-size:18px;">Activite par operateur</h2>
+            <table style="width:100%;border-collapse:collapse;border:1px solid #e6edf4;border-radius:14px;overflow:hidden;">
+              <thead style="background:#f7fafc;color:#5a7182;text-transform:uppercase;font-size:12px;letter-spacing:0.08em;">
+                <tr>
+                  <th style="padding:10px;text-align:left;">Operateur</th>
+                  <th style="padding:10px;text-align:right;">Actions</th>
+                  <th style="padding:10px;text-align:right;">Composants</th>
+                  <th style="padding:10px;text-align:right;">Commentaires</th>
+                  <th style="padding:10px;text-align:right;">Report 0</th>
+                </tr>
+              </thead>
+              <tbody>${operatorRows}</tbody>
+            </table>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;">
+            <div>
+              <h2 style="margin:0 0 12px;font-size:18px;">Alertes batterie ouvertes</h2>
+              <ul style="margin:0;padding-left:18px;">${batteryRows}</ul>
+            </div>
+            <div>
+              <h2 style="margin:0 0 12px;font-size:18px;">Regressions recentes</h2>
+              <ul style="margin:0;padding-left:18px;">${regressionRows}</ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildWeeklyRecapEmailContent(summary) {
+  return {
+    subject: `Recap hebdo MDT - ${summary.periodLabel}`,
+    text: renderWeeklyRecapText(summary),
+    html: renderWeeklyRecapHtml(summary)
+  };
+}
+
+async function recordWeeklyRecapRun(
+  client,
+  { summary, triggerSource, createdBy, recipients, status, error }
+) {
+  const window = summary || computeWeeklyRecapWindow(new Date(), WEEKLY_RECAP_TIMEZONE);
+  await client.query(
+    `
+      INSERT INTO weekly_recap_runs (
+        id,
+        period_key,
+        period_start,
+        period_end,
+        trigger_source,
+        created_by,
+        recipients,
+        status,
+        sent_at,
+        summary,
+        error
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10)
+    `,
+    [
+      generateUuid(),
+      summary ? summary.periodKey : window.periodKey,
+      summary ? summary.periodStart : window.periodStart.toISOString(),
+      summary ? summary.periodEnd : window.periodEnd.toISOString(),
+      triggerSource,
+      createdBy || null,
+      Array.isArray(recipients) ? recipients.join(', ') : '',
+      status,
+      summary ? JSON.stringify(summary) : null,
+      error || null
+    ]
+  );
+}
+
+async function deliverWeeklyRecap({
+  triggerSource = 'manual',
+  createdBy = 'systeme',
+  auditContext = null,
+  now = new Date()
+} = {}) {
+  const recipients = WEEKLY_RECAP_RECIPIENTS.slice();
+  if (!recipients.length) {
+    return { ok: false, error: 'missing_recipients' };
+  }
+  const creds = await getSuggestionSmtpCredentials();
+  if (!creds || !creds.password || !creds.username) {
+    return { ok: false, error: 'missing_credentials' };
+  }
+
+  const client = await pool.connect();
+  let summary = null;
+  try {
+    summary = await collectWeeklyRecapSummary(client, { now });
+  } finally {
+    client.release();
+  }
+
+  const { subject, text, html } = buildWeeklyRecapEmailContent(summary);
+  const fromAddress = WEEKLY_RECAP_FROM || SUGGESTION_EMAIL_FROM || creds.username;
+  const failedRecipients = [];
+  for (const recipient of recipients) {
+    try {
+      await sendSmtpMail({
+        from: fromAddress,
+        to: recipient,
+        subject,
+        text,
+        html,
+        authUser: creds.username,
+        authPass: creds.password
+      });
+    } catch (error) {
+      console.error('Failed to send weekly recap email', { recipient, error: error.message });
+      failedRecipients.push(recipient);
+    }
+  }
+
+  const status = failedRecipients.length
+    ? failedRecipients.length === recipients.length
+      ? 'failed'
+      : 'partial'
+    : 'sent';
+  const error = failedRecipients.length
+    ? `Destinataires en echec: ${failedRecipients.join(', ')}`
+    : null;
+
+  let recordClient = null;
+  try {
+    recordClient = await pool.connect();
+    await recordClient.query('BEGIN');
+    if (auditContext) {
+      await setAuditContext(recordClient, auditContext);
+    }
+    await recordWeeklyRecapRun(recordClient, {
+      summary,
+      triggerSource,
+      createdBy,
+      recipients,
+      status,
+      error
+    });
+    await recordClient.query('COMMIT');
+  } catch (recordError) {
+    if (recordClient) {
+      try {
+        await recordClient.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback weekly recap record', rollbackError);
+      }
+    }
+    console.error('Failed to record weekly recap run', recordError);
+  } finally {
+    if (recordClient) {
+      recordClient.release();
+    }
+  }
+
+  return {
+    ok: failedRecipients.length < recipients.length,
+    status,
+    recipients,
+    failedRecipients,
+    summary,
+    subject,
+    error
+  };
+}
+
+let weeklyRecapTimer = null;
+let weeklyRecapInFlight = false;
+
+function shouldCheckWeeklyRecap(now = new Date()) {
+  if (!WEEKLY_RECAP_ENABLED || !WEEKLY_RECAP_RECIPIENTS.length) {
+    return false;
+  }
+  const weekday = getTimeZoneWeekday(now, WEEKLY_RECAP_TIMEZONE);
+  if (weekday !== WEEKLY_RECAP_DAY) {
+    return false;
+  }
+  const parts = getTimeZoneParts(now, WEEKLY_RECAP_TIMEZONE);
+  if (parts.hour < WEEKLY_RECAP_HOUR) {
+    return false;
+  }
+  if (parts.hour === WEEKLY_RECAP_HOUR && parts.minute < WEEKLY_RECAP_MINUTE) {
+    return false;
+  }
+  return true;
+}
+
+async function maybeSendScheduledWeeklyRecap() {
+  if (weeklyRecapInFlight || !shouldCheckWeeklyRecap(new Date())) {
+    return;
+  }
+  weeklyRecapInFlight = true;
+  const client = await pool.connect();
+  try {
+    const summary = await collectWeeklyRecapSummary(client, { now: new Date() });
+    const alreadySent = await hasSchedulerWeeklyRecapRunForPeriod(client, summary.periodKey);
+    if (!alreadySent) {
+      await deliverWeeklyRecap({
+        triggerSource: 'scheduler',
+        createdBy: 'scheduler',
+        auditContext: {
+          actor: 'scheduler',
+          actorType: 'system',
+          actorIp: null,
+          userAgent: 'weekly-recap',
+          requestId: generateRequestId(),
+          source: 'SCHEDULER weekly-recap'
+        },
+        now: new Date()
+      });
+    }
+  } catch (error) {
+    console.error('Failed scheduled weekly recap check', error);
+  } finally {
+    client.release();
+    weeklyRecapInFlight = false;
+  }
+}
+
+function startWeeklyRecapScheduler() {
+  if (weeklyRecapTimer || !WEEKLY_RECAP_ENABLED) {
+    return;
+  }
+  const intervalMs = clampInteger(WEEKLY_RECAP_CHECK_INTERVAL_MS, 300000, 60000, 3600000);
+  weeklyRecapTimer = setInterval(() => {
+    maybeSendScheduledWeeklyRecap().catch((error) => {
+      console.error('Weekly recap scheduler tick failed', error);
+    });
+  }, intervalMs);
+  maybeSendScheduledWeeklyRecap().catch((error) => {
+    console.error('Weekly recap scheduler bootstrap failed', error);
+  });
+}
+
+async function buildWeeklyRecapAdminPayload(now = new Date()) {
+  const client = await pool.connect();
+  try {
+    const preview = await collectWeeklyRecapSummary(client, { now });
+    const latestRun = await getLatestWeeklyRecapRun(client);
+    return {
+      enabled: WEEKLY_RECAP_ENABLED,
+      recipients: WEEKLY_RECAP_RECIPIENTS,
+      schedule: {
+        day: WEEKLY_RECAP_DAY,
+        hour: WEEKLY_RECAP_HOUR,
+        minute: WEEKLY_RECAP_MINUTE,
+        timeZone: WEEKLY_RECAP_TIMEZONE,
+        label: getWeeklyRecapScheduleLabel()
+      },
+      batteryThreshold: WEEKLY_RECAP_BATTERY_THRESHOLD,
+      preview,
+      latestRun
+    };
+  } finally {
+    client.release();
   }
 }
 
@@ -5751,6 +6650,206 @@ function normalizeEmailAddress(value) {
     return null;
   }
   return email;
+}
+
+function parseEmailAddressList(raw) {
+  return String(raw || '')
+    .split(/[,\n;]+/)
+    .map((item) => normalizeEmailAddress(item))
+    .filter(Boolean);
+}
+
+function clampInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(parsed, min), max);
+}
+
+const WEEKDAY_TOKEN_MAP = Object.freeze({
+  0: 0,
+  1: 1,
+  2: 2,
+  3: 3,
+  4: 4,
+  5: 5,
+  6: 6,
+  7: 0,
+  sunday: 0,
+  dimanche: 0,
+  sun: 0,
+  monday: 1,
+  lundi: 1,
+  mon: 1,
+  tuesday: 2,
+  mardi: 2,
+  tue: 2,
+  wednesday: 3,
+  mercredi: 3,
+  wed: 3,
+  thursday: 4,
+  jeudi: 4,
+  thu: 4,
+  friday: 5,
+  vendredi: 5,
+  fri: 5,
+  saturday: 6,
+  samedi: 6,
+  sat: 6
+});
+
+const WEEKDAY_LABELS_FR = Object.freeze([
+  'dimanche',
+  'lundi',
+  'mardi',
+  'mercredi',
+  'jeudi',
+  'vendredi',
+  'samedi'
+]);
+
+function normalizeWeekdayToken(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) {
+    return null;
+  }
+  return Object.prototype.hasOwnProperty.call(WEEKDAY_TOKEN_MAP, raw)
+    ? WEEKDAY_TOKEN_MAP[raw]
+    : null;
+}
+
+const WEEKLY_RECAP_RECIPIENTS = Object.freeze(parseEmailAddressList(WEEKLY_RECAP_RECIPIENTS_RAW));
+const WEEKLY_RECAP_DAY = normalizeWeekdayToken(WEEKLY_RECAP_DAY_RAW) ?? 1;
+const WEEKLY_RECAP_HOUR = clampInteger(WEEKLY_RECAP_HOUR_RAW, 7, 0, 23);
+const WEEKLY_RECAP_MINUTE = clampInteger(WEEKLY_RECAP_MINUTE_RAW, 30, 0, 59);
+const WEEKLY_RECAP_BATTERY_THRESHOLD = clampInteger(WEEKLY_RECAP_BATTERY_THRESHOLD_RAW, 78, 1, 100);
+
+function getTimeZoneParts(date, timeZone = WEEKLY_RECAP_TIMEZONE) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  });
+  const parts = formatter.formatToParts(date);
+  const values = {};
+  parts.forEach((part) => {
+    if (part.type !== 'literal') {
+      values[part.type] = part.value;
+    }
+  });
+  return {
+    year: Number.parseInt(values.year || '0', 10),
+    month: Number.parseInt(values.month || '0', 10),
+    day: Number.parseInt(values.day || '0', 10),
+    hour: Number.parseInt(values.hour || '0', 10),
+    minute: Number.parseInt(values.minute || '0', 10),
+    second: Number.parseInt(values.second || '0', 10)
+  };
+}
+
+function getTimeZoneWeekday(date, timeZone = WEEKLY_RECAP_TIMEZONE) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'short'
+  });
+  const token = String(formatter.format(date) || '').trim().toLowerCase();
+  return normalizeWeekdayToken(token);
+}
+
+function getTimeZoneOffsetMs(date, timeZone = WEEKLY_RECAP_TIMEZONE) {
+  const parts = getTimeZoneParts(date, timeZone);
+  const utcFromParts = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  );
+  return utcFromParts - date.getTime();
+}
+
+function makeDateInTimeZone(parts, timeZone = WEEKLY_RECAP_TIMEZONE) {
+  const utcGuess = new Date(
+    Date.UTC(
+      parts.year,
+      parts.month - 1,
+      parts.day,
+      parts.hour || 0,
+      parts.minute || 0,
+      parts.second || 0,
+      parts.millisecond || 0
+    )
+  );
+  const offsetMs = getTimeZoneOffsetMs(utcGuess, timeZone);
+  return new Date(utcGuess.getTime() - offsetMs);
+}
+
+function formatLocalDateKey(date, timeZone = WEEKLY_RECAP_TIMEZONE) {
+  const parts = getTimeZoneParts(date, timeZone);
+  const year = String(parts.year).padStart(4, '0');
+  const month = String(parts.month).padStart(2, '0');
+  const day = String(parts.day).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatLocalDateFr(date, timeZone = WEEKLY_RECAP_TIMEZONE) {
+  return new Intl.DateTimeFormat('fr-FR', {
+    timeZone,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
+  }).format(date);
+}
+
+function formatLocalDateTimeFr(date, timeZone = WEEKLY_RECAP_TIMEZONE) {
+  return new Intl.DateTimeFormat('fr-FR', {
+    timeZone,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(date);
+}
+
+function computeWeeklyRecapWindow(now = new Date(), timeZone = WEEKLY_RECAP_TIMEZONE) {
+  const localParts = getTimeZoneParts(now, timeZone);
+  const todayStart = makeDateInTimeZone(
+    {
+      year: localParts.year,
+      month: localParts.month,
+      day: localParts.day,
+      hour: 0,
+      minute: 0,
+      second: 0,
+      millisecond: 0
+    },
+    timeZone
+  );
+  const periodEnd = todayStart;
+  const periodStart = new Date(periodEnd.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const displayEnd = new Date(periodEnd.getTime() - 1000);
+  return {
+    periodStart,
+    periodEnd,
+    periodKey: `${formatLocalDateKey(periodStart, timeZone)}_${formatLocalDateKey(displayEnd, timeZone)}`,
+    label: `${formatLocalDateFr(periodStart, timeZone)} au ${formatLocalDateFr(displayEnd, timeZone)}`,
+    timeZone
+  };
+}
+
+function getWeeklyRecapScheduleLabel() {
+  const weekday = WEEKDAY_LABELS_FR[WEEKLY_RECAP_DAY] || 'lundi';
+  const hour = String(WEEKLY_RECAP_HOUR).padStart(2, '0');
+  const minute = String(WEEKLY_RECAP_MINUTE).padStart(2, '0');
+  return `${weekday} a ${hour}:${minute} (${WEEKLY_RECAP_TIMEZONE})`;
 }
 
 function parseMicrosoftAdminEmails() {
@@ -9220,6 +10319,54 @@ app.put('/api/admin/ldap', requireAuth, requireAdmin, async (req, res) => {
   return res.status(410).json({ ok: false, error: 'ldap_removed' });
 });
 
+app.get('/api/admin/weekly-recap', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const recap = await buildWeeklyRecapAdminPayload(new Date());
+    return res.json({ ok: true, recap });
+  } catch (error) {
+    console.error('Failed to build weekly recap admin payload', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.post('/api/admin/weekly-recap/send', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const result = await deliverWeeklyRecap({
+      triggerSource: 'manual',
+      createdBy:
+        cleanString(
+          req.session?.user?.displayName ||
+            req.session?.user?.username ||
+            req.session?.user?.mail ||
+            'systeme',
+          128
+        ) || 'systeme',
+      auditContext: buildAuditContext(req, {
+        source: 'POST /api/admin/weekly-recap/send'
+      }),
+      now: new Date()
+    });
+    if (!result.ok && result.error === 'missing_recipients') {
+      return res.status(400).json({ ok: false, error: 'missing_recipients' });
+    }
+    if (!result.ok && result.error === 'missing_credentials') {
+      return res.status(400).json({ ok: false, error: 'missing_credentials' });
+    }
+    return res.json({
+      ok: result.ok,
+      status: result.status,
+      recipients: result.recipients,
+      failedRecipients: result.failedRecipients,
+      summary: result.summary,
+      subject: result.subject,
+      error: result.error || null
+    });
+  } catch (error) {
+    console.error('Failed to send weekly recap manually', error);
+    return res.status(500).json({ ok: false, error: 'send_failed' });
+  }
+});
+
 app.post('/api/ingest', ingestLimiter, async (req, res) => {
   const body = req.body;
   if (!body || typeof body !== 'object') {
@@ -12255,6 +13402,7 @@ app.use((req, res) => {
 async function startServer() {
   try {
     await initDb();
+    startWeeklyRecapScheduler();
     app.listen(PORT, () => {
       console.log(`MDT web listening on http://localhost:${PORT}`);
     });
