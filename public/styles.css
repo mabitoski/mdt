@@ -2886,6 +2886,13 @@ button.badge:focus-visible {
   margin: 0;
 }
 
+.report-history-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
 .report-history-list {
   display: grid;
   gap: 8px;
@@ -2894,24 +2901,86 @@ button.badge:focus-visible {
 .report-history-item {
   border: 1px solid var(--stroke);
   background: rgba(255, 255, 255, 0.8);
-  border-radius: 12px;
-  padding: 8px 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  border-radius: 10px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+  text-align: left;
   font-size: 0.85rem;
   cursor: pointer;
 }
 
 .report-history-item.is-active {
   border-color: var(--accent);
-  box-shadow: 0 10px 20px rgba(242, 139, 45, 0.16);
+  box-shadow: 0 8px 18px rgba(15, 30, 46, 0.08);
 }
 
-.report-history-id {
-  font-size: 0.72rem;
-  text-transform: uppercase;
+.report-history-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.report-history-when {
+  color: var(--ink);
+  font-size: 0.92rem;
+}
+
+.report-history-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.report-history-badge {
+  border: 1px solid rgba(15, 30, 46, 0.12);
+  background: rgba(15, 30, 46, 0.04);
+  color: var(--ink);
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
   letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.report-history-badge.is-current {
+  border-color: rgba(33, 179, 169, 0.28);
+  background: rgba(33, 179, 169, 0.1);
+  color: #0f625c;
+}
+
+.report-history-badge.is-alert {
+  border-color: rgba(164, 91, 22, 0.28);
+  background: rgba(255, 247, 238, 1);
+  color: #8b4a17;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.report-history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.report-history-chip {
+  border: 1px solid rgba(15, 30, 46, 0.08);
+  background: rgba(15, 30, 46, 0.03);
+  color: var(--ink);
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.report-history-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.74rem;
   color: var(--muted);
 }
 

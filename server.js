@@ -4177,6 +4177,14 @@ function normalizeNullableInteger(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeNullableNumber(value) {
+  if (value == null || value === '') {
+    return null;
+  }
+  const parsed = Number.parseFloat(String(value).replace(',', '.').trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function parseClockAlertCodes(value) {
   if (!value) {
     return [];
@@ -13477,11 +13485,46 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
       relatedMac = macList[0];
     }
   }
+  const mapRelatedReportRow = (item) => ({
+    id: item.id,
+    hostname: cleanString(item.hostname, 128),
+    technician: cleanString(item.technician, 128),
+    lastSeen: item.last_seen,
+    createdAt: item.created_at,
+    clientGeneratedAt: normalizeClientGeneratedAt(item.client_generated_at),
+    diagCompletedAt: normalizeClientGeneratedAt(item.diag_completed_at),
+    diagType: cleanString(item.diag_type, 64),
+    appVersion: cleanString(item.diag_app_version, 32),
+    batteryHealth: normalizeNullableInteger(item.battery_health),
+    batteryDesignWh: normalizeNullableNumber(item.battery_design_wh),
+    batteryFullWh: normalizeNullableNumber(item.battery_full_wh),
+    batteryRemainingWh: normalizeNullableNumber(item.battery_remaining_wh),
+    batteryChargePercent: normalizeNullableInteger(item.battery_charge_percent),
+    batteryPowerSource: cleanString(item.battery_power_source, 32),
+    clockAlert: normalizeClockAlertFromRow(item)
+  });
   if (relatedSerial && relatedMac) {
     try {
       const reportResult = await pool.query(
         `
-          SELECT id, last_seen, created_at
+          SELECT
+            id,
+            hostname,
+            technician,
+            battery_health,
+            client_generated_at,
+            last_seen,
+            created_at,
+            bios_clock_alert,
+            bios_clock_alert_code,
+            payload::jsonb #>> '{device,batteryCapacity,designCapacityWh}' AS battery_design_wh,
+            payload::jsonb #>> '{device,batteryCapacity,fullChargeCapacityWh}' AS battery_full_wh,
+            payload::jsonb #>> '{device,batteryCapacity,remainingCapacityWh}' AS battery_remaining_wh,
+            payload::jsonb #>> '{device,batteryCapacity,chargePercent}' AS battery_charge_percent,
+            payload::jsonb #>> '{device,batteryCapacity,powerSource}' AS battery_power_source,
+            payload::jsonb #>> '{diag,completedAt}' AS diag_completed_at,
+            payload::jsonb #>> '{diag,type}' AS diag_type,
+            payload::jsonb #>> '{diag,appVersion}' AS diag_app_version
           FROM reports
           WHERE serial_number = $1
             AND (
@@ -13493,11 +13536,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
         `,
         [relatedSerial, relatedMac, `%${relatedMac}%`]
       );
-      relatedReports = reportResult.rows.map((item) => ({
-        id: item.id,
-        lastSeen: item.last_seen,
-        createdAt: item.created_at
-      }));
+      relatedReports = reportResult.rows.map(mapRelatedReportRow);
     } catch (error) {
       relatedReports = [];
     }
@@ -13505,7 +13544,24 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
     try {
       const reportResult = await pool.query(
         `
-          SELECT id, last_seen, created_at
+          SELECT
+            id,
+            hostname,
+            technician,
+            battery_health,
+            client_generated_at,
+            last_seen,
+            created_at,
+            bios_clock_alert,
+            bios_clock_alert_code,
+            payload::jsonb #>> '{device,batteryCapacity,designCapacityWh}' AS battery_design_wh,
+            payload::jsonb #>> '{device,batteryCapacity,fullChargeCapacityWh}' AS battery_full_wh,
+            payload::jsonb #>> '{device,batteryCapacity,remainingCapacityWh}' AS battery_remaining_wh,
+            payload::jsonb #>> '{device,batteryCapacity,chargePercent}' AS battery_charge_percent,
+            payload::jsonb #>> '{device,batteryCapacity,powerSource}' AS battery_power_source,
+            payload::jsonb #>> '{diag,completedAt}' AS diag_completed_at,
+            payload::jsonb #>> '{diag,type}' AS diag_type,
+            payload::jsonb #>> '{diag,appVersion}' AS diag_app_version
           FROM reports
           WHERE machine_key = $1
           ORDER BY last_seen DESC
@@ -13513,11 +13569,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
         `,
         [row.machine_key]
       );
-      relatedReports = reportResult.rows.map((item) => ({
-        id: item.id,
-        lastSeen: item.last_seen,
-        createdAt: item.created_at
-      }));
+      relatedReports = reportResult.rows.map(mapRelatedReportRow);
     } catch (error) {
       relatedReports = [];
     }

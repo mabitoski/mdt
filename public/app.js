@@ -3362,6 +3362,118 @@ function parseBatteryHealthValue(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseNumericMetric(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  const parsed = Number.parseFloat(String(value ?? '').replace(',', '.').trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatBatteryCharge(value) {
+  return formatBatteryHealth(value);
+}
+
+function formatWhCompact(value) {
+  const numeric = parseNumericMetric(value);
+  if (numeric == null) {
+    return '--';
+  }
+  const rounded = Math.abs(numeric - Math.round(numeric)) < 0.05 ? Math.round(numeric) : numeric;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace(/\.0$/, '');
+}
+
+function formatBatteryCapacitySummary(telemetry) {
+  const fullWh = telemetry ? parseNumericMetric(telemetry.fullWh) : null;
+  const designWh = telemetry ? parseNumericMetric(telemetry.designWh) : null;
+  if (fullWh != null && designWh != null) {
+    return `${formatWhCompact(fullWh)} / ${formatWhCompact(designWh)} Wh`;
+  }
+  if (fullWh != null) {
+    return `${formatWhCompact(fullWh)} Wh`;
+  }
+  if (designWh != null) {
+    return `Design ${formatWhCompact(designWh)} Wh`;
+  }
+  return '--';
+}
+
+function formatBatteryPowerSource(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return '--';
+  }
+  if (['ac', 'mains', 'line', 'plugged', 'charging'].includes(normalized)) {
+    return 'Secteur';
+  }
+  if (['battery', 'dc', 'discharging', 'unplugged'].includes(normalized)) {
+    return 'Batterie';
+  }
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function getBatteryTelemetry(source) {
+  const payload = source && source.payload && typeof source.payload === 'object' ? source.payload : null;
+  const device = payload && payload.device && typeof payload.device === 'object' ? payload.device : null;
+  const batteryCapacity =
+    device && device.batteryCapacity && typeof device.batteryCapacity === 'object'
+      ? device.batteryCapacity
+      : null;
+  const chargePercent =
+    source && source.batteryChargePercent != null
+      ? source.batteryChargePercent
+      : batteryCapacity && batteryCapacity.chargePercent != null
+        ? batteryCapacity.chargePercent
+        : null;
+  const designWh =
+    source && source.batteryDesignWh != null
+      ? source.batteryDesignWh
+      : batteryCapacity && batteryCapacity.designCapacityWh != null
+        ? batteryCapacity.designCapacityWh
+        : batteryCapacity && batteryCapacity.designWh != null
+          ? batteryCapacity.designWh
+          : null;
+  const fullWh =
+    source && source.batteryFullWh != null
+      ? source.batteryFullWh
+      : batteryCapacity && batteryCapacity.fullChargeCapacityWh != null
+        ? batteryCapacity.fullChargeCapacityWh
+        : batteryCapacity && batteryCapacity.fullWh != null
+          ? batteryCapacity.fullWh
+          : null;
+  const remainingWh =
+    source && source.batteryRemainingWh != null
+      ? source.batteryRemainingWh
+      : batteryCapacity && batteryCapacity.remainingCapacityWh != null
+        ? batteryCapacity.remainingCapacityWh
+        : batteryCapacity && batteryCapacity.remainingWh != null
+          ? batteryCapacity.remainingWh
+          : null;
+  return {
+    healthPercent: parseBatteryHealthValue(source && source.batteryHealth),
+    chargePercent: parseBatteryHealthValue(chargePercent),
+    designWh: parseNumericMetric(designWh),
+    fullWh: parseNumericMetric(fullWh),
+    remainingWh: parseNumericMetric(remainingWh),
+    powerSource:
+      (source && source.batteryPowerSource) || (batteryCapacity && batteryCapacity.powerSource) || null
+  };
+}
+
+function formatReportDiagType(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return '--';
+  }
+  if (normalized === 'double_check') {
+    return 'Double check';
+  }
+  if (normalized === 'quick') {
+    return 'Diagnostic';
+  }
+  return normalized.replace(/[_-]+/g, ' ');
+}
+
 function normalizeClockAlert(alert) {
   if (!alert || typeof alert !== 'object' || Array.isArray(alert)) {
     return null;
@@ -4976,21 +5088,74 @@ function buildReportHistory(detail) {
   if (reports.length <= 1) {
     return '';
   }
+  const latestReport = reports[0] || null;
+  const oldestReport = reports[reports.length - 1] || null;
+  const latestBattery = latestReport ? getBatteryTelemetry(latestReport) : null;
+  const oldestBattery = oldestReport ? getBatteryTelemetry(oldestReport) : null;
+  const latestHealth = latestReport ? formatBatteryHealth(latestReport.batteryHealth ?? latestBattery?.healthPercent) : '--';
+  const oldestHealth = oldestReport ? formatBatteryHealth(oldestReport.batteryHealth ?? oldestBattery?.healthPercent) : '--';
+  const rangeStart = oldestReport ? oldestReport.lastSeen || oldestReport.diagCompletedAt || oldestReport.createdAt : null;
+  const rangeEnd = latestReport ? latestReport.lastSeen || latestReport.diagCompletedAt || latestReport.createdAt : null;
+  const overviewParts = [`${reports.length} passages traces`];
+  if (rangeStart && rangeEnd) {
+    overviewParts.push(`du ${formatDateTime(rangeStart)} au ${formatDateTime(rangeEnd)}`);
+  }
+  if (oldestHealth !== '--' && latestHealth !== '--') {
+    overviewParts.push(`sante batterie ${oldestHealth} -> ${latestHealth}`);
+  }
   const items = reports
     .map((report) => {
       const id = report && report.id ? String(report.id) : '';
       if (!id) {
         return '';
       }
-      const when = report.lastSeen || report.createdAt;
-      const label = when ? formatDateTime(when) : '--';
+      const when = report.lastSeen || report.diagCompletedAt || report.createdAt;
       const active = detail.id && String(detail.id) === id ? ' is-active' : '';
+      const telemetry = getBatteryTelemetry(report);
+      const batteryHealth = formatBatteryHealth(report.batteryHealth ?? telemetry.healthPercent);
+      const batteryCharge = formatBatteryCharge(telemetry.chargePercent);
+      const batteryCapacity = formatBatteryCapacitySummary(telemetry);
+      const powerSource = formatBatteryPowerSource(telemetry.powerSource);
+      const clockAlert = normalizeClockAlert(report.clockAlert);
+      const metaParts = [
+        report.technician ? `Tech ${report.technician}` : null,
+        report.hostname ? report.hostname : null,
+        batteryHealth !== '--' ? `Sante ${batteryHealth}` : null,
+        batteryCharge !== '--' ? `Charge ${batteryCharge}` : null,
+        batteryCapacity !== '--' ? `Capacite ${batteryCapacity}` : null,
+        powerSource !== '--' ? powerSource : null
+      ]
+        .filter(Boolean)
+        .map((part) => `<span class="report-history-chip">${escapeHtml(part)}</span>`)
+        .join('');
+      const footerParts = [
+        `Rapport ${id.slice(0, 8)}`,
+        report.appVersion ? `App ${report.appVersion}` : null,
+        report.diagType ? formatReportDiagType(report.diagType) : null
+      ]
+        .filter(Boolean)
+        .map((part) => `<span>${escapeHtml(part)}</span>`)
+        .join('');
+      const badges = [
+        detail.id && String(detail.id) === id
+          ? '<span class="report-history-badge is-current">Actuel</span>'
+          : '<span class="report-history-badge">Archive</span>',
+        clockAlert && clockAlert.active
+          ? `<span class="report-history-badge is-alert">${escapeHtml(formatClockAlertSummary(clockAlert))}</span>`
+          : ''
+      ]
+        .filter(Boolean)
+        .join('');
       return `
         <button class="report-history-item${active}" type="button" data-action="open-report" data-id="${escapeHtml(
           id
         )}">
-          <span>${escapeHtml(label)}</span>
-          <span class="report-history-id">${escapeHtml(id.slice(0, 8))}</span>
+          <div class="report-history-top">
+            <strong class="report-history-when">${escapeHtml(when ? formatDateTime(when) : '--')}</strong>
+            <div class="report-history-badges">${badges}</div>
+          </div>
+          <div class="report-history-meta">${metaParts || '<span class="report-history-chip">Aucune metrique</span>'}</div>
+          <div class="report-history-footer">${footerParts}</div>
         </button>
       `;
     })
@@ -5004,6 +5169,7 @@ function buildReportHistory(detail) {
   return `
     <div class="report-history">
       <h3>Historique des rapports</h3>
+      <p class="report-history-summary">${escapeHtml(overviewParts.join(' · '))}</p>
       <div class="report-history-list">
         ${items}
       </div>
@@ -5220,6 +5386,11 @@ function buildDrawerDetailHtml(detail) {
   const diskInfo = Array.isArray(diskInfoRaw) ? diskInfoRaw : diskInfoRaw ? [diskInfoRaw] : [];
   const volumeInfoRaw = payload ? payload.volumes : null;
   const volumeInfo = Array.isArray(volumeInfoRaw) ? volumeInfoRaw : volumeInfoRaw ? [volumeInfoRaw] : [];
+  const batteryTelemetry = getBatteryTelemetry(detail);
+  const batteryHealthLabel = formatBatteryHealth(detail.batteryHealth ?? batteryTelemetry.healthPercent);
+  const batteryChargeLabel = formatBatteryCharge(batteryTelemetry.chargePercent);
+  const batteryCapacityLabel = formatBatteryCapacitySummary(batteryTelemetry);
+  const batteryPowerSourceLabel = formatBatteryPowerSource(batteryTelemetry.powerSource);
 
   if (detailsDrawerTitle) {
     detailsDrawerTitle.textContent = formatPrimary(detail);
@@ -5260,7 +5431,10 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-mini-card"><span>RAM</span><strong>${escapeHtml(formatRam(detail.ramMb))}</strong></div>
       <div class="drawer-mini-card"><span>Stockage</span><strong>${escapeHtml(formatTotalStorage(diskInfo, volumeInfo))}</strong></div>
       <div class="drawer-mini-card"><span>GPU</span><strong>${escapeHtml((gpuInfo && gpuInfo.name) || '--')}</strong></div>
-      <div class="drawer-mini-card"><span>Batterie</span><strong>${escapeHtml(formatBatteryHealth(detail.batteryHealth))}</strong></div>
+      <div class="drawer-mini-card"><span>Sante batterie</span><strong>${escapeHtml(batteryHealthLabel)}</strong></div>
+      <div class="drawer-mini-card"><span>Charge batterie</span><strong>${escapeHtml(batteryChargeLabel)}</strong></div>
+      <div class="drawer-mini-card"><span>Capacite utile</span><strong>${escapeHtml(batteryCapacityLabel)}</strong></div>
+      <div class="drawer-mini-card"><span>Alimentation</span><strong>${escapeHtml(batteryPowerSourceLabel)}</strong></div>
       <div class="drawer-mini-card${clockAlert && clockAlert.active ? ' is-alert' : ''}"><span>Pile BIOS</span><strong>${escapeHtml(
         clockAlert && clockAlert.active ? 'Controle requis' : 'RAS'
       )}</strong></div>
@@ -5319,6 +5493,10 @@ function buildDrawerDetailHtml(detail) {
       <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
       <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
       <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
+      <div><span>Sante batterie</span><strong>${escapeHtml(batteryHealthLabel)}</strong></div>
+      <div><span>Charge batterie</span><strong>${escapeHtml(batteryChargeLabel)}</strong></div>
+      <div><span>Capacite utile</span><strong>${escapeHtml(batteryCapacityLabel)}</strong></div>
+      <div><span>Alimentation</span><strong>${escapeHtml(batteryPowerSourceLabel)}</strong></div>
       <div><span>Hash Autopilot</span><div class="drawer-long-row"><strong class="drawer-long-value" title="${escapeHtml(
         autopilotHashTitle
       )}">${escapeHtml(autopilotHashPreview)}</strong>${autopilotCopyButton}</div></div>
@@ -5695,10 +5873,10 @@ function renderList(isScrollUpdate = false) {
         : '';
       const batteryHtml = batteryValue != null
         ? `
-          <span class="lot-pill battery-pill${isBatteryAlert ? ' is-alert' : ''}" title="Batterie ${escapeHtml(
+          <span class="lot-pill battery-pill${isBatteryAlert ? ' is-alert' : ''}" title="Sante batterie ${escapeHtml(
             formatBatteryHealth(batteryValue)
           )}">
-            <span class="lot-pill-label">Batterie</span>
+            <span class="lot-pill-label">Sante</span>
             <span class="lot-pill-value">${escapeHtml(formatBatteryHealth(batteryValue))}</span>
           </span>
         `
