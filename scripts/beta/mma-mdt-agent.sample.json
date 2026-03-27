@@ -1,0 +1,13 @@
+{
+  "baseUrl": "https://mma.marl.lan",
+  "agentId": "capr-mdt-01-beta",
+  "token": "REPLACE_ME",
+  "hostname": "CAPR-MDT-01",
+  "deploymentShareRoot": "W:\\DeploymentShare",
+  "shareServerName": "CAPR-MDT-01",
+  "taskSequenceGroupName": "MMA Beta",
+  "scriptsFolder": "beta",
+  "provisionScriptPath": "C:\\ProgramData\\MMA\\MdtBetaAgent\\provision-mdt-beta.ps1",
+  "loopDelaySeconds": 15,
+  "ignoreTlsErrors": false
+}

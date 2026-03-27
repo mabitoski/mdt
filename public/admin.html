@@ -33,6 +33,7 @@
         <nav class="sidebar-nav" aria-label="Sections administration">
           <a class="sidebar-nav-btn" href="#section-admin-head">Vue generale</a>
           <a class="sidebar-nav-btn is-active" href="#section-access">Acces Microsoft</a>
+          <a class="sidebar-nav-btn" href="#section-mdt-beta">Automatisation MDT</a>
           <a class="sidebar-nav-btn" href="#section-weekly-recap">Recap hebdo</a>
           <a class="sidebar-nav-btn" href="#section-lots">Gestion des lots</a>
         </nav>
@@ -128,6 +129,79 @@
                 refusee des le callback SSO.
               </p>
             </div>
+          </div>
+
+          <div class="admin-card" id="section-mdt-beta">
+            <div class="admin-header">
+              <div>
+                <p class="admin-kicker">Provisioning</p>
+                <h2>Automatisation MDT beta</h2>
+                <p class="admin-sub">
+                  Provisionne de nouvelles task sequences de test dans un groupe dedie, sans toucher
+                  aux task sequences de production.
+                </p>
+              </div>
+              <div class="admin-meta">
+                <span class="admin-status" id="mdt-beta-status" data-status="unknown">Chargement</span>
+              </div>
+            </div>
+            <div class="admin-form">
+              <div class="admin-grid">
+                <div class="admin-field">
+                  <span>Mode</span>
+                  <p id="mdt-beta-mode">--</p>
+                </div>
+                <div class="admin-field">
+                  <span>Task sequence source par defaut</span>
+                  <p id="mdt-beta-default-source">--</p>
+                </div>
+                <div class="admin-field">
+                  <span>Groupe cible</span>
+                  <p id="mdt-beta-group">--</p>
+                </div>
+                <div class="admin-field">
+                  <span>Dossier scripts</span>
+                  <p id="mdt-beta-scripts-folder">--</p>
+                </div>
+                <div class="admin-field">
+                  <span>Agent Windows</span>
+                  <p id="mdt-beta-agent">--</p>
+                </div>
+                <div class="admin-field">
+                  <span>File de jobs</span>
+                  <p id="mdt-beta-queue">--</p>
+                </div>
+              </div>
+              <p class="admin-note">
+                Ce flux cree uniquement des TS de test `MDT-BETA-*` dans le groupe `MMA Beta`.
+                Rien n'ecrase les TS atelier actuelles.
+              </p>
+            </div>
+            <form class="admin-form" id="mdt-beta-tech-form">
+              <div class="admin-grid">
+                <label class="admin-field">
+                  <span>Nom technicien</span>
+                  <input type="text" id="mdt-beta-tech-name" maxlength="64" autocomplete="off" required />
+                </label>
+                <label class="admin-field">
+                  <span>TS source</span>
+                  <input
+                    type="text"
+                    id="mdt-beta-tech-source"
+                    maxlength="64"
+                    autocomplete="off"
+                    placeholder="MDT-MELISSE"
+                    required
+                  />
+                </label>
+              </div>
+              <div class="admin-actions">
+                <button type="submit" class="admin-primary" id="mdt-beta-tech-submit">Creer le technicien beta</button>
+                <button type="button" class="admin-secondary" id="mdt-beta-reload">Recharger</button>
+              </div>
+              <div class="admin-feedback" id="mdt-beta-feedback" role="status"></div>
+            </form>
+            <div class="lot-list" id="mdt-beta-tech-list"></div>
           </div>
 
           <div class="admin-card" id="section-weekly-recap">
@@ -233,6 +307,6 @@
       </section>
     </main>
 
-    <script src="/admin.js?v=20260327b" defer></script>
+    <script src="/admin.js?v=20260327c" defer></script>
   </body>
 </html>

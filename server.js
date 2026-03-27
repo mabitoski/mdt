@@ -154,6 +154,17 @@ const MICROSOFT_OPERATOR_GROUP_IDS_RAW = process.env.MICROSOFT_OPERATOR_GROUP_ID
 const MICROSOFT_LOGISTICS_GROUP_IDS_RAW = process.env.MICROSOFT_LOGISTICS_GROUP_IDS || '';
 const MICROSOFT_ADMIN_GROUP_IDS_RAW = process.env.MICROSOFT_ADMIN_GROUP_IDS || '';
 const MICROSOFT_PLATFORM_ADMIN_GROUP_IDS_RAW = process.env.MICROSOFT_PLATFORM_ADMIN_GROUP_IDS || '';
+const MDT_BETA_AGENT_TOKEN = String(process.env.MDT_BETA_AGENT_TOKEN || '').trim();
+const MDT_BETA_AUTOMATION_ENABLED = Boolean(MDT_BETA_AGENT_TOKEN);
+const MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID = String(
+  process.env.MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID || 'MDT-MELISSE'
+).trim();
+const MDT_BETA_GROUP_NAME = String(process.env.MDT_BETA_GROUP_NAME || 'MMA Beta').trim() || 'MMA Beta';
+const MDT_BETA_SCRIPTS_FOLDER = String(process.env.MDT_BETA_SCRIPTS_FOLDER || 'beta').trim() || 'beta';
+const MDT_BETA_JOB_RUNNING_TIMEOUT_MS = Math.max(
+  60000,
+  Number.parseInt(process.env.MDT_BETA_JOB_RUNNING_TIMEOUT_MS || '1800000', 10) || 1800000
+);
 const MICROSOFT_SSO_ENABLED = Boolean(
   MICROSOFT_ENTRA_TENANT_ID && MICROSOFT_ENTRA_CLIENT_ID && MICROSOFT_ENTRA_CLIENT_SECRET
 );
@@ -1715,6 +1726,61 @@ async function initDb() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS mdt_beta_technicians (
+      id UUID PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      source_task_sequence_id TEXT NOT NULL,
+      beta_task_sequence_id TEXT NOT NULL UNIQUE,
+      beta_task_sequence_name TEXT NOT NULL,
+      task_sequence_group_name TEXT NOT NULL DEFAULT 'MMA Beta',
+      scripts_folder TEXT NOT NULL DEFAULT 'beta',
+      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'provisioning', 'ready', 'failed', 'disabled')),
+      created_by TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_job_id UUID,
+      last_error TEXT,
+      last_result JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mdt_beta_jobs (
+      id UUID PRIMARY KEY,
+      technician_id UUID NOT NULL REFERENCES mdt_beta_technicians(id) ON DELETE CASCADE,
+      job_type TEXT NOT NULL DEFAULT 'provision' CHECK (job_type IN ('provision')),
+      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      result JSONB NOT NULL DEFAULT '{}'::jsonb,
+      error TEXT,
+      requested_by TEXT,
+      agent_id TEXT,
+      claimed_at TIMESTAMPTZ,
+      heartbeat_at TIMESTAMPTZ,
+      started_at TIMESTAMPTZ,
+      finished_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mdt_beta_agents (
+      agent_id TEXT PRIMARY KEY,
+      hostname TEXT,
+      deployment_share_root TEXT,
+      task_sequence_group_name TEXT,
+      scripts_folder TEXT,
+      status TEXT NOT NULL DEFAULT 'idle',
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_job_id UUID,
+      last_error TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
     CREATE OR REPLACE FUNCTION safe_jsonb(input_text TEXT)
     RETURNS JSONB
     LANGUAGE plpgsql
@@ -1911,6 +1977,18 @@ async function initDb() {
   );
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_patchnote_views_user ON patchnote_views(username, user_type)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_mdt_beta_technicians_status_created ON mdt_beta_technicians(status, created_at DESC)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_mdt_beta_jobs_status_created ON mdt_beta_jobs(status, created_at ASC)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_mdt_beta_jobs_technician_created ON mdt_beta_jobs(technician_id, created_at DESC)'
+  );
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_mdt_beta_agents_last_seen ON mdt_beta_agents(last_seen_at DESC)'
   );
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_weekly_recap_runs_period_sent ON weekly_recap_runs(period_key, sent_at DESC)'
@@ -2143,6 +2221,24 @@ async function initDb() {
     await pool.query(`
       CREATE TRIGGER audit_log_weekly_recap_runs
       AFTER INSERT OR UPDATE OR DELETE ON weekly_recap_runs
+      FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
+    `);
+    await pool.query('DROP TRIGGER IF EXISTS audit_log_mdt_beta_technicians ON mdt_beta_technicians');
+    await pool.query(`
+      CREATE TRIGGER audit_log_mdt_beta_technicians
+      AFTER INSERT OR UPDATE OR DELETE ON mdt_beta_technicians
+      FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
+    `);
+    await pool.query('DROP TRIGGER IF EXISTS audit_log_mdt_beta_jobs ON mdt_beta_jobs');
+    await pool.query(`
+      CREATE TRIGGER audit_log_mdt_beta_jobs
+      AFTER INSERT OR UPDATE OR DELETE ON mdt_beta_jobs
+      FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
+    `);
+    await pool.query('DROP TRIGGER IF EXISTS audit_log_mdt_beta_agents ON mdt_beta_agents');
+    await pool.query(`
+      CREATE TRIGGER audit_log_mdt_beta_agents
+      AFTER INSERT OR UPDATE OR DELETE ON mdt_beta_agents
       FOR EACH ROW EXECUTE FUNCTION audit_log_trigger();
     `);
     await pool.query(`
@@ -3473,6 +3569,287 @@ function normalizeTechKey(value) {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
+}
+
+function normalizeMdtBetaSlug(value) {
+  return String(value || '')
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+function normalizeMdtTaskSequenceId(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+function buildMdtBetaTaskSequenceId(slug) {
+  return normalizeMdtTaskSequenceId(`MDT-BETA-${String(slug || '').toUpperCase()}`);
+}
+
+function buildMdtBetaTaskSequenceName(displayName) {
+  return cleanString(`MDT-Beta-${String(displayName || '').trim()}`, 128) || 'MDT-Beta';
+}
+
+function getSessionActorName(req) {
+  return (
+    cleanString(
+      req.session?.user?.displayName ||
+        req.session?.user?.username ||
+        req.session?.user?.mail ||
+        'systeme',
+      128
+    ) || 'systeme'
+  );
+}
+
+function buildMdtBetaAgentAuditContext(req, agentId, overrides = {}) {
+  const safeAgentId = cleanString(agentId, 128) || 'mdt-beta-agent';
+  return buildAuditContext(req, {
+    actor: `mdt-beta-agent:${safeAgentId}`,
+    actorType: 'system',
+    source: overrides.source || `${req.method} ${req.originalUrl}`
+  });
+}
+
+function buildMdtBetaJobPayload(technician) {
+  return {
+    technicianId: technician.id,
+    displayName: technician.displayName,
+    slug: technician.slug,
+    sourceTaskSequenceId: technician.sourceTaskSequenceId,
+    destinationTaskSequenceId: technician.betaTaskSequenceId,
+    destinationTaskSequenceName: technician.betaTaskSequenceName,
+    taskSequenceGroupName: technician.taskSequenceGroupName || MDT_BETA_GROUP_NAME,
+    betaScriptsFolder: technician.scriptsFolder || MDT_BETA_SCRIPTS_FOLDER
+  };
+}
+
+function mapMdtBetaTechnicianRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    id: row.id,
+    displayName: row.display_name,
+    slug: row.slug,
+    sourceTaskSequenceId: row.source_task_sequence_id,
+    betaTaskSequenceId: row.beta_task_sequence_id,
+    betaTaskSequenceName: row.beta_task_sequence_name,
+    taskSequenceGroupName: row.task_sequence_group_name,
+    scriptsFolder: row.scripts_folder,
+    status: row.status,
+    createdBy: row.created_by || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastJobId: row.last_job_id || null,
+    lastError: row.last_error || null,
+    lastResult: row.last_result || null,
+    latestJob: row.job_id
+      ? {
+          id: row.job_id,
+          status: row.job_status,
+          agentId: row.job_agent_id || null,
+          createdAt: row.job_created_at,
+          startedAt: row.job_started_at,
+          finishedAt: row.job_finished_at,
+          error: row.job_error || null,
+          result: row.job_result || null
+        }
+      : null
+  };
+}
+
+async function listMdtBetaTechnicians(client = pool) {
+  const result = await client.query(
+    `
+      SELECT
+        t.*,
+        j.id AS job_id,
+        j.status AS job_status,
+        j.agent_id AS job_agent_id,
+        j.created_at AS job_created_at,
+        j.started_at AS job_started_at,
+        j.finished_at AS job_finished_at,
+        j.error AS job_error,
+        j.result AS job_result
+      FROM mdt_beta_technicians t
+      LEFT JOIN LATERAL (
+        SELECT id, status, agent_id, created_at, started_at, finished_at, error, result
+        FROM mdt_beta_jobs
+        WHERE technician_id = t.id
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+      ) j ON TRUE
+      ORDER BY t.created_at DESC, t.display_name ASC
+    `
+  );
+  return result.rows.map((row) => mapMdtBetaTechnicianRow(row));
+}
+
+async function getLatestMdtBetaAgent(client = pool) {
+  const result = await client.query(
+    `
+      SELECT
+        agent_id,
+        hostname,
+        deployment_share_root,
+        task_sequence_group_name,
+        scripts_folder,
+        status,
+        last_seen_at,
+        last_job_id,
+        last_error,
+        updated_at
+      FROM mdt_beta_agents
+      ORDER BY last_seen_at DESC, agent_id ASC
+      LIMIT 1
+    `
+  );
+  const row = result.rows && result.rows[0] ? result.rows[0] : null;
+  if (!row) {
+    return null;
+  }
+  return {
+    agentId: row.agent_id,
+    hostname: row.hostname || null,
+    deploymentShareRoot: row.deployment_share_root || null,
+    taskSequenceGroupName: row.task_sequence_group_name || null,
+    scriptsFolder: row.scripts_folder || null,
+    status: row.status || 'unknown',
+    lastSeenAt: row.last_seen_at,
+    lastJobId: row.last_job_id || null,
+    lastError: row.last_error || null,
+    updatedAt: row.updated_at
+  };
+}
+
+async function buildMdtBetaAdminPayload() {
+  const [technicians, latestAgent, queueResult] = await Promise.all([
+    listMdtBetaTechnicians(),
+    getLatestMdtBetaAgent(),
+    pool.query(
+      `
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'queued')::integer AS queued_count,
+          COUNT(*) FILTER (WHERE status = 'running')::integer AS running_count,
+          COUNT(*) FILTER (WHERE status = 'failed')::integer AS failed_count,
+          COUNT(*) FILTER (WHERE status = 'succeeded')::integer AS succeeded_count
+        FROM mdt_beta_jobs
+      `
+    )
+  ]);
+  const queue = queueResult.rows && queueResult.rows[0] ? queueResult.rows[0] : {};
+  return {
+    enabled: MDT_BETA_AUTOMATION_ENABLED,
+    defaults: {
+      sourceTaskSequenceId: MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID,
+      taskSequenceGroupName: MDT_BETA_GROUP_NAME,
+      scriptsFolder: MDT_BETA_SCRIPTS_FOLDER
+    },
+    agent: latestAgent,
+    queue: {
+      queuedCount: Number(queue.queued_count) || 0,
+      runningCount: Number(queue.running_count) || 0,
+      failedCount: Number(queue.failed_count) || 0,
+      succeededCount: Number(queue.succeeded_count) || 0
+    },
+    technicians
+  };
+}
+
+async function upsertMdtBetaAgentState(
+  client,
+  {
+    agentId,
+    hostname = null,
+    deploymentShareRoot = null,
+    taskSequenceGroupName = null,
+    scriptsFolder = null,
+    status = 'idle',
+    lastJobId = null,
+    lastError = null
+  }
+) {
+  await client.query(
+    `
+      INSERT INTO mdt_beta_agents (
+        agent_id,
+        hostname,
+        deployment_share_root,
+        task_sequence_group_name,
+        scripts_folder,
+        status,
+        last_seen_at,
+        last_job_id,
+        last_error,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, NOW())
+      ON CONFLICT (agent_id) DO UPDATE SET
+        hostname = EXCLUDED.hostname,
+        deployment_share_root = EXCLUDED.deployment_share_root,
+        task_sequence_group_name = EXCLUDED.task_sequence_group_name,
+        scripts_folder = EXCLUDED.scripts_folder,
+        status = EXCLUDED.status,
+        last_seen_at = NOW(),
+        last_job_id = EXCLUDED.last_job_id,
+        last_error = EXCLUDED.last_error,
+        updated_at = NOW()
+    `,
+    [
+      agentId,
+      hostname,
+      deploymentShareRoot,
+      taskSequenceGroupName,
+      scriptsFolder,
+      status,
+      normalizeUuid(lastJobId),
+      cleanString(lastError, 2000)
+    ]
+  );
+}
+
+async function requeueStaleMdtBetaJobs(client) {
+  const staleResult = await client.query(
+    `
+      UPDATE mdt_beta_jobs
+      SET
+        status = 'queued',
+        agent_id = NULL,
+        claimed_at = NULL,
+        heartbeat_at = NULL,
+        started_at = NULL,
+        updated_at = NOW(),
+        error = COALESCE(error, 'Job requeue after timeout')
+      WHERE status = 'running'
+        AND COALESCE(heartbeat_at, claimed_at, started_at, created_at) < NOW() - ($1 * INTERVAL '1 millisecond')
+      RETURNING technician_id
+    `,
+    [MDT_BETA_JOB_RUNNING_TIMEOUT_MS]
+  );
+  const technicianIds = staleResult.rows
+    .map((row) => normalizeUuid(row.technician_id))
+    .filter(Boolean);
+  if (technicianIds.length) {
+    await client.query(
+      `
+        UPDATE mdt_beta_technicians
+        SET status = 'queued', updated_at = NOW()
+        WHERE id = ANY($1::uuid[])
+      `,
+      [technicianIds]
+    );
+  }
 }
 
 function normalizeTextSql(column) {
@@ -10975,6 +11352,533 @@ app.get('/api/logs/:id', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Failed to fetch audit log detail', error);
     return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+function readMdtBetaAgentIdentity(req) {
+  const headerToken = cleanString(req.get('x-mdt-beta-agent-token'), 512);
+  const bodyToken = cleanString(typeof req.body?.token === 'string' ? req.body.token : '', 512);
+  const token = headerToken || bodyToken || '';
+  const agentId = cleanString(
+    req.get('x-mdt-beta-agent-id') ||
+      (typeof req.body?.agentId === 'string' ? req.body.agentId : ''),
+    128
+  );
+  return { token, agentId: agentId || '' };
+}
+
+function isAuthorizedMdtBetaAgent(req) {
+  const identity = readMdtBetaAgentIdentity(req);
+  return MDT_BETA_AUTOMATION_ENABLED && identity.agentId && identity.token && identity.token === MDT_BETA_AGENT_TOKEN
+    ? identity
+    : null;
+}
+
+app.get('/api/admin/mdt-beta', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const payload = await buildMdtBetaAdminPayload();
+    return res.json({ ok: true, automation: payload });
+  } catch (error) {
+    console.error('Failed to build MDT beta admin payload', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  }
+});
+
+app.post('/api/admin/mdt-beta/technicians', requireAuth, requireAdmin, async (req, res) => {
+  if (!MDT_BETA_AUTOMATION_ENABLED) {
+    return res.status(503).json({ ok: false, error: 'automation_disabled' });
+  }
+
+  const displayName = cleanString(req.body?.displayName || req.body?.name, 64);
+  const sourceTaskSequenceId = normalizeMdtTaskSequenceId(
+    req.body?.sourceTaskSequenceId || MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID
+  );
+  const slug = normalizeMdtBetaSlug(req.body?.slug || displayName || '');
+  const betaTaskSequenceId = buildMdtBetaTaskSequenceId(slug);
+  const betaTaskSequenceName = buildMdtBetaTaskSequenceName(displayName);
+
+  if (!displayName || !slug || !sourceTaskSequenceId || !betaTaskSequenceId) {
+    return res.status(400).json({ ok: false, error: 'invalid_payload' });
+  }
+
+  const technicianId = generateUuid();
+  const jobId = generateUuid();
+  const createdBy = getSessionActorName(req);
+  const technician = {
+    id: technicianId,
+    displayName,
+    slug,
+    sourceTaskSequenceId,
+    betaTaskSequenceId,
+    betaTaskSequenceName,
+    taskSequenceGroupName: MDT_BETA_GROUP_NAME,
+    scriptsFolder: MDT_BETA_SCRIPTS_FOLDER
+  };
+  const payload = buildMdtBetaJobPayload(technician);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const existing = await client.query(
+      `
+        SELECT id
+        FROM mdt_beta_technicians
+        WHERE slug = $1 OR beta_task_sequence_id = $2
+        LIMIT 1
+      `,
+      [slug, betaTaskSequenceId]
+    );
+    if (existing.rows && existing.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'technician_exists' });
+    }
+    await client.query(
+      `
+        INSERT INTO mdt_beta_technicians (
+          id,
+          display_name,
+          slug,
+          source_task_sequence_id,
+          beta_task_sequence_id,
+          beta_task_sequence_name,
+          task_sequence_group_name,
+          scripts_folder,
+          status,
+          created_by,
+          created_at,
+          updated_at,
+          last_job_id,
+          last_result
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9, NOW(), NOW(), $10, '{}'::jsonb)
+      `,
+      [
+        technicianId,
+        displayName,
+        slug,
+        sourceTaskSequenceId,
+        betaTaskSequenceId,
+        betaTaskSequenceName,
+        MDT_BETA_GROUP_NAME,
+        MDT_BETA_SCRIPTS_FOLDER,
+        createdBy,
+        jobId
+      ]
+    );
+    await client.query(
+      `
+        INSERT INTO mdt_beta_jobs (
+          id,
+          technician_id,
+          job_type,
+          status,
+          payload,
+          requested_by,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, 'provision', 'queued', $3::jsonb, $4, NOW(), NOW())
+      `,
+      [jobId, technicianId, JSON.stringify(payload), createdBy]
+    );
+    await client.query('COMMIT');
+    const automation = await buildMdtBetaAdminPayload();
+    return res.status(201).json({ ok: true, technician: payload, automation });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to create MDT beta technician', error);
+    return res.status(500).json({ ok: false, error: 'create_failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/admin/mdt-beta/technicians/:id/reprovision', requireAuth, requireAdmin, async (req, res) => {
+  if (!MDT_BETA_AUTOMATION_ENABLED) {
+    return res.status(503).json({ ok: false, error: 'automation_disabled' });
+  }
+
+  const technicianId = normalizeUuid(req.params.id);
+  if (!technicianId) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const requestedBy = getSessionActorName(req);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const techResult = await client.query(
+      `
+        SELECT *
+        FROM mdt_beta_technicians
+        WHERE id = $1
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [technicianId]
+    );
+    const techRow = techResult.rows && techResult.rows[0] ? techResult.rows[0] : null;
+    if (!techRow) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+    const runningJob = await client.query(
+      `
+        SELECT id
+        FROM mdt_beta_jobs
+        WHERE technician_id = $1 AND status = 'running'
+        LIMIT 1
+      `,
+      [technicianId]
+    );
+    if (runningJob.rows && runningJob.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'job_running' });
+    }
+
+    const jobId = generateUuid();
+    const payload = buildMdtBetaJobPayload({
+      id: techRow.id,
+      displayName: techRow.display_name,
+      slug: techRow.slug,
+      sourceTaskSequenceId: techRow.source_task_sequence_id,
+      betaTaskSequenceId: techRow.beta_task_sequence_id,
+      betaTaskSequenceName: techRow.beta_task_sequence_name,
+      taskSequenceGroupName: techRow.task_sequence_group_name,
+      scriptsFolder: techRow.scripts_folder
+    });
+    await client.query(
+      `
+        INSERT INTO mdt_beta_jobs (
+          id,
+          technician_id,
+          job_type,
+          status,
+          payload,
+          requested_by,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, 'provision', 'queued', $3::jsonb, $4, NOW(), NOW())
+      `,
+      [jobId, technicianId, JSON.stringify(payload), requestedBy]
+    );
+    await client.query(
+      `
+        UPDATE mdt_beta_technicians
+        SET status = 'queued', updated_at = NOW(), last_job_id = $2, last_error = NULL
+        WHERE id = $1
+      `,
+      [technicianId, jobId]
+    );
+    await client.query('COMMIT');
+    const automation = await buildMdtBetaAdminPayload();
+    return res.json({ ok: true, automation });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to queue MDT beta reprovision', error);
+    return res.status(500).json({ ok: false, error: 'reprovision_failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/mdt-beta-agent/heartbeat', async (req, res) => {
+  const identity = isAuthorizedMdtBetaAgent(req);
+  if (!identity) {
+    return res.status(MDT_BETA_AUTOMATION_ENABLED ? 401 : 404).json({ ok: false, error: 'unauthorized' });
+  }
+
+  const hostname = cleanString(req.body?.hostname, 128);
+  const deploymentShareRoot = cleanString(req.body?.deploymentShareRoot, 255);
+  const status = cleanString(req.body?.status, 32) || 'idle';
+  const lastJobId = normalizeUuid(req.body?.lastJobId);
+  const lastError = cleanString(req.body?.lastError, 2000);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, buildMdtBetaAgentAuditContext(req, identity.agentId, { source: 'POST /api/mdt-beta-agent/heartbeat' }));
+    await upsertMdtBetaAgentState(client, {
+      agentId: identity.agentId,
+      hostname,
+      deploymentShareRoot,
+      taskSequenceGroupName: cleanString(req.body?.taskSequenceGroupName, 128) || MDT_BETA_GROUP_NAME,
+      scriptsFolder: cleanString(req.body?.scriptsFolder, 64) || MDT_BETA_SCRIPTS_FOLDER,
+      status,
+      lastJobId,
+      lastError
+    });
+    if (lastJobId) {
+      await client.query(
+        `
+          UPDATE mdt_beta_jobs
+          SET heartbeat_at = NOW(), updated_at = NOW()
+          WHERE id = $1 AND status = 'running'
+        `,
+        [lastJobId]
+      );
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to record MDT beta agent heartbeat', error);
+    return res.status(500).json({ ok: false, error: 'heartbeat_failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/mdt-beta-agent/jobs/claim', async (req, res) => {
+  const identity = isAuthorizedMdtBetaAgent(req);
+  if (!identity) {
+    return res.status(MDT_BETA_AUTOMATION_ENABLED ? 401 : 404).json({ ok: false, error: 'unauthorized' });
+  }
+
+  const hostname = cleanString(req.body?.hostname, 128);
+  const deploymentShareRoot = cleanString(req.body?.deploymentShareRoot, 255);
+  const taskSequenceGroupName = cleanString(req.body?.taskSequenceGroupName, 128) || MDT_BETA_GROUP_NAME;
+  const scriptsFolder = cleanString(req.body?.scriptsFolder, 64) || MDT_BETA_SCRIPTS_FOLDER;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, buildMdtBetaAgentAuditContext(req, identity.agentId, { source: 'POST /api/mdt-beta-agent/jobs/claim' }));
+    await requeueStaleMdtBetaJobs(client);
+    await upsertMdtBetaAgentState(client, {
+      agentId: identity.agentId,
+      hostname,
+      deploymentShareRoot,
+      taskSequenceGroupName,
+      scriptsFolder,
+      status: 'idle'
+    });
+    const jobResult = await client.query(
+      `
+        SELECT
+          j.id,
+          j.technician_id,
+          j.job_type,
+          j.payload
+        FROM mdt_beta_jobs j
+        WHERE j.status = 'queued'
+        ORDER BY j.created_at ASC, j.id ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      `
+    );
+    const jobRow = jobResult.rows && jobResult.rows[0] ? jobResult.rows[0] : null;
+    if (!jobRow) {
+      await client.query('COMMIT');
+      return res.json({ ok: true, job: null });
+    }
+    await client.query(
+      `
+        UPDATE mdt_beta_jobs
+        SET
+          status = 'running',
+          agent_id = $2,
+          claimed_at = NOW(),
+          heartbeat_at = NOW(),
+          started_at = NOW(),
+          updated_at = NOW()
+        WHERE id = $1
+      `,
+      [jobRow.id, identity.agentId]
+    );
+    await client.query(
+      `
+        UPDATE mdt_beta_technicians
+        SET status = 'provisioning', updated_at = NOW(), last_job_id = $2
+        WHERE id = $1
+      `,
+      [jobRow.technician_id, jobRow.id]
+    );
+    await upsertMdtBetaAgentState(client, {
+      agentId: identity.agentId,
+      hostname,
+      deploymentShareRoot,
+      taskSequenceGroupName,
+      scriptsFolder,
+      status: 'running',
+      lastJobId: jobRow.id
+    });
+    await client.query('COMMIT');
+    return res.json({
+      ok: true,
+      job: {
+        id: jobRow.id,
+        type: jobRow.job_type,
+        payload: jobRow.payload || {}
+      }
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to claim MDT beta job', error);
+    return res.status(500).json({ ok: false, error: 'claim_failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/mdt-beta-agent/jobs/:id/complete', async (req, res) => {
+  const identity = isAuthorizedMdtBetaAgent(req);
+  if (!identity) {
+    return res.status(MDT_BETA_AUTOMATION_ENABLED ? 401 : 404).json({ ok: false, error: 'unauthorized' });
+  }
+
+  const jobId = normalizeUuid(req.params.id);
+  if (!jobId) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const resultPayload = req.body && typeof req.body.result === 'object' && !Array.isArray(req.body.result) ? req.body.result : {};
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, buildMdtBetaAgentAuditContext(req, identity.agentId, { source: 'POST /api/mdt-beta-agent/jobs/complete' }));
+    const jobResult = await client.query(
+      `
+        SELECT id, technician_id
+        FROM mdt_beta_jobs
+        WHERE id = $1 AND status = 'running' AND (agent_id = $2 OR agent_id IS NULL)
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [jobId, identity.agentId]
+    );
+    const jobRow = jobResult.rows && jobResult.rows[0] ? jobResult.rows[0] : null;
+    if (!jobRow) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'job_not_found' });
+    }
+    await client.query(
+      `
+        UPDATE mdt_beta_jobs
+        SET
+          status = 'succeeded',
+          result = $2::jsonb,
+          error = NULL,
+          heartbeat_at = NOW(),
+          finished_at = NOW(),
+          updated_at = NOW(),
+          agent_id = $3
+        WHERE id = $1
+      `,
+      [jobId, JSON.stringify(resultPayload), identity.agentId]
+    );
+    await client.query(
+      `
+        UPDATE mdt_beta_technicians
+        SET
+          status = 'ready',
+          updated_at = NOW(),
+          last_error = NULL,
+          last_job_id = $2,
+          last_result = $3::jsonb
+        WHERE id = $1
+      `,
+      [jobRow.technician_id, jobId, JSON.stringify(resultPayload)]
+    );
+    await upsertMdtBetaAgentState(client, {
+      agentId: identity.agentId,
+      hostname: cleanString(req.body?.hostname, 128),
+      deploymentShareRoot: cleanString(req.body?.deploymentShareRoot, 255),
+      taskSequenceGroupName: cleanString(req.body?.taskSequenceGroupName, 128) || MDT_BETA_GROUP_NAME,
+      scriptsFolder: cleanString(req.body?.scriptsFolder, 64) || MDT_BETA_SCRIPTS_FOLDER,
+      status: 'idle',
+      lastJobId: jobId,
+      lastError: null
+    });
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to complete MDT beta job', error);
+    return res.status(500).json({ ok: false, error: 'complete_failed' });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/mdt-beta-agent/jobs/:id/fail', async (req, res) => {
+  const identity = isAuthorizedMdtBetaAgent(req);
+  if (!identity) {
+    return res.status(MDT_BETA_AUTOMATION_ENABLED ? 401 : 404).json({ ok: false, error: 'unauthorized' });
+  }
+
+  const jobId = normalizeUuid(req.params.id);
+  if (!jobId) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const errorMessage = cleanString(req.body?.error || req.body?.message, 2000) || 'agent_failed';
+  const resultPayload = req.body && typeof req.body.result === 'object' && !Array.isArray(req.body.result) ? req.body.result : {};
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, buildMdtBetaAgentAuditContext(req, identity.agentId, { source: 'POST /api/mdt-beta-agent/jobs/fail' }));
+    const jobResult = await client.query(
+      `
+        SELECT id, technician_id
+        FROM mdt_beta_jobs
+        WHERE id = $1 AND status = 'running' AND (agent_id = $2 OR agent_id IS NULL)
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [jobId, identity.agentId]
+    );
+    const jobRow = jobResult.rows && jobResult.rows[0] ? jobResult.rows[0] : null;
+    if (!jobRow) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'job_not_found' });
+    }
+    await client.query(
+      `
+        UPDATE mdt_beta_jobs
+        SET
+          status = 'failed',
+          result = $2::jsonb,
+          error = $3,
+          heartbeat_at = NOW(),
+          finished_at = NOW(),
+          updated_at = NOW(),
+          agent_id = $4
+        WHERE id = $1
+      `,
+      [jobId, JSON.stringify(resultPayload), errorMessage, identity.agentId]
+    );
+    await client.query(
+      `
+        UPDATE mdt_beta_technicians
+        SET
+          status = 'failed',
+          updated_at = NOW(),
+          last_error = $2,
+          last_job_id = $3,
+          last_result = $4::jsonb
+        WHERE id = $1
+      `,
+      [jobRow.technician_id, errorMessage, jobId, JSON.stringify(resultPayload)]
+    );
+    await upsertMdtBetaAgentState(client, {
+      agentId: identity.agentId,
+      hostname: cleanString(req.body?.hostname, 128),
+      deploymentShareRoot: cleanString(req.body?.deploymentShareRoot, 255),
+      taskSequenceGroupName: cleanString(req.body?.taskSequenceGroupName, 128) || MDT_BETA_GROUP_NAME,
+      scriptsFolder: cleanString(req.body?.scriptsFolder, 64) || MDT_BETA_SCRIPTS_FOLDER,
+      status: 'idle',
+      lastJobId: jobId,
+      lastError: errorMessage
+    });
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to fail MDT beta job', error);
+    return res.status(500).json({ ok: false, error: 'fail_failed' });
+  } finally {
+    client.release();
   }
 });
 

@@ -881,3 +881,293 @@ if (weeklyRecapSendBtn) {
 }
 
 loadWeeklyRecap();
+
+const mdtBetaStatusEl = document.getElementById('mdt-beta-status');
+const mdtBetaModeEl = document.getElementById('mdt-beta-mode');
+const mdtBetaDefaultSourceEl = document.getElementById('mdt-beta-default-source');
+const mdtBetaGroupEl = document.getElementById('mdt-beta-group');
+const mdtBetaScriptsFolderEl = document.getElementById('mdt-beta-scripts-folder');
+const mdtBetaAgentEl = document.getElementById('mdt-beta-agent');
+const mdtBetaQueueEl = document.getElementById('mdt-beta-queue');
+const mdtBetaFeedbackEl = document.getElementById('mdt-beta-feedback');
+const mdtBetaReloadBtn = document.getElementById('mdt-beta-reload');
+const mdtBetaTechForm = document.getElementById('mdt-beta-tech-form');
+const mdtBetaTechNameInput = document.getElementById('mdt-beta-tech-name');
+const mdtBetaTechSourceInput = document.getElementById('mdt-beta-tech-source');
+const mdtBetaTechSubmit = document.getElementById('mdt-beta-tech-submit');
+const mdtBetaTechListEl = document.getElementById('mdt-beta-tech-list');
+
+function setMdtBetaFeedback(state, message) {
+  if (!mdtBetaFeedbackEl) {
+    return;
+  }
+  if (state) {
+    mdtBetaFeedbackEl.dataset.state = state;
+  } else {
+    delete mdtBetaFeedbackEl.dataset.state;
+  }
+  mdtBetaFeedbackEl.textContent = message || '';
+}
+
+function setMdtBetaDisabled(disabled) {
+  [mdtBetaReloadBtn, mdtBetaTechSubmit].forEach((button) => {
+    if (button) {
+      button.disabled = disabled;
+    }
+  });
+  if (mdtBetaTechForm) {
+    mdtBetaTechForm.querySelectorAll('input').forEach((input) => {
+      input.disabled = disabled;
+    });
+  }
+}
+
+function getMdtBetaStatusMeta(status, enabled) {
+  if (!enabled) {
+    return { tone: 'disabled', label: 'Desactive' };
+  }
+  switch (status) {
+    case 'ready':
+      return { tone: 'enabled', label: 'Pret' };
+    case 'failed':
+      return { tone: 'disabled', label: 'Echec' };
+    case 'provisioning':
+      return { tone: 'unknown', label: 'Provisioning' };
+    case 'queued':
+      return { tone: 'unknown', label: 'En attente' };
+    default:
+      return { tone: 'unknown', label: 'Actif' };
+  }
+}
+
+function renderMdtBetaTechnicians(automation) {
+  if (!mdtBetaTechListEl) {
+    return;
+  }
+  const list = automation && Array.isArray(automation.technicians) ? automation.technicians : [];
+  if (!list.length) {
+    mdtBetaTechListEl.innerHTML = '<p class="admin-note">Aucun technicien beta provisionne pour le moment.</p>';
+    return;
+  }
+  mdtBetaTechListEl.innerHTML = list
+    .map((item) => {
+      const statusMeta = getMdtBetaStatusMeta(item.status, automation && automation.enabled);
+      const latestJob = item.latestJob || null;
+      const lastRun = latestJob ? formatDateTime(latestJob.finishedAt || latestJob.startedAt || latestJob.createdAt) : '--';
+      const backupPath = item.lastResult && item.lastResult.backupPath ? item.lastResult.backupPath : '--';
+      const controlPath = item.lastResult && item.lastResult.controlPath ? item.lastResult.controlPath : '--';
+      return `
+        <article class="lot-item" data-tech-id="${escapeHtml(item.id || '')}">
+          <div class="lot-item-head">
+            <h3>${escapeHtml(item.displayName || item.slug || 'Technicien')}</h3>
+            <span class="admin-status" data-status="${statusMeta.tone}">${escapeHtml(statusMeta.label)}</span>
+          </div>
+          <p class="admin-sub">
+            Source <strong>${escapeHtml(item.sourceTaskSequenceId || '--')}</strong> · Cible
+            <strong>${escapeHtml(item.betaTaskSequenceId || '--')}</strong>
+          </p>
+          <div class="admin-grid lot-grid">
+            <div class="admin-field">
+              <span>Nom TS beta</span>
+              <p>${escapeHtml(item.betaTaskSequenceName || '--')}</p>
+            </div>
+            <div class="admin-field">
+              <span>Dernier passage</span>
+              <p>${escapeHtml(lastRun)}</p>
+            </div>
+            <div class="admin-field">
+              <span>Dossier control</span>
+              <p>${escapeHtml(controlPath)}</p>
+            </div>
+            <div class="admin-field">
+              <span>Backup MDT</span>
+              <p>${escapeHtml(backupPath)}</p>
+            </div>
+          </div>
+          ${
+            item.lastError
+              ? `<p class="admin-note">Derniere erreur: ${escapeHtml(item.lastError)}</p>`
+              : ''
+          }
+          <div class="admin-actions">
+            <button type="button" class="admin-secondary" data-action="reprovision-tech" data-tech-id="${escapeHtml(item.id || '')}">
+              Rejouer le provisioning
+            </button>
+          </div>
+        </article>
+      `;
+    })
+    .join('');
+}
+
+function renderMdtBetaAutomation(automation) {
+  if (!mdtBetaStatusEl) {
+    return;
+  }
+  const enabled = Boolean(automation && automation.enabled);
+  const agent = automation && automation.agent ? automation.agent : null;
+  const queue = automation && automation.queue ? automation.queue : null;
+  const statusMeta = enabled
+    ? agent
+      ? getMdtBetaStatusMeta(agent.status, true)
+      : { tone: 'unknown', label: 'Sans agent' }
+    : { tone: 'disabled', label: 'Desactive' };
+  mdtBetaStatusEl.dataset.status = statusMeta.tone;
+  mdtBetaStatusEl.textContent = statusMeta.label;
+  if (mdtBetaModeEl) {
+    mdtBetaModeEl.textContent = enabled ? 'Beta uniquement, aucun impact prod' : 'Automatisation inactive';
+  }
+  if (mdtBetaDefaultSourceEl) {
+    mdtBetaDefaultSourceEl.textContent =
+      automation && automation.defaults ? automation.defaults.sourceTaskSequenceId || '--' : '--';
+  }
+  if (mdtBetaGroupEl) {
+    mdtBetaGroupEl.textContent =
+      automation && automation.defaults ? automation.defaults.taskSequenceGroupName || '--' : '--';
+  }
+  if (mdtBetaScriptsFolderEl) {
+    mdtBetaScriptsFolderEl.textContent =
+      automation && automation.defaults ? automation.defaults.scriptsFolder || '--' : '--';
+  }
+  if (mdtBetaAgentEl) {
+    mdtBetaAgentEl.textContent = agent
+      ? `${agent.hostname || agent.agentId || '--'} · vu ${formatDateTime(agent.lastSeenAt)}`
+      : 'Aucun heartbeat agent';
+  }
+  if (mdtBetaQueueEl) {
+    mdtBetaQueueEl.textContent = queue
+      ? `${queue.queuedCount || 0} attente · ${queue.runningCount || 0} en cours · ${queue.failedCount || 0} en erreur`
+      : '--';
+  }
+  if (mdtBetaTechSourceInput && automation && automation.defaults && !mdtBetaTechSourceInput.value.trim()) {
+    mdtBetaTechSourceInput.value = automation.defaults.sourceTaskSequenceId || '';
+  }
+  renderMdtBetaTechnicians(automation);
+}
+
+async function loadMdtBetaAutomation() {
+  if (!mdtBetaStatusEl) {
+    return;
+  }
+  setMdtBetaFeedback('info', 'Chargement de l automatisation MDT beta...');
+  setMdtBetaDisabled(true);
+  try {
+    const response = await fetch('/api/admin/mdt-beta');
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.location.href = '/';
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'mdt_beta_load_failed');
+    }
+    renderMdtBetaAutomation(data.automation || null);
+    setMdtBetaFeedback('success', 'Automatisation MDT beta chargee.');
+  } catch (error) {
+    setMdtBetaFeedback('error', "Impossible de charger l'automatisation MDT beta.");
+  } finally {
+    setMdtBetaDisabled(false);
+  }
+}
+
+async function createMdtBetaTechnician(event) {
+  event.preventDefault();
+  if (!mdtBetaTechForm) {
+    return;
+  }
+  const displayName = mdtBetaTechNameInput ? mdtBetaTechNameInput.value.trim() : '';
+  const sourceTaskSequenceId = mdtBetaTechSourceInput ? mdtBetaTechSourceInput.value.trim() : '';
+  if (!displayName || !sourceTaskSequenceId) {
+    setMdtBetaFeedback('error', 'Renseigne le nom technicien et la task sequence source.');
+    return;
+  }
+  setMdtBetaFeedback('info', 'Creation du technicien beta en cours...');
+  setMdtBetaDisabled(true);
+  try {
+    const response = await fetch('/api/admin/mdt-beta/technicians', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ displayName, sourceTaskSequenceId })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.location.href = '/';
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'mdt_beta_create_failed');
+    }
+    if (mdtBetaTechNameInput) {
+      mdtBetaTechNameInput.value = '';
+    }
+    renderMdtBetaAutomation(data.automation || null);
+    setMdtBetaFeedback('success', 'Technicien beta cree et job queue.');
+  } catch (error) {
+    setMdtBetaFeedback('error', 'Creation beta impossible.');
+  } finally {
+    setMdtBetaDisabled(false);
+  }
+}
+
+async function reprovisionMdtBetaTechnician(technicianId) {
+  if (!technicianId) {
+    return;
+  }
+  setMdtBetaFeedback('info', 'Reprovisionnement beta en cours...');
+  setMdtBetaDisabled(true);
+  try {
+    const response = await fetch(`/api/admin/mdt-beta/technicians/${encodeURIComponent(technicianId)}/reprovision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.location.href = '/';
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'mdt_beta_reprovision_failed');
+    }
+    renderMdtBetaAutomation(data.automation || null);
+    setMdtBetaFeedback('success', 'Job beta reprovisionne.');
+  } catch (error) {
+    setMdtBetaFeedback('error', 'Reprovisionnement beta impossible.');
+  } finally {
+    setMdtBetaDisabled(false);
+  }
+}
+
+if (mdtBetaReloadBtn) {
+  mdtBetaReloadBtn.addEventListener('click', () => {
+    loadMdtBetaAutomation();
+  });
+}
+
+if (mdtBetaTechForm) {
+  mdtBetaTechForm.addEventListener('submit', createMdtBetaTechnician);
+}
+
+if (mdtBetaTechListEl) {
+  mdtBetaTechListEl.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-action="reprovision-tech"]');
+    if (!button || !button.dataset.techId) {
+      return;
+    }
+    reprovisionMdtBetaTechnician(button.dataset.techId);
+  });
+}
+
+loadMdtBetaAutomation();
