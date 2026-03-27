@@ -173,8 +173,8 @@
                 </div>
               </div>
               <p class="admin-note">
-                Ce flux cree uniquement des TS de test `MDT-BETA-*` dans le groupe `MMA Beta`.
-                Rien n'ecrase les TS atelier actuelles.
+                Ce flux cree uniquement des TS de test `MDT-BETA-*` dans le groupe `MMA Beta`,
+                en se basant sur le template cache `MDT-AUTO`. Rien n'ecrase les TS atelier actuelles.
               </p>
             </div>
             <form class="admin-form" id="mdt-beta-tech-form">
@@ -183,17 +183,10 @@
                   <span>Nom technicien</span>
                   <input type="text" id="mdt-beta-tech-name" maxlength="64" autocomplete="off" required />
                 </label>
-                <label class="admin-field">
-                  <span>TS source</span>
-                  <input
-                    type="text"
-                    id="mdt-beta-tech-source"
-                    maxlength="64"
-                    autocomplete="off"
-                    placeholder="MDT-MELISSE"
-                    required
-                  />
-                </label>
+                <div class="admin-field">
+                  <span>Template source</span>
+                  <p id="mdt-beta-tech-source-label">MDT-AUTO</p>
+                </div>
               </div>
               <div class="admin-actions">
                 <button type="submit" class="admin-primary" id="mdt-beta-tech-submit">Creer le technicien beta</button>

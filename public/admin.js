@@ -893,7 +893,7 @@ const mdtBetaFeedbackEl = document.getElementById('mdt-beta-feedback');
 const mdtBetaReloadBtn = document.getElementById('mdt-beta-reload');
 const mdtBetaTechForm = document.getElementById('mdt-beta-tech-form');
 const mdtBetaTechNameInput = document.getElementById('mdt-beta-tech-name');
-const mdtBetaTechSourceInput = document.getElementById('mdt-beta-tech-source');
+const mdtBetaTechSourceLabelEl = document.getElementById('mdt-beta-tech-source-label');
 const mdtBetaTechSubmit = document.getElementById('mdt-beta-tech-submit');
 const mdtBetaTechListEl = document.getElementById('mdt-beta-tech-list');
 
@@ -1029,6 +1029,10 @@ function renderMdtBetaAutomation(automation) {
     mdtBetaScriptsFolderEl.textContent =
       automation && automation.defaults ? automation.defaults.scriptsFolder || '--' : '--';
   }
+  if (mdtBetaTechSourceLabelEl) {
+    mdtBetaTechSourceLabelEl.textContent =
+      automation && automation.defaults ? automation.defaults.sourceTaskSequenceId || '--' : '--';
+  }
   if (mdtBetaAgentEl) {
     mdtBetaAgentEl.textContent = agent
       ? `${agent.hostname || agent.agentId || '--'} · vu ${formatDateTime(agent.lastSeenAt)}`
@@ -1038,9 +1042,6 @@ function renderMdtBetaAutomation(automation) {
     mdtBetaQueueEl.textContent = queue
       ? `${queue.queuedCount || 0} attente · ${queue.runningCount || 0} en cours · ${queue.failedCount || 0} en erreur`
       : '--';
-  }
-  if (mdtBetaTechSourceInput && automation && automation.defaults && !mdtBetaTechSourceInput.value.trim()) {
-    mdtBetaTechSourceInput.value = automation.defaults.sourceTaskSequenceId || '';
   }
   renderMdtBetaTechnicians(automation);
 }
@@ -1080,9 +1081,8 @@ async function createMdtBetaTechnician(event) {
     return;
   }
   const displayName = mdtBetaTechNameInput ? mdtBetaTechNameInput.value.trim() : '';
-  const sourceTaskSequenceId = mdtBetaTechSourceInput ? mdtBetaTechSourceInput.value.trim() : '';
-  if (!displayName || !sourceTaskSequenceId) {
-    setMdtBetaFeedback('error', 'Renseigne le nom technicien et la task sequence source.');
+  if (!displayName) {
+    setMdtBetaFeedback('error', 'Renseigne le nom technicien.');
     return;
   }
   setMdtBetaFeedback('info', 'Creation du technicien beta en cours...');
@@ -1091,7 +1091,7 @@ async function createMdtBetaTechnician(event) {
     const response = await fetch('/api/admin/mdt-beta/technicians', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ displayName, sourceTaskSequenceId })
+      body: JSON.stringify({ displayName })
     });
     if (response.status === 401) {
       window.location.href = '/login';

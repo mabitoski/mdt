@@ -157,7 +157,7 @@ const MICROSOFT_PLATFORM_ADMIN_GROUP_IDS_RAW = process.env.MICROSOFT_PLATFORM_AD
 const MDT_BETA_AGENT_TOKEN = String(process.env.MDT_BETA_AGENT_TOKEN || '').trim();
 const MDT_BETA_AUTOMATION_ENABLED = Boolean(MDT_BETA_AGENT_TOKEN);
 const MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID = String(
-  process.env.MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID || 'MDT-MELISSE'
+  process.env.MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID || 'MDT-AUTO'
 ).trim();
 const MDT_BETA_GROUP_NAME = String(process.env.MDT_BETA_GROUP_NAME || 'MMA Beta').trim() || 'MMA Beta';
 const MDT_BETA_SCRIPTS_FOLDER = String(process.env.MDT_BETA_SCRIPTS_FOLDER || 'beta').trim() || 'beta';
@@ -11390,9 +11390,7 @@ app.post('/api/admin/mdt-beta/technicians', requireAuth, requireAdmin, async (re
   }
 
   const displayName = cleanString(req.body?.displayName || req.body?.name, 64);
-  const sourceTaskSequenceId = normalizeMdtTaskSequenceId(
-    req.body?.sourceTaskSequenceId || MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID
-  );
+  const sourceTaskSequenceId = normalizeMdtTaskSequenceId(MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID);
   const slug = normalizeMdtBetaSlug(req.body?.slug || displayName || '');
   const betaTaskSequenceId = buildMdtBetaTaskSequenceId(slug);
   const betaTaskSequenceName = buildMdtBetaTaskSequenceName(displayName);
