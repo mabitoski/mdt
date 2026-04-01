@@ -67,6 +67,89 @@ param(
 $scriptVersion = '1.7.8'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
+function Get-TsEnvironmentValue {
+  param([string]$Name)
+
+  if (-not $Name) {
+    return $null
+  }
+
+  try {
+    if (-not $script:TsEnvironment) {
+      $script:TsEnvironment = New-Object -ComObject Microsoft.SMS.TSEnvironment
+    }
+    $value = $script:TsEnvironment.Value($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      return $null
+    }
+    return [string]$value
+  } catch {
+    return $null
+  }
+}
+
+function Convert-TechnicianTokenToLabel {
+  param([string]$Value)
+
+  $token = [string]$Value
+  if ([string]::IsNullOrWhiteSpace($token)) {
+    return $null
+  }
+
+  $token = $token.Trim()
+  $token = $token -replace '^(MDT-BETA-|MDT-|BETA-)', ''
+  $token = $token -replace '^MDT-Beta-', ''
+  $token = $token -replace '[-_]+', ' '
+  $token = ($token -replace '\s+', ' ').Trim()
+  if (-not $token) {
+    return $null
+  }
+
+  $parts = foreach ($part in ($token -split ' ')) {
+    if (-not $part) { continue }
+    if ($part.Length -eq 1) {
+      $part.ToUpperInvariant()
+    } else {
+      $part.Substring(0,1).ToUpperInvariant() + $part.Substring(1).ToLowerInvariant()
+    }
+  }
+
+  $label = ($parts -join ' ').Trim()
+  if ([string]::IsNullOrWhiteSpace($label)) {
+    return $null
+  }
+  return $label
+}
+
+function Resolve-TechnicianValue {
+  param([string]$PreferredValue)
+
+  $candidates = @(
+    $PreferredValue,
+    (Get-TsEnvironmentValue 'MMA_TECHNICIAN'),
+    (Get-TsEnvironmentValue 'MDT_TECHNICIAN'),
+    (Get-TsEnvironmentValue 'Technician'),
+    $env:MMA_TECHNICIAN,
+    $env:MDT_TECHNICIAN,
+    (Convert-TechnicianTokenToLabel (Get-TsEnvironmentValue 'TaskSequenceID')),
+    (Convert-TechnicianTokenToLabel (Get-TsEnvironmentValue 'TaskSequenceName'))
+  )
+
+  foreach ($candidate in $candidates) {
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+      continue
+    }
+    $normalized = [string]$candidate
+    $normalized = $normalized.Trim()
+    if (-not $normalized) {
+      continue
+    }
+    return $normalized
+  }
+
+  return 'Beta'
+}
+
 if (-not $ApiUrl) {
   $ApiUrl = 'http://10.1.10.27:3000/api/ingest'
 }
@@ -100,7 +183,7 @@ try {
 } catch {
 }
 
-if (-not $Technician) { $Technician = 'Beta' }
+$Technician = Resolve-TechnicianValue -PreferredValue $Technician
 if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
   $SkipRawUpload = $true
 }

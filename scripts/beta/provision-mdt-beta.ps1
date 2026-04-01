@@ -6,6 +6,7 @@ param(
   [string]$DestinationTaskSequenceId = 'MDT-BETA-MELISSE',
   [string]$DestinationTaskSequenceName = 'MDT-Beta-Melisse',
   [string]$TaskSequenceGroupName = 'MMA Beta',
+  [string]$TechnicianDisplayName = 'Beta',
   [string]$BetaScriptsFolder = 'beta'
 )
 
@@ -89,6 +90,41 @@ function Get-OrCreateGroupNode {
   return $group
 }
 
+function Set-OrCreateVariableNode {
+  param(
+    [xml]$SequenceXml,
+    [string]$Name,
+    [string]$Value
+  )
+
+  if (-not $SequenceXml.sequence.globalVarList) {
+    $globalVarList = $SequenceXml.CreateElement('globalVarList')
+    $firstChild = $SequenceXml.sequence.FirstChild
+    if ($firstChild) {
+      [void]$SequenceXml.sequence.InsertBefore($globalVarList, $firstChild)
+    } else {
+      [void]$SequenceXml.sequence.AppendChild($globalVarList)
+    }
+  }
+
+  $existingNode = $null
+  foreach ($variableNode in @($SequenceXml.sequence.globalVarList.variable)) {
+    if ($variableNode -and $variableNode.name -eq $Name) {
+      $existingNode = $variableNode
+      break
+    }
+  }
+
+  if (-not $existingNode) {
+    $existingNode = $SequenceXml.CreateElement('variable')
+    [void]$existingNode.SetAttribute('name', $Name)
+    [void]$existingNode.SetAttribute('property', $Name)
+    [void]$SequenceXml.sequence.globalVarList.AppendChild($existingNode)
+  }
+
+  $existingNode.InnerText = $Value
+}
+
 $controlRoot = Join-Path $DeploymentShareRoot 'Control'
 $sourceControlPath = Join-Path $controlRoot $SourceTaskSequenceId
 $destinationControlPath = Join-Path $controlRoot $DestinationTaskSequenceId
@@ -118,6 +154,11 @@ Replace-RegexInFile -Path $destinationTsXmlPath -Pattern ([regex]::Escape($marlS
 Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-desktop.ps1') -Replacement ($betaScriptBase + 'mdt-desktop-beta.ps1')
 Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-laptop.ps1')  -Replacement ($betaScriptBase + 'mdt-laptop-beta.ps1')
 Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-stress.ps1')  -Replacement ($betaScriptBase + 'mdt-stress-beta.ps1')
+
+[xml]$destinationTsXml = Get-Content $destinationTsXmlPath
+Set-OrCreateVariableNode -SequenceXml $destinationTsXml -Name 'MMA_TECHNICIAN' -Value $TechnicianDisplayName
+Set-OrCreateVariableNode -SequenceXml $destinationTsXml -Name 'MDT_TECHNICIAN' -Value $TechnicianDisplayName
+$destinationTsXml.Save($destinationTsXmlPath)
 
 [xml]$taskSequencesXml = Get-Content $taskSequencesPath
 [xml]$taskSequenceGroupsXml = Get-Content $taskSequenceGroupsPath
@@ -177,6 +218,7 @@ Write-Host "Provisioned beta task sequence:"
 Write-Host "  Source:      $SourceTaskSequenceId"
 Write-Host "  Destination: $DestinationTaskSequenceId"
 Write-Host "  Name:        $DestinationTaskSequenceName"
+Write-Host "  Technician:  $TechnicianDisplayName"
 Write-Host "  Group:       $TaskSequenceGroupName"
 Write-Host "  Backup:      $backupRoot"
 
@@ -184,6 +226,7 @@ Write-Host "  Backup:      $backupRoot"
   SourceTaskSequenceId = $SourceTaskSequenceId
   DestinationTaskSequenceId = $DestinationTaskSequenceId
   DestinationTaskSequenceName = $DestinationTaskSequenceName
+  TechnicianDisplayName = $TechnicianDisplayName
   TaskSequenceGroupName = $TaskSequenceGroupName
   DeploymentShareRoot = $DeploymentShareRoot
   ControlPath = $destinationControlPath

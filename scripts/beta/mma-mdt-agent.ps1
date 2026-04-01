@@ -195,6 +195,7 @@ function Invoke-ProvisionJob {
     DestinationTaskSequenceId = [string]$payload.destinationTaskSequenceId
     DestinationTaskSequenceName = [string]$payload.destinationTaskSequenceName
     TaskSequenceGroupName = [string]$payload.taskSequenceGroupName
+    TechnicianDisplayName = [string]$payload.displayName
     BetaScriptsFolder = [string]$payload.betaScriptsFolder
   }
 
@@ -210,6 +211,7 @@ function Invoke-ProvisionJob {
     sourceTaskSequenceId = [string]$result.SourceTaskSequenceId
     destinationTaskSequenceId = [string]$result.DestinationTaskSequenceId
     destinationTaskSequenceName = [string]$result.DestinationTaskSequenceName
+    technicianDisplayName = [string]$result.TechnicianDisplayName
     taskSequenceGroupName = [string]$result.TaskSequenceGroupName
     deploymentShareRoot = [string]$result.DeploymentShareRoot
     controlPath = [string]$result.ControlPath
