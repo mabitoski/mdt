@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [string]$ApiUrl = $env:MDT_API_URL,
   [ValidateSet('auto', 'laptop', 'desktop', 'unknown')][string]$Category = 'auto',
@@ -64,131 +64,8 @@ param(
   [switch]$FailTaskSequenceOnError
 )
 
-$scriptVersion = '1.7.8-beta1'
+$scriptVersion = '1.7.8'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
-function Convert-ToTechLookupKey {
-  param([string]$Value)
-
-  if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
-  $normalized = $Value.Normalize([Text.NormalizationForm]::FormD)
-  $builder = New-Object System.Text.StringBuilder
-  foreach ($char in $normalized.ToCharArray()) {
-    $category = [Globalization.CharUnicodeInfo]::GetUnicodeCategory($char)
-    if ($category -ne [Globalization.UnicodeCategory]::NonSpacingMark) {
-      [void]$builder.Append($char)
-    }
-  }
-  return $builder.ToString().ToUpperInvariant()
-}
-
-function Convert-TechTokenToDisplayName {
-  param([string]$Value)
-
-  $lookup = Convert-ToTechLookupKey -Value $Value
-  if (-not $lookup) { return $null }
-  $knownNames = @{
-    'AEDAN' = 'Aedan'
-    'ANTOINE' = 'Antoine'
-    'ANTONY' = 'Antony'
-    'LANA' = 'Lana'
-    'MATHIS' = 'Mathis'
-    'MELISSE' = 'Melisse'
-    'REMI' = 'Rémi'
-    'RÉMI' = 'Rémi'
-    'TOM' = 'Tom'
-  }
-  if ($knownNames.ContainsKey($lookup)) {
-    return $knownNames[$lookup]
-  }
-  $culture = [System.Globalization.CultureInfo]::GetCultureInfo('fr-FR')
-  return $culture.TextInfo.ToTitleCase($lookup.ToLower($culture))
-}
-
-function Resolve-TechnicianFromIdentifier {
-  param([string]$Value)
-
-  if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
-  $ignoredTokens = @('MDT', 'MMA', 'BETA', 'TECH', 'ATELIER', 'GLOBAL', 'TEST', 'TASK', 'SEQUENCE')
-  $tokens = [regex]::Split([string]$Value, '[^\p{L}\p{Nd}]+') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-  for ($index = $tokens.Count - 1; $index -ge 0; $index--) {
-    $tokenKey = Convert-ToTechLookupKey -Value $tokens[$index]
-    if (-not $tokenKey -or $ignoredTokens -contains $tokenKey) {
-      continue
-    }
-    $candidate = Convert-TechTokenToDisplayName -Value $tokens[$index]
-    if ($candidate) {
-      return $candidate
-    }
-  }
-  return $null
-}
-
-function Get-TaskSequenceVariableValue {
-  param(
-    $Environment,
-    [string[]]$Names
-  )
-
-  foreach ($name in $Names) {
-    if ([string]::IsNullOrWhiteSpace($name)) { continue }
-    $value = $null
-    if ($Environment) {
-      try { $value = $Environment.Value($name) } catch { }
-    }
-    if ([string]::IsNullOrWhiteSpace($value)) {
-      try { $value = [Environment]::GetEnvironmentVariable($name) } catch { }
-    }
-    if (-not [string]::IsNullOrWhiteSpace($value)) {
-      return [string]$value
-    }
-  }
-  return $null
-}
-
-function Get-TaskSequenceContext {
-  if ($script:TaskSequenceContext) {
-    return $script:TaskSequenceContext
-  }
-
-  $tsEnvironment = $null
-  try { $tsEnvironment = New-Object -ComObject Microsoft.SMS.TSEnvironment } catch { }
-
-  $context = [pscustomobject]@{
-    TaskSequenceId = Get-TaskSequenceVariableValue -Environment $tsEnvironment -Names @('TaskSequenceID', '_SMSTSPackageID')
-    TaskSequenceName = Get-TaskSequenceVariableValue -Environment $tsEnvironment -Names @('TaskSequenceName', '_SMSTSPackageName')
-    Technician = Get-TaskSequenceVariableValue -Environment $tsEnvironment -Names @('MMA_TECHNICIAN', 'Technician', 'MDT_TECHNICIAN')
-  }
-  $script:TaskSequenceContext = $context
-  return $context
-}
-
-function Resolve-TechnicianValue {
-  param([string]$CurrentTechnician)
-
-  if (-not [string]::IsNullOrWhiteSpace($CurrentTechnician)) {
-    return $CurrentTechnician.Trim()
-  }
-
-  $context = Get-TaskSequenceContext
-  if (-not [string]::IsNullOrWhiteSpace($context.Technician)) {
-    return $context.Technician.Trim()
-  }
-
-  $derived = Resolve-TechnicianFromIdentifier -Value $context.TaskSequenceId
-  if (-not $derived) {
-    $derived = Resolve-TechnicianFromIdentifier -Value $context.TaskSequenceName
-  }
-  if ($derived) {
-    return $derived
-  }
-
-  if (-not [string]::IsNullOrWhiteSpace($context.TaskSequenceId) -or -not [string]::IsNullOrWhiteSpace($context.TaskSequenceName)) {
-    return 'Beta'
-  }
-
-  return 'Rémi'
-}
 
 if (-not $ApiUrl) {
   $ApiUrl = 'http://10.1.10.27:3000/api/ingest'
@@ -223,7 +100,7 @@ try {
 } catch {
 }
 
-$Technician = Resolve-TechnicianValue -CurrentTechnician $Technician
+if (-not $Technician) { $Technician = 'Beta' }
 if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
   $SkipRawUpload = $true
 }
@@ -401,7 +278,7 @@ public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
     $targets = @()
     if ($ProcessId) { $targets += $ProcessId }
     if ($WindowTitle) { $targets += $WindowTitle }
-    $targets += @('Paramètres', 'Settings', 'Réinitialiser ce PC', 'Reset this PC')
+    $targets += @('Param�tres', 'Settings', 'R�initialiser ce PC', 'Reset this PC')
     foreach ($target in $targets) {
       try {
         if ($shell.AppActivate($target)) {
@@ -938,7 +815,7 @@ function Get-WinsatFromDataStore {
         try { $cpuDesc = $cpuNode.GetAttribute('description') } catch { }
         $cpuOk = $false
         if ($cpuCode -eq '0') { $cpuOk = $true }
-        elseif ($cpuDesc -and $cpuDesc -match '(?i)réussite|success') { $cpuOk = $true }
+        elseif ($cpuDesc -and $cpuDesc -match '(?i)r�ussite|success') { $cpuOk = $true }
         $winsat.cpuStatus = if ($cpuOk) { 'ok' } else { 'nok' }
       }
     }
@@ -974,13 +851,13 @@ function Get-WinsatFromDataStore {
         try { $kind = $node.GetAttribute('kind') } catch { }
         $value = Convert-WinsatNumber $node.InnerText
         if (-not $kind) { continue }
-        if ($kind -match 'Sequential\s+Read|Séquentielles\s+Lire') {
+        if ($kind -match 'Sequential\s+Read|S�quentielles\s+Lire') {
           Update-MaxValue -Target $winsat.disk -Key 'seqReadMBps' -Value $value
-        } elseif ($kind -match 'Sequential\s+Write|Séquentielles\s+Ecriture|Séquentielles\s+Écriture') {
+        } elseif ($kind -match 'Sequential\s+Write|S�quentielles\s+Ecriture|S�quentielles\s+�criture') {
           Update-MaxValue -Target $winsat.disk -Key 'seqWriteMBps' -Value $value
-        } elseif ($kind -match 'Random\s+Read|Aléatoires\s+Lire') {
+        } elseif ($kind -match 'Random\s+Read|Al�atoires\s+Lire') {
           Update-MaxValue -Target $winsat.disk -Key 'randReadMBps' -Value $value
-        } elseif ($kind -match 'Random\s+Write|Aléatoires\s+Ecriture|Aléatoires\s+Écriture') {
+        } elseif ($kind -match 'Random\s+Write|Al�atoires\s+Ecriture|Al�atoires\s+�criture') {
           Update-MaxValue -Target $winsat.disk -Key 'randWriteMBps' -Value $value
         }
       }
@@ -1055,7 +932,7 @@ function Get-WinsatFromXmlFile {
       try { $cpuDesc = $cpuNode.GetAttribute('description') } catch { }
       $cpuOk = $false
       if ($cpuCode -eq '0') { $cpuOk = $true }
-      elseif ($cpuDesc -and $cpuDesc -match '(?i)réussite|success') { $cpuOk = $true }
+      elseif ($cpuDesc -and $cpuDesc -match '(?i)r�ussite|success') { $cpuOk = $true }
       $winsat.cpuStatus = if ($cpuOk) { 'ok' } else { 'nok' }
     }
   } catch { }
@@ -1091,13 +968,13 @@ function Get-WinsatFromXmlFile {
       try { $kind = $node.GetAttribute('kind') } catch { }
       $value = Convert-WinsatNumber $node.InnerText
       if (-not $kind) { continue }
-      if ($kind -match 'Sequential\s+Read|Séquentielles\s+Lire') {
+      if ($kind -match 'Sequential\s+Read|S�quentielles\s+Lire') {
         Update-MaxValue -Target $winsat.disk -Key 'seqReadMBps' -Value $value
-      } elseif ($kind -match 'Sequential\s+Write|Séquentielles\s+Ecriture|Séquentielles\s+Écriture') {
+      } elseif ($kind -match 'Sequential\s+Write|S�quentielles\s+Ecriture|S�quentielles\s+�criture') {
         Update-MaxValue -Target $winsat.disk -Key 'seqWriteMBps' -Value $value
-      } elseif ($kind -match 'Random\s+Read|Aléatoires\s+Lire') {
+      } elseif ($kind -match 'Random\s+Read|Al�atoires\s+Lire') {
         Update-MaxValue -Target $winsat.disk -Key 'randReadMBps' -Value $value
-      } elseif ($kind -match 'Random\s+Write|Aléatoires\s+Ecriture|Aléatoires\s+Écriture') {
+      } elseif ($kind -match 'Random\s+Write|Al�atoires\s+Ecriture|Al�atoires\s+�criture') {
         Update-MaxValue -Target $winsat.disk -Key 'randWriteMBps' -Value $value
       }
     }
@@ -1146,13 +1023,13 @@ function Get-WinsatDiskFromXml {
       try { $kind = $node.GetAttribute('kind') } catch { }
       $value = Convert-WinsatNumber $node.InnerText
       if (-not $kind) { continue }
-      if ($kind -match 'Sequential\s+Read|Séquentielles\s+Lire') {
+      if ($kind -match 'Sequential\s+Read|S�quentielles\s+Lire') {
         $disk['seqReadMBps'] = $value
-      } elseif ($kind -match 'Sequential\s+Write|Séquentielles\s+Ecriture|Séquentielles\s+Écriture') {
+      } elseif ($kind -match 'Sequential\s+Write|S�quentielles\s+Ecriture|S�quentielles\s+�criture') {
         $disk['seqWriteMBps'] = $value
-      } elseif ($kind -match 'Random\s+Read|Aléatoires\s+Lire') {
+      } elseif ($kind -match 'Random\s+Read|Al�atoires\s+Lire') {
         $disk['randReadMBps'] = $value
-      } elseif ($kind -match 'Random\s+Write|Aléatoires\s+Ecriture|Aléatoires\s+Écriture') {
+      } elseif ($kind -match 'Random\s+Write|Al�atoires\s+Ecriture|Al�atoires\s+�criture') {
         $disk['randWriteMBps'] = $value
       }
     }
@@ -1184,7 +1061,7 @@ function Get-WinsatCpuFallback {
       $desc = $null
       try { $code = $node.InnerText.Trim() } catch { }
       try { $desc = $node.GetAttribute('description') } catch { }
-      if ($code -eq '0' -or ($desc -and $desc -match '(?i)réussite|success')) {
+      if ($code -eq '0' -or ($desc -and $desc -match '(?i)r�ussite|success')) {
         $cpuStatus = 'ok'
       } else {
         $cpuStatus = 'nok'
@@ -1234,7 +1111,7 @@ function Get-WinsatCpuFallback {
       $desc = $null
       try { $code = $node.InnerText.Trim() } catch { }
       try { $desc = $node.GetAttribute('description') } catch { }
-      if ($code -eq '0' -or ($desc -and $desc -match '(?i)réussite|success')) {
+      if ($code -eq '0' -or ($desc -and $desc -match '(?i)r�ussite|success')) {
         $cpuStatus = 'ok'
       } else {
         $cpuStatus = 'nok'
@@ -1294,16 +1171,7 @@ function Resolve-KeyboardCapturePath {
   param([string]$Value)
 
   if ([string]::IsNullOrWhiteSpace($Value)) {
-    $candidates = @(
-      (Join-Path $PSScriptRoot 'keyboard_capture.ps1'),
-      (Join-Path (Split-Path $PSScriptRoot -Parent) 'keyboard_capture.ps1')
-    )
-    foreach ($candidate in $candidates) {
-      if ($candidate -and (Test-Path $candidate)) {
-        return $candidate
-      }
-    }
-    return $candidates[0]
+    return Join-Path $PSScriptRoot 'keyboard_capture.ps1'
   }
   if ([System.IO.Path]::IsPathRooted($Value)) {
     return $Value
@@ -1316,17 +1184,7 @@ function Resolve-CameraTestExe {
 
   $candidate = $Value
   if ([string]::IsNullOrWhiteSpace($candidate)) {
-    $candidates = @(
-      (Join-Path $PSScriptRoot 'camera.exe'),
-      (Join-Path (Split-Path $PSScriptRoot -Parent) 'camera.exe')
-    )
-    $candidate = $candidates[0]
-    foreach ($currentCandidate in $candidates) {
-      if ($currentCandidate -and (Test-Path $currentCandidate)) {
-        $candidate = $currentCandidate
-        break
-      }
-    }
+    $candidate = Join-Path $PSScriptRoot 'camera.exe'
   }
 
   if (-not [System.IO.Path]::IsPathRooted($candidate)) {
@@ -1807,7 +1665,7 @@ function Invoke-FactoryResetPrompt {
     } catch {
       try { Start-Process -FilePath 'explorer.exe' -ArgumentList 'ms-settings:recovery' | Out-Null } catch { }
     }
-    Send-ResetUiKeys -WindowTitle 'Paramètres' -DelaySec 20
+    Send-ResetUiKeys -WindowTitle 'Param�tres' -DelaySec 20
     return
   }
 
@@ -2202,20 +2060,9 @@ if (-not $SkipWinSatDataStore -and $winsatRoots.Count -gt 0) {
 }
 
 if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
-  $stressCandidates = @(
-    (Join-Path $PSScriptRoot 'mdt-stress-beta.ps1'),
-    (Join-Path $PSScriptRoot 'mdt-stress.ps1'),
-    (Join-Path (Split-Path $PSScriptRoot -Parent) 'mdt-stress.ps1')
-  )
-  $stressScriptPath = $stressCandidates[0]
-  foreach ($stressCandidate in $stressCandidates) {
-    if ($stressCandidate -and (Test-Path $stressCandidate)) {
-      $stressScriptPath = $stressCandidate
-      break
-    }
-  }
+  $stressScriptPath = Join-Path $PSScriptRoot 'mdt-stress.ps1'
   if (Test-Path $stressScriptPath) {
-    Write-Log "Delegating stress run to $(Split-Path $stressScriptPath -Leaf)"
+    Write-Log "Delegating stress run to mdt-stress.ps1"
     $delegateParams = @{
       ApiUrl = $ApiUrl
       Category = $Category
@@ -3928,7 +3775,7 @@ function Get-BiosLanguageStatus {
       $normalized -match 'fr[-_]?fr' -or
       $normalized -match 'french' -or
       $normalized -match 'francais' -or
-      $normalized -match 'français'
+      $normalized -match 'fran�ais'
     ) {
       $result.status = 'fr'
       $result.value = 'FR'
@@ -4197,7 +4044,7 @@ function Invoke-FsCheck {
 
   $output = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd())
   $outputLower = $output.ToLowerInvariant()
-  if ($outputLower -match 'access is denied|acc[eè]s refus[eé]|permission|administrateur|administrator|elevation') {
+  if ($outputLower -match 'access is denied|acc[e�]s refus[e�]|permission|administrateur|administrator|elevation') {
     return @{ status = 'denied'; output = $output }
   }
   if ($proc.ExitCode -eq 0) {
@@ -5486,3 +5333,4 @@ if ($artifactRunDir) {
 Step-Progress -Status 'Finalisation'
 Complete-Progress
 Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
+
