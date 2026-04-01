@@ -110,12 +110,14 @@ if (Test-Path $destinationControlPath) {
 Copy-Item -Path $sourceControlPath -Destination $destinationControlPath -Recurse -Force
 
 $destinationTsXmlPath = Join-Path $destinationControlPath 'TS.xml'
-$betaScriptPrefix = "\\\\$ShareServerName\\DeploymentShare$\\Scripts\\marl\\$BetaScriptsFolder\\"
-Replace-LiteralInFile -Path $destinationTsXmlPath -Search "\\$ShareServerName\DeploymentShare$\Scripts\marl\" -Replacement $betaScriptPrefix
-Replace-RegexInFile -Path $destinationTsXmlPath -Pattern 'mdt-report-[^"\\]+\.ps1' -Replacement 'mdt-report-beta.ps1'
-Replace-RegexInFile -Path $destinationTsXmlPath -Pattern 'mdt-desktop\.ps1' -Replacement 'mdt-desktop-beta.ps1'
-Replace-RegexInFile -Path $destinationTsXmlPath -Pattern 'mdt-laptop\.ps1' -Replacement 'mdt-laptop-beta.ps1'
-Replace-RegexInFile -Path $destinationTsXmlPath -Pattern 'mdt-stress\.ps1' -Replacement 'mdt-stress-beta.ps1'
+$marlScriptBase = "\\$ShareServerName\DeploymentShare$\Scripts\marl\"
+$betaScriptBase = "\\$ShareServerName\DeploymentShare$\Scripts\marl\$BetaScriptsFolder\"
+# Only redirect the scripts that actually exist in the beta folder.
+# All other steps (copy camera, etc.) keep their original prod path.
+Replace-RegexInFile -Path $destinationTsXmlPath -Pattern ([regex]::Escape($marlScriptBase) + 'mdt-report-[^"\\]+\.ps1') -Replacement ($betaScriptBase + 'mdt-report-beta.ps1')
+Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-desktop.ps1') -Replacement ($betaScriptBase + 'mdt-desktop-beta.ps1')
+Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-laptop.ps1')  -Replacement ($betaScriptBase + 'mdt-laptop-beta.ps1')
+Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-stress.ps1')  -Replacement ($betaScriptBase + 'mdt-stress-beta.ps1')
 
 [xml]$taskSequencesXml = Get-Content $taskSequencesPath
 [xml]$taskSequenceGroupsXml = Get-Content $taskSequenceGroupsPath
@@ -135,9 +137,7 @@ if (-not $destinationTaskSequenceNode) {
 
 [void]$destinationTaskSequenceNode.SetAttribute('guid', $newGuid)
 [void]$destinationTaskSequenceNode.SetAttribute('enable', 'True')
-if ($sourceTaskSequenceNode.hide) {
-  [void]$destinationTaskSequenceNode.SetAttribute('hide', [string]$sourceTaskSequenceNode.hide)
-}
+[void]$destinationTaskSequenceNode.SetAttribute('hide', 'False')
 
 $childValues = @{
   Name = $DestinationTaskSequenceName
