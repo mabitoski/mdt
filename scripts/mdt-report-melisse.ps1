@@ -2784,6 +2784,8 @@ function Get-BatteryInfo {
   $remainingWh = $null
   $chargePercent = $null
   $powerSource = $null
+  $batteryItem = $null
+  $infoStatus = $null
 
   foreach ($item in $static) {
     $design = $item.DesignedCapacity
@@ -2813,6 +2815,12 @@ function Get-BatteryInfo {
     elseif ($statusValue -eq 1) { $powerSource = 'battery' }
   }
 
+  if (-not $static -and -not $full -and -not $status) {
+    if ($batteryItem) { $infoStatus = 'not_tested' } else { $infoStatus = 'absent' }
+  } elseif (-not $static -or -not $full) {
+    $infoStatus = 'not_tested'
+  }
+
   return [ordered]@{
     designCapacityWh = $designWh
     fullChargeCapacityWh = $fullWh
@@ -2820,6 +2828,7 @@ function Get-BatteryInfo {
     estimatedRuntimeMin = $estimatedRuntimeMin
     chargePercent = $chargePercent
     powerSource = $powerSource
+    status = $infoStatus
   }
 }
 
@@ -4437,6 +4446,11 @@ $ramMb = Get-RamMb
 $slotsInfo = Get-RamSlots
 $batteryHealth = Get-BatteryHealth
 $batteryInfo = Get-BatteryInfo
+$batteryHealthSource = $null
+if ($batteryHealth -eq $null -and $batteryInfo -and $batteryInfo.chargePercent -ne $null) {
+  $batteryHealth = [int]$batteryInfo.chargePercent
+  $batteryHealthSource = 'estimated_charge'
+}
 $batteryInventory = Get-BatteryInventory
 $batteryReport = $null
 if ($artifactRunDir -and ($batteryInfo -or $batteryHealth -ne $null)) {
@@ -5024,6 +5038,9 @@ if ($ramMb) { $payload.ramMb = $ramMb }
 if ($slotsInfo.Total -ne $null) { $payload.ramSlotsTotal = $slotsInfo.Total }
 if ($slotsInfo.Free -ne $null) { $payload.ramSlotsFree = $slotsInfo.Free }
 if ($batteryHealth -ne $null) { $payload.batteryHealth = $batteryHealth }
+if ($batteryHealthSource) { $payload.batteryHealthSource = $batteryHealthSource }
+if ($batteryInfo -and $batteryInfo.chargePercent -ne $null) { $payload.batteryChargePercent = $batteryInfo.chargePercent }
+if ($batteryInfo -and $batteryInfo.status) { $payload.batteryStatus = $batteryInfo.status }
 if ($cameraStatus) { $payload.cameraStatus = $cameraStatus }
 if ($usbStatus) { $payload.usbStatus = $usbStatus }
 if ($keyboardStatus) { $payload.keyboardStatus = $keyboardStatus }
