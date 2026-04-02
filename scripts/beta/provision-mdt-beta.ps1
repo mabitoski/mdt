@@ -154,6 +154,8 @@ Replace-RegexInFile -Path $destinationTsXmlPath -Pattern ([regex]::Escape($marlS
 Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-desktop.ps1') -Replacement ($betaScriptBase + 'mdt-desktop-beta.ps1')
 Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-laptop.ps1')  -Replacement ($betaScriptBase + 'mdt-laptop-beta.ps1')
 Replace-LiteralInFile -Path $destinationTsXmlPath -Search ($marlScriptBase + 'mdt-stress.ps1')  -Replacement ($betaScriptBase + 'mdt-stress-beta.ps1')
+# Replace any existing hardcoded desktop report script call in the execute step.
+Replace-RegexInFile -Path $destinationTsXmlPath -Pattern 'mdt-report-[^"\\]+\.ps1' -Replacement 'mdt-report-beta.ps1'
 
 [xml]$destinationTsXml = Get-Content $destinationTsXmlPath
 Set-OrCreateVariableNode -SequenceXml $destinationTsXml -Name 'MMA_TECHNICIAN' -Value $TechnicianDisplayName
