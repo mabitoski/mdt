@@ -1,234 +1,525 @@
 # MDT Web
 
-Appli web + API d'ingestion pour afficher les informations remontees par MDT (MAC, serial, etat des composants, etc.).
+Plateforme de suivi atelier pour les postes traites via MDT.
 
-## Demarrage
+Le projet couvre :
+- l'ingestion des rapports materiels postes
+- l'interface web de pilotage atelier
+- l'authentification Microsoft Entra ID
+- la gestion des lots, palettes, alertes, PDF et audit
+- l'automatisation MDT "MDT-AUTO-*" via un agent Windows
+- les backups et la restauration de la production
+
+## Etat actuel
+
+Oui, le code de l'agent Windows est dans ce depot et dans GitHub.
+
+Fichiers principaux :
+- [scripts/beta/mma-mdt-agent.ps1](/home/linus/mdt-web/scripts/beta/mma-mdt-agent.ps1)
+- [scripts/beta/provision-mdt-beta.ps1](/home/linus/mdt-web/scripts/beta/provision-mdt-beta.ps1)
+- [scripts/beta/remove-mdt-beta.ps1](/home/linus/mdt-web/scripts/beta/remove-mdt-beta.ps1)
+- [scripts/beta/mma-mdt-agent.sample.json](/home/linus/mdt-web/scripts/beta/mma-mdt-agent.sample.json)
+- [scripts/beta/mdt-report-beta.ps1](/home/linus/mdt-web/scripts/beta/mdt-report-beta.ps1)
+
+Back-end principal :
+- [server.js](/home/linus/mdt-web/server.js)
+
+Admin web MDT auto :
+- [public/admin.html](/home/linus/mdt-web/public/admin.html)
+- [public/admin.js](/home/linus/mdt-web/public/admin.js)
+
+## Vue d'ensemble
+
+```mermaid
+flowchart LR
+    A[Poste atelier<br/>MDT / scripts PowerShell] -->|POST /api/ingest| B[MDT Web]
+    B --> C[(PostgreSQL)]
+    B --> D[PDF / ZIP exports]
+    B --> E[UI atelier]
+    B --> F[Audit log]
+    B --> G[Weekly recap mail]
+    B --> H[Object storage / Alcyone]
+    I[Microsoft Entra ID] -->|SSO OIDC| B
+    J[Admin MMA] -->|create / reprovision / delete MDT-AUTO-*| B
+    B -->|jobs MDT auto| K[Agent Windows MDT]
+    K --> L[Deployment Share MDT]
+```
+
+## Architecture technique
+
+### Composants
+
+| Composant | Role | Code |
+| --- | --- | --- |
+| `mdt-web` | API, UI, auth, PDF, audit, automation MDT | [server.js](/home/linus/mdt-web/server.js) |
+| `postgres` | base de donnees metier | Docker volume `mdt-db` |
+| `web-https` | reverse proxy HTTPS Caddy | [docker-compose.yml](/home/linus/mdt-web/docker-compose.yml) |
+| `grafana` | dashboards et supervision | [docker-compose.yml](/home/linus/mdt-web/docker-compose.yml) |
+| agent Windows MDT | execution des jobs `provision` / `delete` | [scripts/beta/mma-mdt-agent.ps1](/home/linus/mdt-web/scripts/beta/mma-mdt-agent.ps1) |
+
+### Topologie de production
+
+```mermaid
+flowchart TB
+    subgraph LAN Atelier
+      P1[Postes PXE / MDT]
+      P2[Techniciens]
+    end
+
+    subgraph Infra Web
+      W1[VM application<br/>10.1.10.27]
+      W2[Caddy 80/443]
+      W3[Node.js 3000]
+      W4[(PostgreSQL)]
+      W5[Grafana]
+    end
+
+    subgraph Infra MDT
+      M1[Serveur MDT / WDS<br/>10.1.130.5]
+      M2[DeploymentShare$]
+      M3[Agent Windows MDT]
+    end
+
+    subgraph Services externes
+      S1[Microsoft Entra ID]
+      S2[NAS NFS backup]
+      S3[Object storage]
+      S4[SMTP]
+    end
+
+    P1 --> M1
+    P2 --> W2
+    W2 --> W3
+    W3 --> W4
+    W3 --> W5
+    S1 --> W3
+    W3 --> S4
+    W3 --> S3
+    W3 --> M3
+    M3 --> M2
+    W1 --> S2
+```
+
+## Fonctionnalites principales
+
+- suivi temps reel des postes atelier
+- detail machine avec historique des passages
+- creation manuelle de rapports
+- gestion des lots et des palettes
+- import logistique CSV et export ZIP de PDF
+- alertes batterie faible et derive RTC / pile BIOS
+- recap hebdo pour les admins
+- journal d'audit
+- SSO Microsoft Entra ID avec RBAC par groupes
+- automatisation MDT pour creer/supprimer des TS `MDT-AUTO-*`
+
+## Flux fonctionnels
+
+### 1. Remontee MDT classique
+
+```mermaid
+sequenceDiagram
+    participant T as Technicien
+    participant P as Poste MDT
+    participant S as Script mdt-report*.ps1
+    participant A as MDT Web API
+    participant DB as PostgreSQL
+    participant UI as Interface web
+
+    T->>P: Lance une task sequence MDT
+    P->>S: Execute les scripts atelier
+    S->>S: Collecte hardware / tests / batterie / BIOS
+    S->>A: POST /api/ingest
+    A->>DB: Upsert report + machine + audit
+    UI->>A: Lecture /api/machines /api/reports
+    A->>UI: Etat atelier actualise
+```
+
+### 2. Creation d'un technicien MDT auto
+
+```mermaid
+sequenceDiagram
+    participant Admin as Admin MMA
+    participant UI as Admin web
+    participant API as MDT Web
+    participant DB as PostgreSQL
+    participant Agent as Agent Windows MDT
+    participant MDT as Deployment Share
+
+    Admin->>UI: Cree un technicien
+    UI->>API: POST /api/admin/mdt-beta/technicians
+    API->>DB: Insert technician + job provision
+    Agent->>API: Claim job
+    API->>Agent: Job provision
+    Agent->>MDT: Clone MDT-AUTO -> MDT-AUTO-NOM
+    Agent->>MDT: Injecte variables technicien
+    Agent->>API: Job complete
+    API->>DB: Statut ready
+    UI->>API: Refresh admin
+```
+
+### 3. Suppression d'un technicien MDT auto
+
+```mermaid
+sequenceDiagram
+    participant Admin as Admin MMA
+    participant UI as Admin web
+    participant API as MDT Web
+    participant DB as PostgreSQL
+    participant Agent as Agent Windows MDT
+    participant MDT as Deployment Share
+
+    Admin->>UI: Clique Supprimer le technicien
+    UI->>API: DELETE /api/admin/mdt-beta/technicians/:id
+    API->>DB: Insert job delete
+    Agent->>API: Claim job
+    API->>Agent: Job delete
+    Agent->>MDT: Backup XML + retrait TS + retrait dossier Control
+    Agent->>API: Job complete
+    API->>DB: Delete technician
+```
+
+### 4. Backups de production
+
+```mermaid
+flowchart LR
+    A[VM application] -->|pg_dump| B[NAS NFS]
+    A -->|archive config / scripts / certs| B
+    A -->|volumes Grafana / Caddy| B
+    C[script mdt-backup.sh] --> A
+    D[systemd timers] --> C
+```
+
+## Authentification et droits
+
+### Authentification
+
+Le mode cible est Microsoft Entra ID.
+
+Le code prend en charge :
+- SSO OIDC Microsoft
+- mapping des droits par groupes Entra
+- fallback admin local optionnel selon la configuration
+
+Variables principales :
+- `MICROSOFT_ENTRA_TENANT_ID`
+- `MICROSOFT_ENTRA_CLIENT_ID`
+- `MICROSOFT_ENTRA_CLIENT_SECRET`
+- `MICROSOFT_ENTRA_REDIRECT_URI`
+
+### RBAC
+
+L'application mappe des groupes Microsoft vers des niveaux d'acces :
+- `reader`
+- `operator`
+- `logistics`
+- `admin`
+- `platformAdmin`
+
+Variables :
+- `MICROSOFT_READER_GROUP_IDS`
+- `MICROSOFT_OPERATOR_GROUP_IDS`
+- `MICROSOFT_LOGISTICS_GROUP_IDS`
+- `MICROSOFT_ADMIN_GROUP_IDS`
+- `MICROSOFT_PLATFORM_ADMIN_GROUP_IDS`
+
+## Automatisation MDT-AUTO
+
+### Principe
+
+L'automatisation ne modifie pas les anciennes TS atelier historiques.
+
+Elle repose sur :
+- un template cache `MDT-AUTO`
+- un groupe cible `MMA Beta`
+- des TS generees `MDT-AUTO-<TECHNICIEN>`
+- un agent Windows qui fait les operations sur le serveur MDT
+
+### Convention
+
+- ID TS generee : `MDT-AUTO-NOM`
+- Nom visible TS : `MDT-AUTO-Nom`
+- groupe MDT : `MMA Beta`
+- dossier de scripts beta : `Scripts\\marl\\beta`
+
+### Variables technicien injectees
+
+Le script beta ne depend plus du nom de la TS.
+
+La TS injecte explicitement :
+- `MMA_TECHNICIAN`
+- `MDT_TECHNICIAN`
+
+Le script [scripts/beta/mdt-report-beta.ps1](/home/linus/mdt-web/scripts/beta/mdt-report-beta.ps1) lit ces variables en priorite.
+
+### Code de l'agent Windows
+
+Fichiers :
+- [scripts/beta/mma-mdt-agent.ps1](/home/linus/mdt-web/scripts/beta/mma-mdt-agent.ps1)
+- [scripts/beta/provision-mdt-beta.ps1](/home/linus/mdt-web/scripts/beta/provision-mdt-beta.ps1)
+- [scripts/beta/remove-mdt-beta.ps1](/home/linus/mdt-web/scripts/beta/remove-mdt-beta.ps1)
+- [scripts/beta/mma-mdt-agent.sample.json](/home/linus/mdt-web/scripts/beta/mma-mdt-agent.sample.json)
+
+Rendu en production sur le serveur MDT :
+- `C:\\ProgramData\\MMA\\MdtBetaAgent\\mma-mdt-agent.ps1`
+- `C:\\ProgramData\\MMA\\MdtBetaAgent\\provision-mdt-beta.ps1`
+- `C:\\ProgramData\\MMA\\MdtBetaAgent\\remove-mdt-beta.ps1`
+- `C:\\ProgramData\\MMA\\MdtBetaAgent\\mma-mdt-agent.json`
+
+### Cycle de vie d'un job agent
+
+- `queued`
+- `running`
+- `succeeded`
+- `failed`
+
+Types de jobs actuellement supportes :
+- `provision`
+- `delete`
+
+## Donnees metier
+
+Tables importantes :
+- `reports`
+- `machines`
+- `lots`
+- `lot_assignments`
+- `pallets`
+- `patchnotes`
+- `suggestions`
+- `audit_log`
+- `weekly_recap_runs`
+- `mdt_beta_technicians`
+- `mdt_beta_jobs`
+- `mdt_beta_agents`
+
+## Batterie / alertes / BIOS
+
+Le projet gere :
+- sante batterie
+- charge batterie
+- fallback `Win32_Battery.EstimatedChargeRemaining`
+- statut explicite `batteryStatus = not_tested` si WMI batterie est absent
+- alertes batterie faible
+- alertes derive RTC / pile BIOS suspecte
+
+Variables principales :
+- `BATTERY_ALERT_THRESHOLD`
+- `BIOS_CLOCK_DRIFT_ALERT_THRESHOLD_SECONDS`
+- `BIOS_CLOCK_DELTA_ALERT_THRESHOLD_SECONDS`
+
+## Weekly recap admin
+
+Le recap hebdo s'appuie sur l'audit et les donnees de production.
+
+Variables principales :
+- `WEEKLY_RECAP_ENABLED`
+- `WEEKLY_RECAP_RECIPIENTS`
+- `WEEKLY_RECAP_FROM`
+- `WEEKLY_RECAP_DAY`
+- `WEEKLY_RECAP_HOUR`
+- `WEEKLY_RECAP_MINUTE`
+- `WEEKLY_RECAP_TIMEZONE`
+- `WEEKLY_RECAP_BATTERY_THRESHOLD`
+
+## Object storage
+
+Le projet sait publier des artefacts bruts sur un stockage objet compatible S3 / MinIO.
+
+Variables principales :
+- `OBJECT_STORAGE_ENDPOINT`
+- `OBJECT_STORAGE_BUCKET`
+- `OBJECT_STORAGE_ACCESS_KEY`
+- `OBJECT_STORAGE_SECRET_KEY`
+- `OBJECT_STORAGE_PREFIX`
+- `OBJECT_STORAGE_CONSOLE_URL`
+- `OBJECT_STORAGE_BROWSER_PATH`
+- `OBJECT_STORAGE_RENAME_ON_TAG`
+
+## Lancement local
+
+### Node simple
 
 ```bash
 npm install
 npm start
 ```
 
-L'UI est disponible sur `http://localhost:3000`.
-
-Prerequis : PostgreSQL (definis `DATABASE_URL` ou les variables `PG*`).
-
-## Docker
-
-Le plus simple est d'utiliser Docker Compose (PostgreSQL inclus) :
+### Docker Compose
 
 ```bash
 docker compose up -d
 ```
 
-Ou en mode `docker run` si tu as deja un PostgreSQL accessible :
+Services exposes localement :
+- app : `http://localhost:3000`
+- postgres : `localhost:5432`
+- grafana : `http://localhost:3002`
+
+## Variables d'environnement importantes
+
+### Web / session
+
+- `PORT`
+- `DATABASE_URL`
+- `SESSION_SECRET`
+- `SESSION_NAME`
+- `COOKIE_SECURE`
+- `TRUST_PROXY`
+- `FORCE_HTTPS`
+- `HTTPS_PUBLIC_ORIGIN`
+
+### SSO Microsoft
+
+- `MICROSOFT_ENTRA_TENANT_ID`
+- `MICROSOFT_ENTRA_CLIENT_ID`
+- `MICROSOFT_ENTRA_CLIENT_SECRET`
+- `MICROSOFT_ENTRA_REDIRECT_URI`
+
+### RBAC Microsoft
+
+- `MICROSOFT_READER_GROUP_IDS`
+- `MICROSOFT_OPERATOR_GROUP_IDS`
+- `MICROSOFT_LOGISTICS_GROUP_IDS`
+- `MICROSOFT_ADMIN_GROUP_IDS`
+- `MICROSOFT_PLATFORM_ADMIN_GROUP_IDS`
+
+### MDT auto
+
+- `MDT_BETA_AGENT_TOKEN`
+- `MDT_BETA_DEFAULT_SOURCE_TASK_SEQUENCE_ID`
+- `MDT_BETA_GROUP_NAME`
+- `MDT_BETA_SCRIPTS_FOLDER`
+- `MDT_BETA_JOB_RUNNING_TIMEOUT_MS`
+
+### Weekly recap
+
+- `WEEKLY_RECAP_ENABLED`
+- `WEEKLY_RECAP_RECIPIENTS`
+- `WEEKLY_RECAP_TIMEZONE`
+
+### Alertes
+
+- `BATTERY_ALERT_THRESHOLD`
+- `BIOS_CLOCK_DRIFT_ALERT_THRESHOLD_SECONDS`
+- `BIOS_CLOCK_DELTA_ALERT_THRESHOLD_SECONDS`
+
+## Structure du depot
+
+```text
+.
+├── server.js
+├── docker-compose.yml
+├── public/
+│   ├── index.html
+│   ├── app.js
+│   ├── admin.html
+│   └── admin.js
+├── scripts/
+│   ├── mdt-report-*.ps1
+│   └── beta/
+│       ├── mma-mdt-agent.ps1
+│       ├── provision-mdt-beta.ps1
+│       ├── remove-mdt-beta.ps1
+│       └── mdt-report-beta.ps1
+├── caddy/
+├── certs/
+└── grafana/
+```
+
+## Exploitation
+
+### VM application
+
+Deploiement actuel :
+- repertoire : `/etc/mdt-fusion/main`
+- service principal : `mdt-web`
+- reverse proxy : `web-https`
+
+Commandes utiles :
 
 ```bash
-docker build -t mdt-web .
-docker run -d --name mdt-web -p 3000:3000 \
-  -e DATABASE_URL=postgres://mdt:mdt@localhost:5432/mdt \
-  -e SESSION_SECRET=change-me \
-  -e COOKIE_SECURE=0 \
-  mdt-web
+cd /etc/mdt-fusion/main
+sudo docker compose ps
+curl http://127.0.0.1:3000/api/health
+curl -k https://127.0.0.1/api/health
+sudo docker logs --tail 100 mdt-mdt-web-1
 ```
 
-## API
+### Serveur MDT Windows
 
-### POST `/api/ingest`
+Points utiles :
+- share MDT : `W:\\DeploymentShare`
+- share reseau : `\\\\CAPR-MDT-01\\DeploymentShare$`
+- share WDS : `W:\\RemoteInstall`
+- agent : `C:\\ProgramData\\MMA\\MdtBetaAgent`
 
-Endpoint public (sans authentification) pour recevoir les donnees MDT.
+## Backups et restauration
 
-Pour les mises a jour partielles (ex: statut clavier), envoyer `payloadMode: "skip"` afin de ne pas ecraser le payload complet.
+La production dispose d'un systeme de backup vers un partage NFS NAS.
 
-Exemple :
+Principes :
+- dump PostgreSQL
+- archive config / code / scripts / certs
+- sauvegarde des volumes utiles
+- rotation journaliere / hebdo / mensuelle
 
-```bash
-curl -X POST http://localhost:3000/api/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "hostname": "PC-001",
-    "macAddress": "AA:BB:CC:DD:EE:FF",
-    "macAddresses": ["AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"],
-    "serialNumber": "ABC123",
-    "category": "laptop",
-    "vendor": "Dell",
-    "technician": "Remi",
-    "model": "Latitude 5420",
-    "osVersion": "Windows 11",
-    "ramGb": 16,
-    "ramSlotsTotal": 2,
-    "ramSlotsFree": 1,
-    "batteryHealth": 87,
-    "cameraStatus": "ok",
-    "usbStatus": "ok",
-    "keyboardStatus": "ok",
-    "padStatus": "ok",
-    "badgeReaderStatus": "absent",
-    "components": {
-      "disk": "ok",
-      "ram": "ok",
-      "battery": "good"
-    }
-  }'
-```
+Scripts de la VM application :
+- `/usr/local/sbin/mdt-backup.sh`
+- `/usr/local/sbin/mdt-restore.sh`
 
-Champs acceptes (tous optionnels sauf identifiant) :
-- `hostname`, `macAddress`, `serialNumber` (au moins un requis)
-- `macAddresses` : liste de MAC (toutes interfaces)
-- `category` : `laptop`, `desktop` (ou `portable`, `tour`, etc.)
-- `vendor`, `model`, `osVersion`
-- `technician` : prenom/identifiant du technicien
-- `ramMb` / `ramGb`, `ramSlotsTotal`, `ramSlotsFree`
-- `batteryHealth` (0-100)
-- `cameraStatus`, `usbStatus`, `keyboardStatus`, `padStatus`, `badgeReaderStatus` (`ok`, `nok`, `absent`)
-- `components` : objet cle/valeur (etat des composants)
+Montage NFS :
+- `/mnt/mdt-backup`
 
-Ces champs peuvent aussi etre envoyes dans un objet `components` ou `hardware` si c'est plus simple pour les scripts MDT.
+## Depannage rapide
 
-Reponse :
+### PXE charge mais le wizard bloque sur la liste des TS
 
-```json
-{ "ok": true, "id": 1, "machineKey": "sn:ABC123" }
-```
+Verifier :
+- `W:\\DeploymentShare\\Control\\TaskSequences.xml`
+- `W:\\DeploymentShare\\Control\\TaskSequenceGroups.xml`
+- les libelles TS anormalement longs ou corrompus
+- les services WDS sur le serveur MDT
 
-### GET `/api/machines`
+### Un technicien reste en attente dans l'admin
 
-Liste des machines (dernier passage MDT).
+Verifier :
+- heartbeat agent dans l'admin
+- log `C:\\ProgramData\\MMA\\MdtBetaAgent\\logs\\agent.log`
+- job queue `mdt_beta_jobs`
 
-### GET `/api/machines/:id`
+### Une TS MDT-AUTO n'apparait pas
 
-Detail d'une machine (composants + payload complet).
+Verifier :
+- `hide="False"` dans `TaskSequences.xml`
+- groupe `MMA Beta`
+- presence du dossier `Control\\MDT-AUTO-*`
 
-## Donnees
+### La remontee batterie est vide
 
-Les donnees sont stockees en PostgreSQL.
+Verifier :
+- classes WMI batterie
+- fallback `Win32_Battery`
+- payload JSON du rapport
 
-## Variables d'environnement
+### Le script MDT echoue sur `execute report script`
 
-- `PORT` : port HTTP (defaut `3000`)
-- `DATABASE_URL` : URL PostgreSQL complete (ex: `postgres://user:pass@host:5432/mdt`)
-- `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD` : alternative a `DATABASE_URL`
-- `PGSSLMODE` / `PGSSL` : activer TLS pour PostgreSQL
-- `PGSSL_REJECT_UNAUTHORIZED=0` : accepte un certificat TLS non valide
-- `JSON_LIMIT` : taille max d'un payload JSON (defaut `256kb`)
-- `INGEST_RATE_LIMIT` : requetes/minute par IP (defaut `180`)
-- `TRUST_PROXY` : `1` si l'app est derriere un reverse proxy
-- `SESSION_SECRET` : secret des sessions (defaut auto, a fixer en prod)
-- `SESSION_NAME` : nom du cookie de session (defaut `mdt.sid`)
-- `COOKIE_SECURE` : `1` pour forcer le cookie secure (HTTPS uniquement)
+Verifier :
+- `smsts.log`
+- presence du script sur le desktop
+- chemin du script dans `TS.xml`
 
-## Authentification
+## Notes importantes
 
-L'UI et les endpoints de lecture sont proteges par session. L'endpoint d'ingestion reste ouvert.
+- Le README de fevrier n'etait plus representatif de la prod.
+- L'automatisation MDT auto est bien versionnee dans GitHub.
+- Les modifications de prod ne doivent pas etre faites a la main dans `TaskSequences.xml` sans backup.
+- Le template cache `MDT-AUTO` doit rester reserve a l'automatisation.
 
-Compte local par defaut :
-- `admin` / `admin` (changeable via `LOCAL_ADMIN_USER` et `LOCAL_ADMIN_PASSWORD`)
-- `ALLOW_LOCAL_ADMIN=0` pour desactiver le compte local
+## Fichiers de reference
 
-LDAP (optionnel) :
-- `LDAP_URL` : ex `ldap://ad.local:389`
-- `LDAP_BIND_DN` et `LDAP_BIND_PASSWORD` : optionnels si bind anonyme
-- `LDAP_SEARCH_BASE` : ex `DC=ad,DC=local`
-- `LDAP_SEARCH_FILTER` : defaut `(sAMAccountName={{username}})`
-- `LDAP_SEARCH_ATTRIBUTES` : defaut `dn,cn,mail`
-- `LDAP_TLS_REJECT_UNAUTHORIZED=0` pour accepter un certificat non valide
-
-Administration (UI) :
-- Connecte-toi avec le compte local admin puis utilise le bouton "Config LDAP" (page `/admin`).
-- La configuration enregistree via l'UI est stockee en base (table `ldap_settings`) et prend le pas sur les variables d'environnement.
-
-## Notes securite
-
-L'endpoint d'ingestion est volontairement ouvert. Pour un usage en production :
-- place l'app derriere un VPN ou une IP allowlist,
-- ajuste `INGEST_RATE_LIMIT` selon ton volume MDT,
-- surveille l'espace disque si tu stockes beaucoup de payloads.
-
-## Scripts PowerShell (MDT)
-
-Les scripts sont dans `scripts/` :
-- `mdt-report.ps1` : detection auto de la categorie + tests materiel
-- `mdt-laptop.ps1` : force la categorie `laptop`
-- `mdt-desktop.ps1` : force la categorie `desktop`
-- `mdt-stress.ps1` : lance les tests en mode `stress` (boucles WinSAT)
-- `keyboard_capture.ps1` : outil graphique pour valider le clavier (Windows)
-- `camera_capture.py` : script camera (OpenCV) a compiler en exe
-- `build_camera_capture.ps1` : build `camera_capture.exe` via PyInstaller
-- `setup_py2exe.py` : config py2exe (Windows)
-- `build_camera_capture_pyexe.ps1` : build `camera_capture.exe` via py2exe
-
-Exemples :
-
-```powershell
-.\scripts\mdt-report.ps1 -ApiUrl "http://serveur-mdt:3000/api/ingest"
-.\scripts\mdt-laptop.ps1 -ApiUrl "http://serveur-mdt:3000/api/ingest" -TestMode quick
-.\scripts\mdt-desktop.ps1 -ApiUrl "http://serveur-mdt:3000/api/ingest" -TestMode stress
-.\scripts\mdt-stress.ps1 -ApiUrl "http://serveur-mdt:3000/api/ingest" -Category laptop
-```
-
-Options utiles :
-- `-SkipTlsValidation` : accepte un certificat TLS invalide
-- `-TimeoutSec 15` : timeout HTTP
-- `-TestMode` : `none`, `quick`, `stress` (par defaut `quick`)
-- `-DiskTestTimeoutSec` / `-MemTestTimeoutSec` : timeout des tests WinSAT
-- `-CpuTestTimeoutSec` / `-GpuTestTimeoutSec` : timeout WinSAT CPU/GPU
-- `-DxDiagTimeoutSec` : timeout dxdiag pour l'evaluation GPU
-- `-StressLoops` : nombre de boucles en mode `stress`
-- `-FsCheckMode` : `auto` (stress uniquement), `scan`, `none`
-- `-FsCheckTimeoutSec` : timeout du `chkdsk /scan`
-- `-MemDiagMode` : `none` ou `schedule` (planifie `mdsched`)
-- `-CameraTestPath` : chemin du binaire de test camera `.exe` (exit code 0 = ok)
-- `-CameraTestTimeoutSec` : timeout du test camera (defaut `20`)
-- `-CameraTestArguments` : arguments du test camera (ou `MDT_CAMERA_TEST_ARGS`)
-- `-CpuTestPath` / `-GpuTestPath` : binaire externe de stress CPU/GPU (optionnel)
-- `-CpuTestArguments` / `-GpuTestArguments` : arguments des binaires externes
-- `-NetworkTestPath` : binaire `iperf3` (optionnel)
-- `-NetworkTestServer` / `-NetworkTestPort` : serveur iperf
-- `-NetworkTestSeconds` / `-NetworkTestTimeoutSec` : duree/timeout iperf
-- `-NetworkTestDirection` : `download`, `upload`, `both`
-- `-NetworkTestExtraArgs` : arguments supplementaires iperf
-- `-NetworkPingTarget` / `-NetworkPingCount` : ping rapide (par defaut gateway)
-- `-MsinfoTimeoutSec` : timeout de msinfo32 si fallback MAC (defaut `0`, desactive par defaut)
-- `-MacPreference` : `auto`, `ethernet`, `wifi`, `any` (defaut `auto`)
-- `-LogPath` : chemin du fichier de log (defaut `scripts/mdt-report.log`)
-- `-Technician` : nom/prenom du technicien (ou env `MDT_TECHNICIAN`, sinon `Rémi`)
-- `-SkipKeyboardCapture` : ne lance pas `keyboard_capture.ps1` sur les laptops
-- `-SkipGpuAssessment` : desactive l'evaluation GPU (ou `MDT_SKIP_GPU_ASSESSMENT=1`)
-- `-KeyboardCapturePath` / `-KeyboardCaptureLogPath` / `-KeyboardCaptureConfigDir` : options du script clavier
-- `-KeyboardCaptureLayout` / `-KeyboardCaptureLayoutConfig` / `-KeyboardCaptureBlockInput` : layout et blocage des touches
-- `-SkipElevation` : n'essaie pas d'elever en admin si le script est lance en utilisateur
-
-Artefacts bruts (alcyone) :
-- `MDT_ARTIFACT_ROOT` : dossier local de staging (defaut `%TEMP%\\mdt-fusion\\artifacts`)
-- `MDT_OBJECT_STORAGE_ENDPOINT` / `MDT_OBJECT_STORAGE_BUCKET` / `MDT_OBJECT_STORAGE_ACCESS_KEY` / `MDT_OBJECT_STORAGE_SECRET_KEY` / `MDT_OBJECT_STORAGE_PREFIX` : cible MinIO
-- `MDT_OBJECT_STORAGE_MC_PATH` : chemin vers `mc.exe` (sinon telechargement auto)
-- `MDT_SKIP_RAW_UPLOAD=1` : desactive l'upload
-
-Par defaut, la config pointe vers Alcyone; override possible via les variables ci-dessus.
-
-Le script copie les logs, le payload JSON, les artefacts camera/clavier, DxDiag, l'evaluation GPU et les fichiers WinSAT vers le dossier de staging, puis effectue un mirror vers Alcyone.
-
-Notes clavier :
-- `mdt-report.ps1` lance `keyboard_capture.ps1` a la fin si la categorie est `laptop`.
-
-Notes tests :
-- Les tests utilisent WMI/CIM, DxDiag et WinSAT (disponible en OS complet).
-- En WinPE, certains tests peuvent renvoyer `absent`.
-
-## Camera (exe)
-
-Compiler le script Python en exe (sur Windows, avec Python + OpenCV) :
-
-```powershell
-.\scripts\build_camera_capture.ps1
-```
-
-Cela produit `scripts\camera_capture.exe` utilise automatiquement par `mdt-report.ps1` si `-CameraTestPath` n'est pas fourni.
-
-Note : le workflow MDT n'effectue aucun build, il execute uniquement le `.exe` fourni.
-
-Alternative py2exe (Windows uniquement) :
-
-```powershell
-.\scripts\build_camera_capture_pyexe.ps1
-```
+- application : [server.js](/home/linus/mdt-web/server.js)
+- admin MDT : [public/admin.js](/home/linus/mdt-web/public/admin.js)
+- agent Windows : [scripts/beta/mma-mdt-agent.ps1](/home/linus/mdt-web/scripts/beta/mma-mdt-agent.ps1)
+- provision MDT : [scripts/beta/provision-mdt-beta.ps1](/home/linus/mdt-web/scripts/beta/provision-mdt-beta.ps1)
+- suppression MDT : [scripts/beta/remove-mdt-beta.ps1](/home/linus/mdt-web/scripts/beta/remove-mdt-beta.ps1)
