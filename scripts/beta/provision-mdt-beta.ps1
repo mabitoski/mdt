@@ -3,8 +3,8 @@ param(
   [string]$DeploymentShareRoot = 'W:\DeploymentShare',
   [string]$ShareServerName = 'CAPR-MDT-01',
   [string]$SourceTaskSequenceId = 'MDT-MELISSE',
-  [string]$DestinationTaskSequenceId = 'MDT-BETA-MELISSE',
-  [string]$DestinationTaskSequenceName = 'MDT-Beta-Melisse',
+  [string]$DestinationTaskSequenceId = 'MDT-AUTO-MELISSE',
+  [string]$DestinationTaskSequenceName = 'MDT-AUTO-Melisse',
   [string]$TaskSequenceGroupName = 'MMA Beta',
   [string]$TechnicianDisplayName = 'Beta',
   [string]$BetaScriptsFolder = 'beta'

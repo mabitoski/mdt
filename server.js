@@ -3593,11 +3593,11 @@ function normalizeMdtTaskSequenceId(value) {
 }
 
 function buildMdtBetaTaskSequenceId(slug) {
-  return normalizeMdtTaskSequenceId(`MDT-BETA-${String(slug || '').toUpperCase()}`);
+  return normalizeMdtTaskSequenceId(`MDT-AUTO-${String(slug || '').toUpperCase()}`);
 }
 
 function buildMdtBetaTaskSequenceName(displayName) {
-  return cleanString(`MDT-Beta-${String(displayName || '').trim()}`, 128) || 'MDT-Beta';
+  return cleanString(`MDT-AUTO-${String(displayName || '').trim()}`, 128) || 'MDT-AUTO';
 }
 
 function getSessionActorName(req) {
