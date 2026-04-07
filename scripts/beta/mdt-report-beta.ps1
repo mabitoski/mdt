@@ -88,39 +88,6 @@ function Get-TsEnvironmentValue {
   }
 }
 
-function Convert-TechnicianTokenToLabel {
-  param([string]$Value)
-
-  $token = [string]$Value
-  if ([string]::IsNullOrWhiteSpace($token)) {
-    return $null
-  }
-
-  $token = $token.Trim()
-  $token = $token -replace '^(MDT-BETA-|MDT-|BETA-)', ''
-  $token = $token -replace '^MDT-Beta-', ''
-  $token = $token -replace '[-_]+', ' '
-  $token = ($token -replace '\s+', ' ').Trim()
-  if (-not $token) {
-    return $null
-  }
-
-  $parts = foreach ($part in ($token -split ' ')) {
-    if (-not $part) { continue }
-    if ($part.Length -eq 1) {
-      $part.ToUpperInvariant()
-    } else {
-      $part.Substring(0,1).ToUpperInvariant() + $part.Substring(1).ToLowerInvariant()
-    }
-  }
-
-  $label = ($parts -join ' ').Trim()
-  if ([string]::IsNullOrWhiteSpace($label)) {
-    return $null
-  }
-  return $label
-}
-
 function Resolve-TechnicianValue {
   param([string]$PreferredValue)
 
@@ -128,11 +95,8 @@ function Resolve-TechnicianValue {
     $PreferredValue,
     (Get-TsEnvironmentValue 'MMA_TECHNICIAN'),
     (Get-TsEnvironmentValue 'MDT_TECHNICIAN'),
-    (Get-TsEnvironmentValue 'Technician'),
     $env:MMA_TECHNICIAN,
-    $env:MDT_TECHNICIAN,
-    (Convert-TechnicianTokenToLabel (Get-TsEnvironmentValue 'TaskSequenceID')),
-    (Convert-TechnicianTokenToLabel (Get-TsEnvironmentValue 'TaskSequenceName'))
+    $env:MDT_TECHNICIAN
   )
 
   foreach ($candidate in $candidates) {
@@ -147,7 +111,7 @@ function Resolve-TechnicianValue {
     return $normalized
   }
 
-  return 'Beta'
+  return 'unknown'
 }
 
 if (-not $ApiUrl) {
@@ -184,6 +148,9 @@ try {
 }
 
 $Technician = Resolve-TechnicianValue -PreferredValue $Technician
+if ($Technician -eq 'unknown') {
+  Write-Log 'Technician not provided via MDT variables; using "unknown".' 'WARN'
+}
 if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
   $SkipRawUpload = $true
 }
