@@ -1749,7 +1749,7 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS mdt_beta_jobs (
       id UUID PRIMARY KEY,
       technician_id UUID NOT NULL REFERENCES mdt_beta_technicians(id) ON DELETE CASCADE,
-      job_type TEXT NOT NULL DEFAULT 'provision' CHECK (job_type IN ('provision')),
+      job_type TEXT NOT NULL DEFAULT 'provision' CHECK (job_type IN ('provision', 'delete')),
       status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
       payload JSONB NOT NULL DEFAULT '{}'::jsonb,
       result JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -1763,6 +1763,13 @@ async function initDb() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await pool.query('ALTER TABLE mdt_beta_jobs DROP CONSTRAINT IF EXISTS mdt_beta_jobs_job_type_check');
+  await pool.query(`
+    ALTER TABLE mdt_beta_jobs
+    ADD CONSTRAINT mdt_beta_jobs_job_type_check
+    CHECK (job_type IN ('provision', 'delete'))
   `);
 
   await pool.query(`
@@ -11590,6 +11597,98 @@ app.post('/api/admin/mdt-beta/technicians/:id/reprovision', requireAuth, require
   }
 });
 
+app.delete('/api/admin/mdt-beta/technicians/:id', requireAuth, requireAdmin, async (req, res) => {
+  if (!MDT_BETA_AUTOMATION_ENABLED) {
+    return res.status(503).json({ ok: false, error: 'automation_disabled' });
+  }
+
+  const technicianId = normalizeUuid(req.params.id);
+  if (!technicianId) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const requestedBy = getSessionActorName(req);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const techResult = await client.query(
+      `
+        SELECT *
+        FROM mdt_beta_technicians
+        WHERE id = $1
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [technicianId]
+    );
+    const techRow = techResult.rows && techResult.rows[0] ? techResult.rows[0] : null;
+    if (!techRow) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    const runningJob = await client.query(
+      `
+        SELECT id
+        FROM mdt_beta_jobs
+        WHERE technician_id = $1 AND status = 'running'
+        LIMIT 1
+      `,
+      [technicianId]
+    );
+    if (runningJob.rows && runningJob.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, error: 'job_running' });
+    }
+
+    const jobId = generateUuid();
+    const payload = buildMdtBetaJobPayload({
+      id: techRow.id,
+      displayName: techRow.display_name,
+      slug: techRow.slug,
+      sourceTaskSequenceId: techRow.source_task_sequence_id,
+      betaTaskSequenceId: techRow.beta_task_sequence_id,
+      betaTaskSequenceName: techRow.beta_task_sequence_name,
+      taskSequenceGroupName: techRow.task_sequence_group_name,
+      scriptsFolder: techRow.scripts_folder
+    });
+    await client.query(
+      `
+        INSERT INTO mdt_beta_jobs (
+          id,
+          technician_id,
+          job_type,
+          status,
+          payload,
+          requested_by,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, 'delete', 'queued', $3::jsonb, $4, NOW(), NOW())
+      `,
+      [jobId, technicianId, JSON.stringify(payload), requestedBy]
+    );
+    await client.query(
+      `
+        UPDATE mdt_beta_technicians
+        SET status = 'queued', updated_at = NOW(), last_job_id = $2, last_error = NULL
+        WHERE id = $1
+      `,
+      [technicianId, jobId]
+    );
+    await client.query('COMMIT');
+    const automation = await buildMdtBetaAdminPayload();
+    return res.json({ ok: true, automation });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to queue MDT beta delete', error);
+    return res.status(500).json({ ok: false, error: 'delete_failed' });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/mdt-beta-agent/heartbeat', async (req, res) => {
   const identity = isAuthorizedMdtBetaAgent(req);
   if (!identity) {
@@ -11745,7 +11844,7 @@ app.post('/api/mdt-beta-agent/jobs/:id/complete', async (req, res) => {
     await setAuditContext(client, buildMdtBetaAgentAuditContext(req, identity.agentId, { source: 'POST /api/mdt-beta-agent/jobs/complete' }));
     const jobResult = await client.query(
       `
-        SELECT id, technician_id
+        SELECT id, technician_id, job_type
         FROM mdt_beta_jobs
         WHERE id = $1 AND status = 'running' AND (agent_id = $2 OR agent_id IS NULL)
         LIMIT 1
@@ -11773,19 +11872,29 @@ app.post('/api/mdt-beta-agent/jobs/:id/complete', async (req, res) => {
       `,
       [jobId, JSON.stringify(resultPayload), identity.agentId]
     );
-    await client.query(
-      `
-        UPDATE mdt_beta_technicians
-        SET
-          status = 'ready',
-          updated_at = NOW(),
-          last_error = NULL,
-          last_job_id = $2,
-          last_result = $3::jsonb
-        WHERE id = $1
-      `,
-      [jobRow.technician_id, jobId, JSON.stringify(resultPayload)]
-    );
+    if (jobRow.job_type === 'delete') {
+      await client.query(
+        `
+          DELETE FROM mdt_beta_technicians
+          WHERE id = $1
+        `,
+        [jobRow.technician_id]
+      );
+    } else {
+      await client.query(
+        `
+          UPDATE mdt_beta_technicians
+          SET
+            status = 'ready',
+            updated_at = NOW(),
+            last_error = NULL,
+            last_job_id = $2,
+            last_result = $3::jsonb
+          WHERE id = $1
+        `,
+        [jobRow.technician_id, jobId, JSON.stringify(resultPayload)]
+      );
+    }
     await upsertMdtBetaAgentState(client, {
       agentId: identity.agentId,
       hostname: cleanString(req.body?.hostname, 128),

@@ -993,6 +993,15 @@ function renderMdtBetaTechnicians(automation) {
             <button type="button" class="admin-secondary" data-action="reprovision-tech" data-tech-id="${escapeHtml(item.id || '')}">
               Rejouer le provisioning
             </button>
+            <button
+              type="button"
+              class="admin-secondary"
+              data-action="delete-tech"
+              data-tech-id="${escapeHtml(item.id || '')}"
+              data-tech-name="${escapeHtml(item.displayName || item.slug || 'Technicien')}"
+            >
+              Supprimer le technicien
+            </button>
           </div>
         </article>
       `;
@@ -1150,6 +1159,41 @@ async function reprovisionMdtBetaTechnician(technicianId) {
   }
 }
 
+async function deleteMdtBetaTechnician(technicianId, technicianName) {
+  if (!technicianId) {
+    return;
+  }
+  const label = technicianName || 'ce technicien';
+  if (!window.confirm(`Supprimer ${label} et la task sequence MDT associee ?`)) {
+    return;
+  }
+  setMdtBetaFeedback('info', 'Suppression du technicien beta en cours...');
+  setMdtBetaDisabled(true);
+  try {
+    const response = await fetch(`/api/admin/mdt-beta/technicians/${encodeURIComponent(technicianId)}`, {
+      method: 'DELETE'
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.location.href = '/';
+      return;
+    }
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || 'mdt_beta_delete_failed');
+    }
+    renderMdtBetaAutomation(data.automation || null);
+    setMdtBetaFeedback('success', 'Technicien beta supprime et retrait MDT lance.');
+  } catch (error) {
+    setMdtBetaFeedback('error', 'Suppression beta impossible.');
+  } finally {
+    setMdtBetaDisabled(false);
+  }
+}
+
 if (mdtBetaReloadBtn) {
   mdtBetaReloadBtn.addEventListener('click', () => {
     loadMdtBetaAutomation();
@@ -1162,11 +1206,15 @@ if (mdtBetaTechForm) {
 
 if (mdtBetaTechListEl) {
   mdtBetaTechListEl.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-action="reprovision-tech"]');
-    if (!button || !button.dataset.techId) {
+    const reprovisionButton = event.target.closest('[data-action="reprovision-tech"]');
+    if (reprovisionButton && reprovisionButton.dataset.techId) {
+      reprovisionMdtBetaTechnician(reprovisionButton.dataset.techId);
       return;
     }
-    reprovisionMdtBetaTechnician(button.dataset.techId);
+    const deleteButton = event.target.closest('[data-action="delete-tech"]');
+    if (deleteButton && deleteButton.dataset.techId) {
+      deleteMdtBetaTechnician(deleteButton.dataset.techId, deleteButton.dataset.techName);
+    }
   });
 }
 

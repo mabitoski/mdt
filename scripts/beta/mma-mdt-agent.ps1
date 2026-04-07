@@ -63,6 +63,9 @@ function Get-AgentConfig {
   if (-not $config.provisionScriptPath) {
     $config | Add-Member -NotePropertyName provisionScriptPath -NotePropertyValue (Join-Path $PSScriptRoot 'provision-mdt-beta.ps1')
   }
+  if (-not $config.deleteScriptPath) {
+    $config | Add-Member -NotePropertyName deleteScriptPath -NotePropertyValue (Join-Path $PSScriptRoot 'remove-mdt-beta.ps1')
+  }
   if (-not $config.taskSequenceGroupName) {
     $config | Add-Member -NotePropertyName taskSequenceGroupName -NotePropertyValue 'MMA Beta'
   }
@@ -222,6 +225,50 @@ function Invoke-ProvisionJob {
   }
 }
 
+function Invoke-DeleteJob {
+  param(
+    $Config,
+    $Job
+  )
+
+  $payload = $Job.payload
+  if (-not $payload) {
+    throw 'Missing job payload'
+  }
+  if (-not (Test-Path $Config.deleteScriptPath)) {
+    throw "Delete script not found: $($Config.deleteScriptPath)"
+  }
+
+  $params = @{
+    DeploymentShareRoot = [string]$Config.deploymentShareRoot
+    DestinationTaskSequenceId = [string]$payload.destinationTaskSequenceId
+    DestinationTaskSequenceName = [string]$payload.destinationTaskSequenceName
+    TaskSequenceGroupName = [string]$payload.taskSequenceGroupName
+    TechnicianDisplayName = [string]$payload.displayName
+  }
+
+  $result = & $Config.deleteScriptPath @params
+  if ($result -is [System.Array]) {
+    $result = $result | Select-Object -Last 1
+  }
+  if (-not $result) {
+    throw 'Delete script did not return a result'
+  }
+
+  return @{
+    destinationTaskSequenceId = [string]$result.DestinationTaskSequenceId
+    destinationTaskSequenceName = [string]$result.DestinationTaskSequenceName
+    technicianDisplayName = [string]$result.TechnicianDisplayName
+    taskSequenceGroupName = [string]$result.TaskSequenceGroupName
+    deploymentShareRoot = [string]$result.DeploymentShareRoot
+    controlPath = [string]$result.ControlPath
+    taskSequencesPath = [string]$result.TaskSequencesPath
+    taskSequenceGroupsPath = [string]$result.TaskSequenceGroupsPath
+    backupPath = [string]$result.BackupPath
+    removed = [bool]$result.Removed
+  }
+}
+
 $config = Get-AgentConfig
 Enable-InsecureTlsIfNeeded -IgnoreTlsErrors ([bool]$config.ignoreTlsErrors)
 Write-AgentLog -Level 'INFO' -Message "Agent start ($($config.agentId))"
@@ -236,7 +283,19 @@ while ($true) {
       Write-AgentLog -Level 'INFO' -Message "Claimed job $jobId ($jobType)"
       try {
         Send-AgentHeartbeat -Config $config -Status 'running' -LastJobId $jobId
-        $result = Invoke-ProvisionJob -Config $config -Job $claim.job
+        switch ($jobType) {
+          'provision' {
+            $result = Invoke-ProvisionJob -Config $config -Job $claim.job
+            break
+          }
+          'delete' {
+            $result = Invoke-DeleteJob -Config $config -Job $claim.job
+            break
+          }
+          default {
+            throw "Unsupported MDT beta job type: $jobType"
+          }
+        }
         Complete-AgentJob -Config $config -JobId $jobId -Result $result
         Send-AgentHeartbeat -Config $config -Status 'idle' -LastJobId $jobId
         Write-AgentLog -Level 'INFO' -Message "Job $jobId completed"

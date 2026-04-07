@@ -8,6 +8,7 @@
   "taskSequenceGroupName": "MMA Beta",
   "scriptsFolder": "beta",
   "provisionScriptPath": "C:\\ProgramData\\MMA\\MdtBetaAgent\\provision-mdt-beta.ps1",
+  "deleteScriptPath": "C:\\ProgramData\\MMA\\MdtBetaAgent\\remove-mdt-beta.ps1",
   "loopDelaySeconds": 15,
   "ignoreTlsErrors": false
 }
