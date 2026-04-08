@@ -52,7 +52,13 @@ param(
   [string]$ObjectStorageSecretKey = $env:MDT_OBJECT_STORAGE_SECRET_KEY,
   [string]$ObjectStoragePrefix = $env:MDT_OBJECT_STORAGE_PREFIX,
   [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
-  [switch]$SkipRawUpload
+  [switch]$SkipRawUpload,
+  [switch]$FactoryReset,
+  [string]$FactoryResetConfirm,
+  [switch]$SkipFactoryResetPrompt,
+  [string]$OutboxRoot = $env:MDT_OUTBOX_ROOT,
+  [switch]$QueueOnUploadFailure,
+  [string]$PayloadOutputPath
 )
 
 $scriptPath = Join-Path $PSScriptRoot 'mdt-report.ps1'
@@ -110,8 +116,14 @@ $params = @{
   ObjectStorageSecretKey = $ObjectStorageSecretKey
   ObjectStoragePrefix = $ObjectStoragePrefix
   ObjectStorageMcPath = $ObjectStorageMcPath
+  OutboxRoot = $OutboxRoot
 }
 if ($SkipTlsValidation) { $params.SkipTlsValidation = $true }
 if ($SkipRawUpload) { $params.SkipRawUpload = $true }
+if ($QueueOnUploadFailure) { $params.QueueOnUploadFailure = $true }
+if ($FactoryReset) { $params.FactoryReset = $true }
+if ($FactoryResetConfirm) { $params.FactoryResetConfirm = $FactoryResetConfirm }
+if ($SkipFactoryResetPrompt) { $params.SkipFactoryResetPrompt = $true }
+if ($PayloadOutputPath) { $params.PayloadOutputPath = $PayloadOutputPath }
 
 & $scriptPath @params

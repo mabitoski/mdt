@@ -147,6 +147,16 @@ try {
 } catch {
 }
 
+$script:IsTaskSequenceContext = $false
+try {
+  if ($env:_SMSTSLogPath -or $env:_SMSTSCurrentActionName -or $env:_SMSTSLaunchMode -or $env:_SMSTSPackageName -or $env:_SMSTSAdvertID) {
+    $script:IsTaskSequenceContext = $true
+  }
+} catch {
+  $script:IsTaskSequenceContext = $false
+}
+$script:AllowCommentCaptureInTaskSequence = ($env:MDT_ENABLE_COMMENT_CAPTURE_IN_TS -eq '1')
+
 $Technician = Resolve-TechnicianValue -PreferredValue $Technician
 if ($Technician -eq 'unknown') {
   Write-Log 'Technician not provided via MDT variables; using "unknown".' 'WARN'
@@ -483,6 +493,10 @@ function Start-TestCommentCapture {
   if (-not $RunDir) { return $false }
   if (-not $ApiUrl) { return $false }
   if (-not $ReportId) { return $false }
+  if ($script:IsTaskSequenceContext -and -not $script:AllowCommentCaptureInTaskSequence) {
+    Write-Log 'Comment capture skipped in task sequence context.' 'INFO'
+    return $false
+  }
 
   $testsPath = Join-Path $RunDir 'tests-nok.json'
   $scriptPath = Join-Path $RunDir 'mdt-comment-capture.ps1'
@@ -2834,6 +2848,8 @@ function Get-BatteryInfo {
   $remainingWh = $null
   $chargePercent = $null
   $powerSource = $null
+  $batteryItem = $null
+  $infoStatus = $null
 
   foreach ($item in $static) {
     $design = $item.DesignedCapacity
@@ -2863,6 +2879,12 @@ function Get-BatteryInfo {
     elseif ($statusValue -eq 1) { $powerSource = 'battery' }
   }
 
+  if (-not $static -and -not $full -and -not $status) {
+    if ($batteryItem) { $infoStatus = 'not_tested' } else { $infoStatus = 'absent' }
+  } elseif (-not $static -or -not $full) {
+    $infoStatus = 'not_tested'
+  }
+
   return [ordered]@{
     designCapacityWh = $designWh
     fullChargeCapacityWh = $fullWh
@@ -2870,6 +2892,7 @@ function Get-BatteryInfo {
     estimatedRuntimeMin = $estimatedRuntimeMin
     chargePercent = $chargePercent
     powerSource = $powerSource
+    status = $infoStatus
   }
 }
 
@@ -2918,6 +2941,112 @@ function Invoke-BatteryReport {
   }
 
   return $result
+}
+
+function Convert-BatteryMetricValue {
+  param(
+    [string]$Value
+  )
+
+  if (-not $Value) { return $null }
+  $text = ($Value -replace '[^0-9,\.]', '').Trim()
+  if (-not $text) { return $null }
+  $text = $text -replace ',', ''
+  $parsed = 0.0
+  if ([double]::TryParse($text, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+    return [double]$parsed
+  }
+  return $null
+}
+
+function Normalize-BatteryReportText {
+  param(
+    [string]$Text
+  )
+
+  if (-not $Text) { return '' }
+  $decomposed = $Text.Normalize([Text.NormalizationForm]::FormD)
+  $builder = New-Object System.Text.StringBuilder
+  foreach ($char in $decomposed.ToCharArray()) {
+    if ([Globalization.CharUnicodeInfo]::GetUnicodeCategory($char) -ne [Globalization.UnicodeCategory]::NonSpacingMark) {
+      [void]$builder.Append($char)
+    }
+  }
+  return ($builder.ToString().Normalize([Text.NormalizationForm]::FormC).ToLowerInvariant() -replace '\s+', ' ').Trim()
+}
+
+function Find-BatteryReportMetric {
+  param(
+    [string]$Text,
+    [string[]]$Labels
+  )
+
+  if (-not $Text -or -not $Labels) { return $null }
+  foreach ($label in $Labels) {
+    if (-not $label) { continue }
+    $escaped = [regex]::Escape((Normalize-BatteryReportText -Text $label))
+    $match = [regex]::Match($Text, "$escaped\s*[:\-]?\s*([0-9][0-9\s\.,]*)\s*mwh", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+      return Convert-BatteryMetricValue -Value $match.Groups[1].Value
+    }
+  }
+  return $null
+}
+
+function Parse-BatteryReport {
+  param(
+    [string]$ReportPath
+  )
+
+  if (-not $ReportPath -or -not (Test-Path -Path $ReportPath)) {
+    return $null
+  }
+
+  $content = $null
+  try {
+    $content = Get-Content -Path $ReportPath -Raw -ErrorAction Stop
+  } catch {
+    Write-Log "Battery report parsing failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+
+  if (-not $content) {
+    return $null
+  }
+
+  $plain = $content `
+    -replace '(?is)<script.*?</script>', ' ' `
+    -replace '(?is)<style.*?</style>', ' ' `
+    -replace '&nbsp;|&#160;', ' ' `
+    -replace '<[^>]+>', ' ' `
+    -replace '\s+', ' '
+  $normalized = Normalize-BatteryReportText -Text $plain
+  if (-not $normalized) {
+    return $null
+  }
+
+  $designMwh = Find-BatteryReportMetric -Text $normalized -Labels @('design capacity', 'capacite de conception')
+  $fullMwh = Find-BatteryReportMetric -Text $normalized -Labels @('full charge capacity', 'capacite de charge complete')
+
+  if ($designMwh -eq $null -and $fullMwh -eq $null) {
+    return $null
+  }
+
+  $designWh = if ($designMwh -ne $null) { [math]::Round($designMwh / 1000, 1) } else { $null }
+  $fullWh = if ($fullMwh -ne $null) { [math]::Round($fullMwh / 1000, 1) } else { $null }
+  $healthPercent = $null
+  if ($designMwh -and $fullMwh -and $designMwh -gt 0 -and $fullMwh -gt 0) {
+    $healthPercent = [math]::Round(($fullMwh / $designMwh) * 100)
+    if ($healthPercent -gt 100) { $healthPercent = 100 }
+    if ($healthPercent -lt 0) { $healthPercent = 0 }
+  }
+
+  return [ordered]@{
+    designCapacityWh = $designWh
+    fullChargeCapacityWh = $fullWh
+    healthPercent = if ($healthPercent -ne $null) { [int]$healthPercent } else { $null }
+    source = 'battery_report'
+  }
 }
 
 function Get-DiskSmartStatus {
@@ -4487,10 +4616,38 @@ $ramMb = Get-RamMb
 $slotsInfo = Get-RamSlots
 $batteryHealth = Get-BatteryHealth
 $batteryInfo = Get-BatteryInfo
+$batteryHealthSource = $null
+if ($batteryHealth -eq $null -and $batteryInfo -and $batteryInfo.chargePercent -ne $null) {
+  $batteryHealth = [int]$batteryInfo.chargePercent
+  $batteryHealthSource = 'estimated_charge'
+}
 $batteryInventory = Get-BatteryInventory
 $batteryReport = $null
-if ($artifactRunDir -and ($batteryInfo -or $batteryHealth -ne $null)) {
-  $batteryReport = Invoke-BatteryReport -OutputDir (Join-Path $artifactRunDir 'Battery')
+$batteryReportData = $null
+if ($categoryValue -eq 'laptop' -or $batteryHealth -eq $null -or ($batteryInfo -and $batteryInfo.status -eq 'not_tested')) {
+  $batteryReportOutputDir = if ($artifactRunDir) { Join-Path $artifactRunDir 'Battery' } else { $null }
+  $batteryReport = Invoke-BatteryReport -OutputDir $batteryReportOutputDir
+  if ($batteryReport -and $batteryReport.reportPath) {
+    $batteryReportData = Parse-BatteryReport -ReportPath $batteryReport.reportPath
+  }
+}
+if ($batteryReportData) {
+  if ($batteryInfo.designCapacityWh -eq $null -and $batteryReportData.designCapacityWh -ne $null) {
+    $batteryInfo.designCapacityWh = $batteryReportData.designCapacityWh
+  }
+  if ($batteryInfo.fullChargeCapacityWh -eq $null -and $batteryReportData.fullChargeCapacityWh -ne $null) {
+    $batteryInfo.fullChargeCapacityWh = $batteryReportData.fullChargeCapacityWh
+  }
+  if (($batteryInfo.status -eq $null -or $batteryInfo.status -eq 'not_tested') -and ($batteryInfo.designCapacityWh -ne $null -or $batteryInfo.fullChargeCapacityWh -ne $null)) {
+    $batteryInfo.status = 'ok'
+  }
+  if (($batteryHealth -eq $null -or $batteryHealthSource -eq 'estimated_charge') -and $batteryReportData.healthPercent -ne $null) {
+    $batteryHealth = $batteryReportData.healthPercent
+    $batteryHealthSource = 'battery_report'
+  }
+}
+if ($batteryHealth -eq $null -and $batteryInfo -and $batteryInfo.status -eq $null) {
+  $batteryInfo.status = 'not_tested'
 }
 Step-Progress -Status 'Inventaire materiel'
 
@@ -5074,6 +5231,9 @@ if ($ramMb) { $payload.ramMb = $ramMb }
 if ($slotsInfo.Total -ne $null) { $payload.ramSlotsTotal = $slotsInfo.Total }
 if ($slotsInfo.Free -ne $null) { $payload.ramSlotsFree = $slotsInfo.Free }
 if ($batteryHealth -ne $null) { $payload.batteryHealth = $batteryHealth }
+if ($batteryHealthSource) { $payload.batteryHealthSource = $batteryHealthSource }
+if ($batteryInfo -and $batteryInfo.chargePercent -ne $null) { $payload.batteryChargePercent = $batteryInfo.chargePercent }
+if ($batteryInfo -and $batteryInfo.status) { $payload.batteryStatus = $batteryInfo.status }
 if ($cameraStatus) { $payload.cameraStatus = $cameraStatus }
 if ($usbStatus) { $payload.usbStatus = $usbStatus }
 if ($keyboardStatus) { $payload.keyboardStatus = $keyboardStatus }

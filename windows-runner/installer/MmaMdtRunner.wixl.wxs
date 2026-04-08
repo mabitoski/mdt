@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="MMA MDT Runner"
+    Language="1036"
+    Version="$(var.Version)"
+    Manufacturer="MMA Automation"
+    UpgradeCode="A2CBF0C3-C0D4-49CA-8D80-7AEF30A34A5D">
+
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perMachine"
+      Description="Relance des checks MDT avec file offline locale et reset optionnel." />
+
+    <MajorUpgrade DowngradeErrorMessage="Une version plus recente de MMA MDT Runner est deja installee." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="CompanyFolder" Name="MMA Automation">
+          <Directory Id="INSTALLFOLDER" Name="MdtRunner">
+            <Directory Id="INSTALLSCRIPTS" Name="scripts" />
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id="CommonDesktopFolder" />
+    </Directory>
+
+    <Feature Id="MainFeature" Title="MMA MDT Runner" Level="1">
+      <ComponentGroupRef Id="RunnerFiles" />
+      <ComponentRef Id="RunnerDesktopShortcut" />
+    </Feature>
+  </Product>
+
+  <Fragment>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="RunnerMainPs1" Guid="*">
+        <File Id="RunnerMainPs1File" Source="$(var.PayloadRoot)/MmaMdtRunner.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerCommonPs1" Guid="*">
+        <File Id="RunnerCommonPs1File" Source="$(var.PayloadRoot)/MmaMdtRunner.Common.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerConfigJson" Guid="*">
+        <File Id="RunnerConfigJsonFile" Source="$(var.PayloadRoot)/config.json" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerConfigSampleJson" Guid="*">
+        <File Id="RunnerConfigSampleJsonFile" Source="$(var.PayloadRoot)/config.sample.json" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerTechniciansJson" Guid="*">
+        <File Id="RunnerTechniciansJsonFile" Source="$(var.PayloadRoot)/technicians.json" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerSyncTaskPs1" Guid="*">
+        <File Id="RunnerSyncTaskPs1File" Source="$(var.PayloadRoot)/Register-MmaMdtRunnerSyncTask.ps1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="INSTALLSCRIPTS">
+      <Component Id="RunnerReportPs1" Guid="*">
+        <File Id="RunnerReportPs1File" Source="$(var.PayloadRoot)/scripts/mdt-report.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerLaptopPs1" Guid="*">
+        <File Id="RunnerLaptopPs1File" Source="$(var.PayloadRoot)/scripts/mdt-laptop.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerDesktopPs1" Guid="*">
+        <File Id="RunnerDesktopPs1File" Source="$(var.PayloadRoot)/scripts/mdt-desktop.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerStressPs1" Guid="*">
+        <File Id="RunnerStressPs1File" Source="$(var.PayloadRoot)/scripts/mdt-stress.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerOutboxSyncPs1" Guid="*">
+        <File Id="RunnerOutboxSyncPs1File" Source="$(var.PayloadRoot)/scripts/mdt-outbox-sync.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerKeyboardCapturePs1" Guid="*">
+        <File Id="RunnerKeyboardCapturePs1File" Source="$(var.PayloadRoot)/scripts/keyboard_capture.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="RunnerCameraExe" Guid="*">
+        <File Id="RunnerCameraExeFile" Source="$(var.PayloadRoot)/scripts/camera.exe" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+
+  <Fragment>
+    <DirectoryRef Id="CommonDesktopFolder">
+      <Component Id="RunnerDesktopShortcut" Guid="*">
+        <Shortcut
+          Id="RunnerDesktopShortcutLink"
+          Name="Relancer diagnostic MDT"
+          Description="Relance locale des checks atelier MDT"
+          Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
+          Arguments="-NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]MmaMdtRunner.ps1&quot;"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKLM" Key="Software\MMA Automation\MdtRunner" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="RunnerFiles">
+      <ComponentRef Id="RunnerMainPs1" />
+      <ComponentRef Id="RunnerCommonPs1" />
+      <ComponentRef Id="RunnerConfigJson" />
+      <ComponentRef Id="RunnerConfigSampleJson" />
+      <ComponentRef Id="RunnerTechniciansJson" />
+      <ComponentRef Id="RunnerSyncTaskPs1" />
+      <ComponentRef Id="RunnerReportPs1" />
+      <ComponentRef Id="RunnerLaptopPs1" />
+      <ComponentRef Id="RunnerDesktopPs1" />
+      <ComponentRef Id="RunnerStressPs1" />
+      <ComponentRef Id="RunnerOutboxSyncPs1" />
+      <ComponentRef Id="RunnerKeyboardCapturePs1" />
+      <ComponentRef Id="RunnerCameraExe" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

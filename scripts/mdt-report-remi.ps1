@@ -61,7 +61,10 @@ param(
   [string]$ReportTagId = $env:MDT_REPORT_TAG_ID,
   [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
   [switch]$SkipRawUpload,
-  [switch]$FailTaskSequenceOnError
+  [switch]$FailTaskSequenceOnError,
+  [string]$OutboxRoot = $env:MDT_OUTBOX_ROOT,
+  [switch]$QueueOnUploadFailure,
+  [string]$PayloadOutputPath
 )
 
 $scriptVersion = '1.7.8'
@@ -100,12 +103,25 @@ try {
 } catch {
 }
 
-if (-not $Technician) { $Technician = 'Rémi' }
+$script:IsTaskSequenceContext = $false
+try {
+  if ($env:_SMSTSLogPath -or $env:_SMSTSCurrentActionName -or $env:_SMSTSLaunchMode -or $env:_SMSTSPackageName -or $env:_SMSTSAdvertID) {
+    $script:IsTaskSequenceContext = $true
+  }
+} catch {
+  $script:IsTaskSequenceContext = $false
+}
+$script:AllowCommentCaptureInTaskSequence = ($env:MDT_ENABLE_COMMENT_CAPTURE_IN_TS -eq '1')
+
+if (-not $Technician) { $Technician = 'Remi' }
 if (-not $PSBoundParameters.ContainsKey('SkipRawUpload') -and $env:MDT_SKIP_RAW_UPLOAD -eq '1') {
   $SkipRawUpload = $true
 }
 if (-not $PSBoundParameters.ContainsKey('FailTaskSequenceOnError') -and $env:MDT_FAIL_TS_ON_REPORT_ERROR -eq '1') {
   $FailTaskSequenceOnError = $true
+}
+if (-not $PSBoundParameters.ContainsKey('QueueOnUploadFailure') -and $env:MDT_QUEUE_ON_UPLOAD_FAILURE -eq '1') {
+  $QueueOnUploadFailure = $true
 }
 if (-not $PSBoundParameters.ContainsKey('SkipGpuAssessment') -and $env:MDT_SKIP_GPU_ASSESSMENT -eq '1') {
   $SkipGpuAssessment = $true
@@ -433,6 +449,10 @@ function Start-TestCommentCapture {
   if (-not $RunDir) { return $false }
   if (-not $ApiUrl) { return $false }
   if (-not $ReportId) { return $false }
+  if ($script:IsTaskSequenceContext -and -not $script:AllowCommentCaptureInTaskSequence) {
+    Write-Log 'Comment capture skipped in task sequence context.' 'INFO'
+    return $false
+  }
 
   $testsPath = Join-Path $RunDir 'tests-nok.json'
   $scriptPath = Join-Path $RunDir 'mdt-comment-capture.ps1'
@@ -1377,6 +1397,84 @@ function Invoke-JsonPost {
   return Invoke-RestMethod -Uri $Url -Method Post -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec $TimeoutSec
 }
 
+function Resolve-OutboxRoot {
+  param([string]$Value)
+
+  $root = $Value
+  if (-not $root) {
+    if ($env:ProgramData) {
+      $root = Join-Path $env:ProgramData 'MMA\MdtRunner\Outbox'
+    } elseif ($env:TEMP) {
+      $root = Join-Path $env:TEMP 'MMA\MdtRunner\Outbox'
+    } else {
+      $root = Join-Path $PSScriptRoot 'outbox'
+    }
+  }
+
+  try {
+    $expanded = [Environment]::ExpandEnvironmentVariables($root)
+  } catch {
+    $expanded = $root
+  }
+  return Ensure-Directory -Path $expanded
+}
+
+function Save-OutboxEntry {
+  param(
+    [string]$Root,
+    [string]$PayloadJson,
+    [hashtable]$PayloadObject,
+    [string]$ApiUrl,
+    [string]$ReportId,
+    [string]$Reason,
+    [string]$ErrorMessage,
+    [string]$RunDir,
+    [string]$LogPath
+  )
+
+  if (-not $Root -or -not $PayloadJson) { return $null }
+
+  $pendingDir = Ensure-Directory -Path (Join-Path $Root 'pending')
+  if (-not $pendingDir) { return $null }
+
+  $entryName = if ($ReportId) { $ReportId } else { [guid]::NewGuid().ToString('D') }
+  $entryDir = Join-Path $pendingDir $entryName
+  if (Test-Path -Path $entryDir) {
+    $entryDir = Join-Path $pendingDir ("{0}-{1}" -f $entryName, (Get-Date).ToString('yyyyMMddHHmmss'))
+  }
+
+  Ensure-Directory -Path $entryDir | Out-Null
+  $payloadPath = Join-Path $entryDir 'payload.json'
+  try {
+    $PayloadJson | Out-File -FilePath $payloadPath -Encoding UTF8 -Force
+  } catch {
+    Write-Log "Outbox payload write failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+
+  if ($RunDir -and (Test-Path -Path $RunDir)) {
+    Copy-DirContents -SourceDir $RunDir -DestinationDir (Join-Path $entryDir 'artifacts') | Out-Null
+  } elseif ($LogPath -and (Test-Path -Path $LogPath)) {
+    Copy-FileSafe -Source $LogPath -Destination (Join-Path $entryDir 'mdt-report.log') | Out-Null
+  }
+
+  $meta = [ordered]@{
+    reportId = $ReportId
+    queuedAt = (Get-Date).ToUniversalTime().ToString('o')
+    apiUrl = $ApiUrl
+    reason = $Reason
+    lastError = $ErrorMessage
+    attempts = 0
+    hostname = if ($PayloadObject) { $PayloadObject.hostname } else { $null }
+    serialNumber = if ($PayloadObject) { $PayloadObject.serialNumber } else { $null }
+    technician = if ($PayloadObject) { $PayloadObject.technician } else { $null }
+    category = if ($PayloadObject) { $PayloadObject.category } else { $null }
+    status = 'pending'
+  }
+  Write-JsonFile -Path (Join-Path $entryDir 'meta.json') -Object $meta | Out-Null
+  return $entryDir
+}
+
 function Resolve-McPath {
   param([string]$Value)
 
@@ -2104,15 +2202,20 @@ if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
       ObjectStorageSecretKey = $ObjectStorageSecretKey
       ObjectStoragePrefix = $ObjectStoragePrefix
       ObjectStorageMcPath = $ObjectStorageMcPath
+      OutboxRoot = $OutboxRoot
     }
     if ($SkipTlsValidation) { $delegateParams.SkipTlsValidation = $true }
     if ($SkipWinSatDataStore) { $delegateParams.SkipWinSatDataStore = $true }
     if ($SkipGpuAssessment) { $delegateParams.SkipGpuAssessment = $true }
     if ($SkipRawUpload) { $delegateParams.SkipRawUpload = $true }
-  & $stressScriptPath @delegateParams
-  Complete-Progress
-  Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
-  exit $LASTEXITCODE
+    if ($QueueOnUploadFailure) { $delegateParams.QueueOnUploadFailure = $true }
+    if ($PayloadOutputPath) { $delegateParams.PayloadOutputPath = $PayloadOutputPath }
+    if ($FactoryReset) { $delegateParams.FactoryReset = $true }
+    if ($FactoryResetConfirm) { $delegateParams.FactoryResetConfirm = $FactoryResetConfirm }
+    if ($SkipFactoryResetPrompt) { $delegateParams.SkipFactoryResetPrompt = $true }
+    & $stressScriptPath @delegateParams
+    Complete-Progress
+    exit $LASTEXITCODE
   } else {
     Write-Log "Stress script not found: $stressScriptPath" 'WARN'
   }
@@ -2877,6 +2980,112 @@ function Invoke-BatteryReport {
   }
 
   return $result
+}
+
+function Convert-BatteryMetricValue {
+  param(
+    [string]$Value
+  )
+
+  if (-not $Value) { return $null }
+  $text = ($Value -replace '[^0-9,\.]', '').Trim()
+  if (-not $text) { return $null }
+  $text = $text -replace ',', ''
+  $parsed = 0.0
+  if ([double]::TryParse($text, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+    return [double]$parsed
+  }
+  return $null
+}
+
+function Normalize-BatteryReportText {
+  param(
+    [string]$Text
+  )
+
+  if (-not $Text) { return '' }
+  $decomposed = $Text.Normalize([Text.NormalizationForm]::FormD)
+  $builder = New-Object System.Text.StringBuilder
+  foreach ($char in $decomposed.ToCharArray()) {
+    if ([Globalization.CharUnicodeInfo]::GetUnicodeCategory($char) -ne [Globalization.UnicodeCategory]::NonSpacingMark) {
+      [void]$builder.Append($char)
+    }
+  }
+  return ($builder.ToString().Normalize([Text.NormalizationForm]::FormC).ToLowerInvariant() -replace '\s+', ' ').Trim()
+}
+
+function Find-BatteryReportMetric {
+  param(
+    [string]$Text,
+    [string[]]$Labels
+  )
+
+  if (-not $Text -or -not $Labels) { return $null }
+  foreach ($label in $Labels) {
+    if (-not $label) { continue }
+    $escaped = [regex]::Escape((Normalize-BatteryReportText -Text $label))
+    $match = [regex]::Match($Text, "$escaped\s*[:\-]?\s*([0-9][0-9\s\.,]*)\s*mwh", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+      return Convert-BatteryMetricValue -Value $match.Groups[1].Value
+    }
+  }
+  return $null
+}
+
+function Parse-BatteryReport {
+  param(
+    [string]$ReportPath
+  )
+
+  if (-not $ReportPath -or -not (Test-Path -Path $ReportPath)) {
+    return $null
+  }
+
+  $content = $null
+  try {
+    $content = Get-Content -Path $ReportPath -Raw -ErrorAction Stop
+  } catch {
+    Write-Log "Battery report parsing failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+
+  if (-not $content) {
+    return $null
+  }
+
+  $plain = $content `
+    -replace '(?is)<script.*?</script>', ' ' `
+    -replace '(?is)<style.*?</style>', ' ' `
+    -replace '&nbsp;|&#160;', ' ' `
+    -replace '<[^>]+>', ' ' `
+    -replace '\s+', ' '
+  $normalized = Normalize-BatteryReportText -Text $plain
+  if (-not $normalized) {
+    return $null
+  }
+
+  $designMwh = Find-BatteryReportMetric -Text $normalized -Labels @('design capacity', 'capacite de conception')
+  $fullMwh = Find-BatteryReportMetric -Text $normalized -Labels @('full charge capacity', 'capacite de charge complete')
+
+  if ($designMwh -eq $null -and $fullMwh -eq $null) {
+    return $null
+  }
+
+  $designWh = if ($designMwh -ne $null) { [math]::Round($designMwh / 1000, 1) } else { $null }
+  $fullWh = if ($fullMwh -ne $null) { [math]::Round($fullMwh / 1000, 1) } else { $null }
+  $healthPercent = $null
+  if ($designMwh -and $fullMwh -and $designMwh -gt 0 -and $fullMwh -gt 0) {
+    $healthPercent = [math]::Round(($fullMwh / $designMwh) * 100)
+    if ($healthPercent -gt 100) { $healthPercent = 100 }
+    if ($healthPercent -lt 0) { $healthPercent = 0 }
+  }
+
+  return [ordered]@{
+    designCapacityWh = $designWh
+    fullChargeCapacityWh = $fullWh
+    healthPercent = if ($healthPercent -ne $null) { [int]$healthPercent } else { $null }
+    source = 'battery_report'
+  }
 }
 
 function Get-DiskSmartStatus {
@@ -4453,8 +4662,31 @@ if ($batteryHealth -eq $null -and $batteryInfo -and $batteryInfo.chargePercent -
 }
 $batteryInventory = Get-BatteryInventory
 $batteryReport = $null
-if ($artifactRunDir -and ($batteryInfo -or $batteryHealth -ne $null)) {
-  $batteryReport = Invoke-BatteryReport -OutputDir (Join-Path $artifactRunDir 'Battery')
+$batteryReportData = $null
+if ($categoryValue -eq 'laptop' -or $batteryHealth -eq $null -or ($batteryInfo -and $batteryInfo.status -eq 'not_tested')) {
+  $batteryReportOutputDir = if ($artifactRunDir) { Join-Path $artifactRunDir 'Battery' } else { $null }
+  $batteryReport = Invoke-BatteryReport -OutputDir $batteryReportOutputDir
+  if ($batteryReport -and $batteryReport.reportPath) {
+    $batteryReportData = Parse-BatteryReport -ReportPath $batteryReport.reportPath
+  }
+}
+if ($batteryReportData) {
+  if ($batteryInfo.designCapacityWh -eq $null -and $batteryReportData.designCapacityWh -ne $null) {
+    $batteryInfo.designCapacityWh = $batteryReportData.designCapacityWh
+  }
+  if ($batteryInfo.fullChargeCapacityWh -eq $null -and $batteryReportData.fullChargeCapacityWh -ne $null) {
+    $batteryInfo.fullChargeCapacityWh = $batteryReportData.fullChargeCapacityWh
+  }
+  if (($batteryInfo.status -eq $null -or $batteryInfo.status -eq 'not_tested') -and ($batteryInfo.designCapacityWh -ne $null -or $batteryInfo.fullChargeCapacityWh -ne $null)) {
+    $batteryInfo.status = 'ok'
+  }
+  if (($batteryHealth -eq $null -or $batteryHealthSource -eq 'estimated_charge') -and $batteryReportData.healthPercent -ne $null) {
+    $batteryHealth = $batteryReportData.healthPercent
+    $batteryHealthSource = 'battery_report'
+  }
+}
+if ($batteryHealth -eq $null -and $batteryInfo -and $batteryInfo.status -eq $null) {
+  $batteryInfo.status = 'not_tested'
 }
 Step-Progress -Status 'Inventaire materiel'
 
@@ -5234,7 +5466,19 @@ Step-Progress -Status 'Assemblage payload'
 
 Write-Log "Payload size=$($json.Length)"
 
+if ($PayloadOutputPath) {
+  try {
+    $payloadDir = Split-Path -Path $PayloadOutputPath -Parent
+    if ($payloadDir) { Ensure-Directory -Path $payloadDir | Out-Null }
+    $json | Out-File -FilePath $PayloadOutputPath -Encoding UTF8 -Force
+  } catch {
+    Write-Log "Payload export failed: $($_.Exception.Message)" 'WARN'
+  }
+}
+
 $ingestOk = $false
+$ingestDeferred = $false
+$deferredEntryPath = $null
 Step-Progress -Status 'Envoi API'
 try {
   $response = Invoke-JsonPost -Url $ApiUrl -Json $json -TimeoutSec $TimeoutSec
@@ -5246,13 +5490,36 @@ try {
   if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
     Write-Log $_.ErrorDetails.Message 'ERROR'
   }
-  if ($FailTaskSequenceOnError) {
+  if ($QueueOnUploadFailure) {
+    $resolvedOutboxRoot = Resolve-OutboxRoot -Value $OutboxRoot
+    $deferredEntryPath = Save-OutboxEntry `
+      -Root $resolvedOutboxRoot `
+      -PayloadJson $json `
+      -PayloadObject $payload `
+      -ApiUrl $ApiUrl `
+      -ReportId $clientRunId `
+      -Reason 'ingest_failed' `
+      -ErrorMessage $_.Exception.Message `
+      -RunDir $artifactRunDir `
+      -LogPath $LogPath
+    if ($deferredEntryPath) {
+      $ingestDeferred = $true
+      Write-Log "Ingest deferred to outbox: $deferredEntryPath" 'WARN'
+      Write-Output ([ordered]@{
+        queued = $true
+        reportId = $clientRunId
+        outboxPath = $deferredEntryPath
+      })
+    }
+  }
+  if ($FailTaskSequenceOnError -and -not $ingestDeferred) {
     Write-Error $_
     Complete-Progress
-    Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
     exit 1
   }
-  Write-Log 'Ingest failed but task sequence failure is disabled; continuing deployment.' 'WARN'
+  if (-not $ingestDeferred) {
+    Write-Log 'Ingest failed but task sequence failure is disabled; continuing deployment.' 'WARN'
+  }
   $ingestOk = $false
 }
 
@@ -5349,4 +5616,7 @@ if ($artifactRunDir) {
 
 Step-Progress -Status 'Finalisation'
 Complete-Progress
-Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken 'RESET'
+if ($FactoryReset) {
+  $resetConfirmValue = if ($FactoryResetConfirm) { $FactoryResetConfirm } else { 'RESET' }
+  Invoke-FactoryResetPrompt -ForceReset:$true -ConfirmToken $resetConfirmValue
+}

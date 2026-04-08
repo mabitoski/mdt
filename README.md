@@ -404,6 +404,76 @@ Services exposes localement :
 - `BIOS_CLOCK_DRIFT_ALERT_THRESHOLD_SECONDS`
 - `BIOS_CLOCK_DELTA_ALERT_THRESHOLD_SECONDS`
 
+## MMA MDT Runner
+
+Le depot contient maintenant un flux local Windows pour relancer les checks atelier sans reboot PXE.
+
+Objectif :
+- relancer tous les checks depuis Windows deja demarre
+- choisir le technicien manuellement
+- envoyer le rapport vers MMA quand l'API est disponible
+- stocker localement le rapport quand le poste ou le serveur est hors ligne
+- ne lancer la reinitialisation usine que sur demande explicite
+
+### Principe fonctionnel
+
+```mermaid
+flowchart LR
+  A[Operateur ouvre MMA MDT Runner] --> B[Choix technicien / type / mode]
+  B --> C[Lancement du script mdt-report.ps1]
+  C --> D{API MMA joignable}
+  D -- Oui --> E[POST /api/ingest]
+  D -- Non --> F[Stockage local dans Outbox]
+  E --> G[Rapport visible dans MMA Web]
+  F --> H[Sync manuel ou tache planifiee]
+  H --> E
+```
+
+### Comportement cle
+
+- le script de base `scripts/mdt-report.ps1` ne force plus la reinitialisation en fin d'execution
+- la reinitialisation est exposee comme option explicite dans l'application locale
+- si l'upload echoue, le payload peut etre ecrit dans une file locale `Outbox`
+- la resynchronisation est geree par `scripts/mdt-outbox-sync.ps1`
+
+### Arborescence cible sur le poste Windows
+
+```text
+C:\Program Files\MMA Automation\MdtRunner\
+├── MmaMdtRunner.ps1
+├── MmaMdtRunner.Common.ps1
+├── config.json
+├── technicians.json
+└── scripts\
+    ├── mdt-report.ps1
+    ├── mdt-desktop.ps1
+    ├── mdt-laptop.ps1
+    ├── mdt-stress.ps1
+    ├── mdt-outbox-sync.ps1
+    ├── keyboard_capture.ps1
+    └── camera.exe
+```
+
+### Donnees locales du runner
+
+```text
+C:\ProgramData\MMA\MdtRunner\
+├── Logs\
+└── Outbox\
+    ├── pending\
+    ├── sent\
+    └── failed\
+```
+
+### Packaging
+
+- les sources du runner sont dans `windows-runner/`
+- le packaging MSI est defini dans `windows-runner/installer/MmaMdtRunner.wxs`
+- un template Linux `wixl` est disponible dans `windows-runner/installer/MmaMdtRunner.wixl.wxs`
+- le script de build est `windows-runner/build-msi.ps1`
+- le build Linux local est `windows-runner/build-msi.sh`
+- la tache de synchronisation optionnelle est `windows-runner/Register-MmaMdtRunnerSyncTask.ps1`
+
 ## Structure du depot
 
 ```text
@@ -417,11 +487,18 @@ Services exposes localement :
 │   └── admin.js
 ├── scripts/
 │   ├── mdt-report-*.ps1
+│   ├── mdt-outbox-sync.ps1
 │   └── beta/
 │       ├── mma-mdt-agent.ps1
 │       ├── provision-mdt-beta.ps1
 │       ├── remove-mdt-beta.ps1
 │       └── mdt-report-beta.ps1
+├── windows-runner/
+│   ├── MmaMdtRunner.ps1
+│   ├── MmaMdtRunner.Common.ps1
+│   ├── config.sample.json
+│   ├── technicians.json
+│   └── installer/
 ├── caddy/
 ├── certs/
 └── grafana/

@@ -1,0 +1,14 @@
+{
+  "title": "MMA MDT Runner",
+  "apiUrl": "https://mma.marl.lan/api/ingest",
+  "scriptsDir": "scripts",
+  "reportScript": "mdt-report.ps1",
+  "syncScript": "mdt-outbox-sync.ps1",
+  "outboxRoot": "%ProgramData%\\MMA\\MdtRunner\\Outbox",
+  "logsRoot": "%ProgramData%\\MMA\\MdtRunner\\Logs",
+  "defaultCategory": "auto",
+  "defaultTestMode": "quick",
+  "skipTlsValidation": false,
+  "autoSyncOnStart": true,
+  "syncTimeoutSec": 20
+}
