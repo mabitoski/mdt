@@ -155,177 +155,172 @@
           </section>
 
           <section class="filter-hub filter-hub--option-a" id="section-filters">
-          <div class="filter-hub-toolbar">
-            <div class="search-wrap is-collapsed" id="search-wrap">
-              <button class="search-toggle" type="button" aria-label="Rechercher">
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    d="M15.5 14h-.79l-.28-.27a6 6 0 1 0-.71.71l.27.28v.79l4.25 4.25 1.27-1.27L15.5 14zm-5.5 0a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"
-                  />
-                </svg>
-              </button>
-              <input
-                id="search-input"
-                type="search"
-                placeholder="Rechercher par nom, serie, MAC, palette ou commande"
-                autocomplete="off"
-              />
+            <div class="filter-hub-toolbar">
+              <div class="search-wrap" id="search-wrap">
+                <button class="search-toggle" type="button" aria-label="Rechercher">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M15.5 14h-.79l-.28-.27a6 6 0 1 0-.71.71l.27.28v.79l4.25 4.25 1.27-1.27L15.5 14zm-5.5 0a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"
+                    />
+                  </svg>
+                </button>
+                <input
+                  id="search-input"
+                  type="search"
+                  placeholder="Rechercher par nom, serie, MAC, palette ou commande"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="filter-toolbar-meta">
+                <label class="board-sort" for="sort-select">
+                  <span>Tri</span>
+                  <select id="sort-select">
+                    <option value="activity">Activite recente</option>
+                    <option value="status">Statut</option>
+                    <option value="technician">Technicien</option>
+                    <option value="name">Nom</option>
+                  </select>
+                </label>
+                <span class="filter-active-chip" id="active-filters-chip" aria-live="polite">
+                  Aucun filtre actif
+                </span>
+                <button class="filter-toggle-btn" id="filter-toggle-btn" type="button" aria-expanded="false">
+                  Afficher les filtres
+                </button>
+                <button class="filter-reset-btn" id="reset-filters-btn" type="button">Reinitialiser</button>
+              </div>
             </div>
-          </div>
 
-          <div class="filter-hub-head">
-            <div>
-              <p class="filter-hub-kicker">Filtres intelligents</p>
-              <p class="filter-hub-sub">
-                Combine technicien, tag, defauts et commentaires pour cibler la bonne machine en quelques clics.
-              </p>
-            </div>
-            <div class="filter-hub-actions">
-              <span class="filter-active-chip" id="active-filters-chip" aria-live="polite">
-                Aucun filtre actif
-              </span>
-              <button class="filter-toggle-btn" id="filter-toggle-btn" type="button" aria-expanded="false">
-                Afficher les filtres
-              </button>
-              <button class="filter-reset-btn" id="reset-filters-btn" type="button">Reinitialiser</button>
-            </div>
-          </div>
-
-          <div class="filter-hub-body" id="filter-hub-body">
-            <section class="controls">
-              <div class="workspace-filter-card">
-                <span class="controls-label">Techniciens</span>
-                <div class="filters" role="group" aria-label="Filtrer par technicien">
-                  <div class="filter-group tech-filters" id="tech-filters" role="group" aria-label="Filtrer par technicien">
-                  </div>
-                </div>
-              </div>
-              <div class="workspace-filter-card">
-                <div class="layout-group">
-                  <span class="controls-label">Disposition</span>
-                  <div class="pill-group layout-buttons" role="group" aria-label="Disposition de la grille">
-                    <button class="layout-btn" data-layout="1" type="button" aria-pressed="false">1</button>
-                    <button class="layout-btn" data-layout="2" type="button" aria-pressed="false">2</button>
-                    <button class="layout-btn" data-layout="3" type="button" aria-pressed="false">3</button>
-                    <button class="layout-btn" data-layout="6" type="button" aria-pressed="false">6</button>
-                  </div>
-                </div>
-                <div class="tag-filter-group">
-                  <span class="controls-label">Tags</span>
-                  <div class="tag-select" id="tag-filters" role="group" aria-label="Filtrer par tag"></div>
-                </div>
-              </div>
-            </section>
-
-            <section class="controls-secondary">
-              <div class="test-filter-group">
-                <span class="controls-label">Defauts</span>
-                <div class="pill-group test-filters" role="group" aria-label="Filtrer par test en echec">
-                  <button class="test-filter-btn" data-component="pad" type="button" aria-pressed="false">
-                    Pad
-                  </button>
-                  <button class="test-filter-btn" data-component="camera" type="button" aria-pressed="false">
-                    Cam
-                  </button>
-                  <button class="test-filter-btn" data-component="usb" type="button" aria-pressed="false">
-                    USB
-                  </button>
-                  <button class="test-filter-btn" data-component="keyboard" type="button" aria-pressed="false">
-                    Clavier
-                  </button>
-                  <button class="test-filter-btn" data-component="badgeReader" type="button" aria-pressed="false">
-                    Badge
-                  </button>
-                  <button class="test-filter-btn" data-component="biosBattery" type="button" aria-pressed="false">
-                    Pile BIOS
-                  </button>
-                  <button class="test-filter-btn" data-component="biosPassword" type="button" aria-pressed="false">
-                    MDP BIOS
-                  </button>
-                  <button class="test-filter-btn" data-component="wifiStandard" type="button" aria-pressed="false">
-                    Wi-Fi
-                  </button>
-                </div>
-              </div>
-              <div class="comment-filter-group">
-                <span class="controls-label">Commentaires</span>
-                <div class="pill-group comment-filters" role="group" aria-label="Filtrer par commentaire">
-                  <button class="comment-filter-btn" data-comment="with" type="button" aria-pressed="false">
-                    Avec commentaire
-                  </button>
-                  <button class="comment-filter-btn" data-comment="without" type="button" aria-pressed="false">
-                    Sans commentaire
-                  </button>
-                </div>
-              </div>
-              <div class="workspace-filter-card timeline-filter-card">
-                <div class="timeline-filter-head">
-                  <div>
-                    <span class="controls-label">Periode</span>
-                    <p class="timeline-filter-sub">Filtre les postes et active le comptage par jour, semaine ou mois.</p>
-                  </div>
-                  <div class="pill-group timeline-granularity-group" id="timeline-granularity" role="group" aria-label="Granularite de la chronologie">
-                    <button class="filter-btn timeline-granularity-btn" data-granularity="day" type="button" aria-pressed="true">
-                      Jour
-                    </button>
-                    <button class="filter-btn timeline-granularity-btn" data-granularity="week" type="button" aria-pressed="false">
-                      Semaine
-                    </button>
-                    <button class="filter-btn timeline-granularity-btn" data-granularity="month" type="button" aria-pressed="false">
-                      Mois
-                    </button>
-                  </div>
-                </div>
-                <div class="pill-group timeline-date-presets" id="timeline-date-presets" role="group" aria-label="Filtrer par periode">
-                  <button class="filter-btn date-filter-btn" data-date-filter="all" type="button" aria-pressed="true">
-                    Tout
-                  </button>
-                  <button class="filter-btn date-filter-btn" data-date-filter="today" type="button" aria-pressed="false">
-                    Jour
-                  </button>
-                  <button class="filter-btn date-filter-btn" data-date-filter="week" type="button" aria-pressed="false">
-                    Semaine
-                  </button>
-                  <button class="filter-btn date-filter-btn" data-date-filter="month" type="button" aria-pressed="false">
-                    Mois
-                  </button>
-                  <button class="filter-btn date-filter-btn" data-date-filter="year" type="button" aria-pressed="false">
-                    Annee
-                  </button>
-                  <button class="filter-btn date-filter-btn" data-date-filter="custom" type="button" aria-pressed="false">
-                    Perso
-                  </button>
-                </div>
-                <div class="timeline-custom-range" id="timeline-custom-range">
-                  <label class="timeline-date-field">
-                    <span>Du</span>
-                    <input id="date-from-input" type="date" />
-                  </label>
-                  <label class="timeline-date-field">
-                    <span>Au</span>
-                    <input id="date-to-input" type="date" />
-                  </label>
-                  <button class="filter-toggle-btn timeline-apply-btn" id="apply-date-range-btn" type="button">
-                    Appliquer
-                  </button>
-                </div>
-              </div>
-            </section>
-          </div>
-          </section>
-
-          <section class="timeline-panel" id="timeline-panel" aria-live="polite">
-            <div class="timeline-panel-head">
+            <div class="filter-hub-head">
               <div>
-                <p class="timeline-panel-kicker">Chronologie</p>
-                <h3>Volumes de postes sur la periode</h3>
-                <p class="timeline-panel-sub" id="timeline-summary">
-                  Active un filtre de periode pour compter les postes par jour, semaine ou mois.
+                <p class="filter-hub-kicker">Filtres atelier</p>
+                <h3 class="filter-hub-title" id="results-count-label">Resultats : -- poste</h3>
+                <p class="filter-hub-sub" id="results-filters-summary">
+                  Combine technicien, tags, defauts et periode sans quitter la liste.
                 </p>
               </div>
             </div>
-            <div class="timeline-panel-body" id="timeline-list">
-              <div class="timeline-empty">Aucune periode selectionnee.</div>
+
+            <div class="filter-hub-body" id="filter-hub-body">
+              <section class="controls">
+                <div class="workspace-filter-card">
+                  <span class="controls-label">Techniciens</span>
+                  <div class="filters" role="group" aria-label="Filtrer par technicien">
+                    <div class="filter-group tech-filters" id="tech-filters" role="group" aria-label="Filtrer par technicien">
+                    </div>
+                  </div>
+                </div>
+                <div class="workspace-filter-card">
+                  <div class="layout-group">
+                    <span class="controls-label">Disposition</span>
+                    <div class="pill-group layout-buttons" role="group" aria-label="Disposition de la grille">
+                      <button class="layout-btn" data-layout="1" type="button" aria-pressed="false">1</button>
+                      <button class="layout-btn" data-layout="2" type="button" aria-pressed="false">2</button>
+                      <button class="layout-btn" data-layout="3" type="button" aria-pressed="false">3</button>
+                      <button class="layout-btn" data-layout="6" type="button" aria-pressed="false">6</button>
+                    </div>
+                  </div>
+                  <div class="tag-filter-group">
+                    <span class="controls-label">Tags</span>
+                    <div class="tag-select" id="tag-filters" role="group" aria-label="Filtrer par tag"></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="controls-secondary">
+                <div class="test-filter-group">
+                  <span class="controls-label">Defauts</span>
+                  <div class="pill-group test-filters" role="group" aria-label="Filtrer par test en echec">
+                    <button class="test-filter-btn" data-component="pad" type="button" aria-pressed="false">
+                      Pad
+                    </button>
+                    <button class="test-filter-btn" data-component="camera" type="button" aria-pressed="false">
+                      Cam
+                    </button>
+                    <button class="test-filter-btn" data-component="usb" type="button" aria-pressed="false">
+                      USB
+                    </button>
+                    <button class="test-filter-btn" data-component="keyboard" type="button" aria-pressed="false">
+                      Clavier
+                    </button>
+                    <button class="test-filter-btn" data-component="badgeReader" type="button" aria-pressed="false">
+                      Badge
+                    </button>
+                    <button class="test-filter-btn" data-component="biosBattery" type="button" aria-pressed="false">
+                      Pile BIOS
+                    </button>
+                    <button class="test-filter-btn" data-component="biosPassword" type="button" aria-pressed="false">
+                      MDP BIOS
+                    </button>
+                    <button class="test-filter-btn" data-component="wifiStandard" type="button" aria-pressed="false">
+                      Wi-Fi
+                    </button>
+                  </div>
+                </div>
+                <div class="comment-filter-group">
+                  <span class="controls-label">Commentaires</span>
+                  <div class="pill-group comment-filters" role="group" aria-label="Filtrer par commentaire">
+                    <button class="comment-filter-btn" data-comment="with" type="button" aria-pressed="false">
+                      Avec commentaire
+                    </button>
+                    <button class="comment-filter-btn" data-comment="without" type="button" aria-pressed="false">
+                      Sans commentaire
+                    </button>
+                  </div>
+                </div>
+                <div class="workspace-filter-card timeline-filter-card">
+                  <div class="timeline-filter-head">
+                    <div>
+                      <span class="controls-label">Periode</span>
+                      <p class="timeline-filter-sub">Filtre les postes et active le comptage par jour, semaine ou mois.</p>
+                    </div>
+                    <div class="pill-group timeline-granularity-group" id="timeline-granularity" role="group" aria-label="Granularite de la chronologie">
+                      <button class="filter-btn timeline-granularity-btn" data-granularity="day" type="button" aria-pressed="true">
+                        Jour
+                      </button>
+                      <button class="filter-btn timeline-granularity-btn" data-granularity="week" type="button" aria-pressed="false">
+                        Semaine
+                      </button>
+                      <button class="filter-btn timeline-granularity-btn" data-granularity="month" type="button" aria-pressed="false">
+                        Mois
+                      </button>
+                    </div>
+                  </div>
+                  <div class="pill-group timeline-date-presets" id="timeline-date-presets" role="group" aria-label="Filtrer par periode">
+                    <button class="filter-btn date-filter-btn" data-date-filter="all" type="button" aria-pressed="true">
+                      Tout
+                    </button>
+                    <button class="filter-btn date-filter-btn" data-date-filter="today" type="button" aria-pressed="false">
+                      Jour
+                    </button>
+                    <button class="filter-btn date-filter-btn" data-date-filter="week" type="button" aria-pressed="false">
+                      Semaine
+                    </button>
+                    <button class="filter-btn date-filter-btn" data-date-filter="month" type="button" aria-pressed="false">
+                      Mois
+                    </button>
+                    <button class="filter-btn date-filter-btn" data-date-filter="year" type="button" aria-pressed="false">
+                      Annee
+                    </button>
+                    <button class="filter-btn date-filter-btn" data-date-filter="custom" type="button" aria-pressed="false">
+                      Perso
+                    </button>
+                  </div>
+                  <div class="timeline-custom-range" id="timeline-custom-range">
+                    <label class="timeline-date-field">
+                      <span>Du</span>
+                      <input id="date-from-input" type="date" />
+                    </label>
+                    <label class="timeline-date-field">
+                      <span>Au</span>
+                      <input id="date-to-input" type="date" />
+                    </label>
+                    <button class="filter-toggle-btn timeline-apply-btn" id="apply-date-range-btn" type="button">
+                      Appliquer
+                    </button>
+                  </div>
+                </div>
+              </section>
             </div>
           </section>
 
@@ -363,10 +358,30 @@
               Alertes
             </button>
           </div>
+          <div class="board-results-bar" aria-live="polite">
+            <strong class="board-results-count" id="results-count-inline">-- poste</strong>
+            <span class="board-results-separator" aria-hidden="true">•</span>
+            <span class="board-results-filters" id="results-filters-inline">Filtres : aucun</span>
+          </div>
           <div class="board-scope-banner" id="board-scope-banner" hidden></div>
           <div id="scroll-top-sentinel" class="scroll-sentinel" aria-hidden="true"></div>
           <div class="list" id="machine-list" aria-live="polite"></div>
           <div id="scroll-sentinel" class="scroll-sentinel" aria-hidden="true"></div>
+          </section>
+
+          <section class="timeline-panel" id="timeline-panel" aria-live="polite">
+            <div class="timeline-panel-head">
+              <div>
+                <p class="timeline-panel-kicker">Chronologie</p>
+                <h3>Volumes de postes sur la periode</h3>
+                <p class="timeline-panel-sub" id="timeline-summary">
+                  Active un filtre de periode pour compter les postes par jour, semaine ou mois.
+                </p>
+              </div>
+            </div>
+            <div class="timeline-panel-body" id="timeline-list">
+              <div class="timeline-empty">Aucune periode selectionnee.</div>
+            </div>
           </section>
         </div>
       </section>
