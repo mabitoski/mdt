@@ -68,7 +68,7 @@ param(
   [string]$PayloadOutputPath
 )
 
-$scriptVersion = '1.7.13'
+$scriptVersion = '1.7.14'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -169,6 +169,8 @@ $script:RemoteAccessNetworkDebug = $null
 $script:RemoteAccessWinRmDebug = $null
 $script:WinRmBootstrapStatus = 'not_started'
 $script:WinRmBootstrapReason = $null
+$script:BatterySnapshot = $null
+$script:BatterySnapshotReady = $false
 
 function Step-Progress {
   param([string]$Status)
@@ -260,6 +262,241 @@ function Write-BatteryDiagnostics {
   }
   if ($parts.Count -eq 0) { $parts = @('no_data') }
   Write-Log ("Battery diagnostics [{0}] {1}" -f $Stage, ($parts -join '; ')) $Level
+}
+
+function Get-BatteryQueryConfig {
+  $count = 4
+  $delayMs = 1500
+
+  try {
+    $rawCount = [int]$env:MDT_BATTERY_RETRY_COUNT
+    if ($rawCount -ge 1 -and $rawCount -le 10) { $count = $rawCount }
+  } catch { }
+
+  try {
+    $rawDelay = [int]$env:MDT_BATTERY_RETRY_DELAY_MS
+    if ($rawDelay -ge 100 -and $rawDelay -le 30000) { $delayMs = $rawDelay }
+  } catch { }
+
+  return [ordered]@{
+    count = $count
+    delayMs = $delayMs
+  }
+}
+
+function Get-SystemPowerStatusInfo {
+  $result = [ordered]@{
+    status = 'not_tested'
+    source = 'kernel32'
+    hasBattery = $null
+    chargePercent = $null
+    estimatedRuntimeMin = $null
+    powerSource = $null
+    acLineStatus = $null
+    batteryFlag = $null
+    batteryLifePercentRaw = $null
+    batteryLifeTimeSec = $null
+    batteryFullLifeTimeSec = $null
+  }
+
+  try {
+    if (-not ('MDT.PowerStatusNative' -as [type])) {
+      Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace MDT {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct SystemPowerStatus {
+    public byte ACLineStatus;
+    public byte BatteryFlag;
+    public byte BatteryLifePercent;
+    public byte SystemStatusFlag;
+    public int BatteryLifeTime;
+    public int BatteryFullLifeTime;
+  }
+
+  public static class PowerStatusNative {
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetSystemPowerStatus(out SystemPowerStatus status);
+  }
+}
+"@ -ErrorAction Stop | Out-Null
+    }
+
+    $nativeStatus = New-Object MDT.SystemPowerStatus
+    $ok = [MDT.PowerStatusNative]::GetSystemPowerStatus([ref]$nativeStatus)
+    if (-not $ok) {
+      $result.status = 'nok'
+      Write-BatteryDiagnostics -Stage 'powerstatus.api' -Level 'WARN' -Values ([ordered]@{
+          result = 'call_failed'
+        })
+      return $result
+    }
+
+    $acLineStatus = [int]$nativeStatus.ACLineStatus
+    $batteryFlag = [int]$nativeStatus.BatteryFlag
+    $percentRaw = [int]$nativeStatus.BatteryLifePercent
+    $lifeTimeSec = [int]$nativeStatus.BatteryLifeTime
+    $fullLifeTimeSec = [int]$nativeStatus.BatteryFullLifeTime
+    $noSystemBattery = (($batteryFlag -band 128) -eq 128)
+
+    $result.acLineStatus = $acLineStatus
+    $result.batteryFlag = $batteryFlag
+    $result.batteryLifePercentRaw = $percentRaw
+    $result.batteryLifeTimeSec = $lifeTimeSec
+    $result.batteryFullLifeTimeSec = $fullLifeTimeSec
+
+    if ($noSystemBattery) {
+      $result.hasBattery = $false
+    } elseif (($percentRaw -ge 0 -and $percentRaw -le 100) -or ($lifeTimeSec -gt 0) -or ($fullLifeTimeSec -gt 0)) {
+      $result.hasBattery = $true
+    }
+
+    if ($percentRaw -ge 0 -and $percentRaw -le 100) {
+      $result.chargePercent = $percentRaw
+    }
+    if ($lifeTimeSec -gt 0) {
+      $result.estimatedRuntimeMin = [int][math]::Round($lifeTimeSec / 60.0)
+    }
+
+    switch ($acLineStatus) {
+      0 { $result.powerSource = 'battery' }
+      1 { $result.powerSource = 'ac' }
+      default { $result.powerSource = $null }
+    }
+
+    if ($result.hasBattery -eq $false) {
+      $result.status = 'absent'
+    } elseif ($result.chargePercent -ne $null -or $result.estimatedRuntimeMin -ne $null -or $result.powerSource) {
+      $result.status = 'ok'
+    } else {
+      $result.status = 'unknown'
+    }
+
+    $logLevel = if ($result.status -eq 'ok') { 'INFO' } else { 'WARN' }
+    Write-BatteryDiagnostics -Stage 'powerstatus.api' -Level $logLevel -Values ([ordered]@{
+        hasBattery = $result.hasBattery
+        chargePercent = $result.chargePercent
+        estimatedRuntimeMin = $result.estimatedRuntimeMin
+        powerSource = $result.powerSource
+        acLineStatus = $result.acLineStatus
+        batteryFlag = $result.batteryFlag
+        batteryLifePercentRaw = $result.batteryLifePercentRaw
+        batteryLifeTimeSec = $result.batteryLifeTimeSec
+        batteryFullLifeTimeSec = $result.batteryFullLifeTimeSec
+        status = $result.status
+      })
+  } catch {
+    $result.status = 'nok'
+    Write-Log "System power status query failed: $($_.Exception.Message)" 'WARN'
+    Write-BatteryDiagnostics -Stage 'powerstatus.api' -Level 'WARN' -Values ([ordered]@{
+        result = 'exception'
+        exception = $_.Exception.Message
+      })
+  }
+
+  return $result
+}
+
+function Get-BatteryPnPDevices {
+  $items = @()
+  try {
+    $items = @(Get-CimInstanceSafe -ClassName 'Win32_PnPEntity' -Filter "PNPClass='Battery'")
+  } catch {
+    $items = @()
+  }
+
+  $list = @()
+  foreach ($item in $items) {
+    $name = Normalize-InventoryString $item.Name
+    $deviceId = Normalize-InventoryString $item.DeviceID
+    $status = Normalize-InventoryString $item.Status
+    if ($name -or $deviceId) {
+      $list += [ordered]@{
+        name = $name
+        deviceId = $deviceId
+        status = $status
+      }
+    }
+  }
+
+  $labels = @(
+    $list | ForEach-Object {
+      if ($_.name) { $_.name }
+      elseif ($_.deviceId) { $_.deviceId }
+    }
+  )
+  Write-BatteryDiagnostics -Stage 'inventory.pnp' -Values ([ordered]@{
+      pnpCount = @($items).Count
+      capturedCount = $list.Count
+      items = $labels
+    })
+  return $list
+}
+
+function Get-BatterySnapshot {
+  param([switch]$Force)
+
+  if ($script:BatterySnapshotReady -and -not $Force) {
+    return $script:BatterySnapshot
+  }
+
+  $config = Get-BatteryQueryConfig
+  $attempt = 0
+  $snapshot = $null
+
+  while ($attempt -lt $config.count) {
+    $attempt++
+    $static = @(Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryStaticData')
+    $full = @(Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryFullChargedCapacity')
+    $status = @(Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryStatus')
+    $battery = @(Get-CimInstanceSafe -ClassName 'Win32_Battery')
+    $systemPower = Get-SystemPowerStatusInfo
+    $pnpDevices = @(Get-BatteryPnPDevices)
+
+    $hasSignal = (
+      $static.Count -gt 0 -or
+      $full.Count -gt 0 -or
+      $status.Count -gt 0 -or
+      $battery.Count -gt 0 -or
+      $pnpDevices.Count -gt 0 -or
+      ($systemPower.hasBattery -eq $true) -or
+      $systemPower.chargePercent -ne $null
+    )
+
+    Write-BatteryDiagnostics -Stage 'snapshot.attempt' -Values ([ordered]@{
+        attempt = $attempt
+        staticCount = $static.Count
+        fullCount = $full.Count
+        statusCount = $status.Count
+        win32Count = $battery.Count
+        pnpCount = $pnpDevices.Count
+        systemPowerStatus = if ($systemPower) { $systemPower.status } else { $null }
+        systemPowerHasBattery = if ($systemPower) { $systemPower.hasBattery } else { $null }
+        systemPowerChargePercent = if ($systemPower) { $systemPower.chargePercent } else { $null }
+        hasSignal = $hasSignal
+      })
+
+    $snapshot = [ordered]@{
+      attempts = $attempt
+      static = $static
+      full = $full
+      status = $status
+      battery = $battery
+      systemPower = $systemPower
+      pnpDevices = $pnpDevices
+    }
+
+    if ($hasSignal) { break }
+    if ($attempt -lt $config.count) {
+      Start-Sleep -Milliseconds $config.delayMs
+    }
+  }
+
+  $script:BatterySnapshot = $snapshot
+  $script:BatterySnapshotReady = $true
+  return $snapshot
 }
 
 function Get-RegistryValueSafe {
@@ -3409,8 +3646,9 @@ function Get-RamSlots {
 }
 
 function Get-BatteryHealth {
-  $static = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryStaticData'
-  $full = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryFullChargedCapacity'
+  $snapshot = Get-BatterySnapshot
+  $static = @($snapshot.static)
+  $full = @($snapshot.full)
   $staticCount = @($static).Count
   $fullCount = @($full).Count
 
@@ -3460,10 +3698,13 @@ function Get-BatteryHealth {
 }
 
 function Get-BatteryInfo {
-  $static = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryStaticData'
-  $full = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryFullChargedCapacity'
-  $status = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryStatus'
-  $battery = Get-CimInstanceSafe -ClassName 'Win32_Battery'
+  $snapshot = Get-BatterySnapshot
+  $static = @($snapshot.static)
+  $full = @($snapshot.full)
+  $status = @($snapshot.status)
+  $battery = @($snapshot.battery)
+  $systemPower = $snapshot.systemPower
+  $pnpDevices = @($snapshot.pnpDevices)
   $staticCount = @($static).Count
   $fullCount = @($full).Count
   $statusCount = @($status).Count
@@ -3477,6 +3718,9 @@ function Get-BatteryInfo {
   $batteryItem = $null
   $infoStatus = $null
   $statusValue = $null
+  $chargeSource = $null
+  $powerSourceSource = $null
+  $runtimeSource = $null
 
   foreach ($item in $static) {
     $design = $item.DesignedCapacity
@@ -3504,12 +3748,47 @@ function Get-BatteryInfo {
     $statusValue = $batteryItem.BatteryStatus
     if ($statusValue -in 2, 3, 6, 7, 8, 9, 11) { $powerSource = 'ac' }
     elseif ($statusValue -eq 1) { $powerSource = 'battery' }
+    if ($chargePercent -ne $null) { $chargeSource = 'win32_battery' }
+    if ($powerSource) { $powerSourceSource = 'win32_battery' }
+    if ($estimatedRuntimeMin -ne $null -and $estimatedRuntimeMin -ge 0) { $runtimeSource = 'win32_battery' }
+  }
+
+  if ($systemPower) {
+    if ($chargePercent -eq $null -and $systemPower.chargePercent -ne $null) {
+      $chargePercent = [int]$systemPower.chargePercent
+      $chargeSource = 'system_power_status'
+    }
+    if (($estimatedRuntimeMin -eq $null -or $estimatedRuntimeMin -lt 0) -and $systemPower.estimatedRuntimeMin -ne $null) {
+      $estimatedRuntimeMin = [int]$systemPower.estimatedRuntimeMin
+      $runtimeSource = 'system_power_status'
+    }
+    if (-not $powerSource -and $systemPower.powerSource) {
+      $powerSource = $systemPower.powerSource
+      $powerSourceSource = 'system_power_status'
+    }
   }
 
   if (-not $static -and -not $full -and -not $status) {
-    if ($batteryItem) { $infoStatus = 'not_tested' } else { $infoStatus = 'absent' }
+    if ($batteryItem -or $pnpDevices.Count -gt 0 -or ($systemPower -and $systemPower.hasBattery -eq $true)) {
+      $infoStatus = if ($chargePercent -ne $null -or $estimatedRuntimeMin -ne $null -or $powerSource) { 'ok' } else { 'not_tested' }
+    } else {
+      $infoStatus = 'absent'
+    }
   } elseif (-not $static -or -not $full) {
-    $infoStatus = 'not_tested'
+    $infoStatus = if (
+      $chargePercent -ne $null -or
+      $remainingWh -ne $null -or
+      $powerSource -or
+      $pnpDevices.Count -gt 0 -or
+      ($systemPower -and $systemPower.hasBattery -eq $true)
+    ) { 'ok' } else { 'not_tested' }
+  } elseif (
+    $designWh -ne $null -or
+    $fullWh -ne $null -or
+    $chargePercent -ne $null -or
+    $remainingWh -ne $null
+  ) {
+    $infoStatus = 'ok'
   }
 
   $result = [ordered]@{
@@ -3520,6 +3799,10 @@ function Get-BatteryInfo {
     chargePercent = $chargePercent
     powerSource = $powerSource
     status = $infoStatus
+    chargeSource = $chargeSource
+    powerSourceSource = $powerSourceSource
+    runtimeSource = $runtimeSource
+    snapshotAttempts = if ($snapshot) { $snapshot.attempts } else { 0 }
   }
   $logLevel = if ($designWh -eq $null -and $fullWh -eq $null -and $chargePercent -eq $null) { 'WARN' } else { 'INFO' }
   Write-BatteryDiagnostics -Stage 'info.wmi' -Level $logLevel -Values ([ordered]@{
@@ -3527,6 +3810,7 @@ function Get-BatteryInfo {
       fullCount = $fullCount
       statusCount = $statusCount
       win32Count = $win32Count
+      pnpCount = $pnpDevices.Count
       designWh = $designWh
       fullWh = $fullWh
       remainingWh = $remainingWh
@@ -3535,6 +3819,10 @@ function Get-BatteryInfo {
       powerSource = $powerSource
       batteryStatusCode = $statusValue
       infoStatus = $infoStatus
+      chargeSource = $chargeSource
+      powerSourceSource = $powerSourceSource
+      runtimeSource = $runtimeSource
+      snapshotAttempts = if ($snapshot) { $snapshot.attempts } else { 0 }
     })
   return $result
 }
@@ -5067,8 +5355,31 @@ function Normalize-InventoryString {
 }
 
 function Get-BatteryInventory {
-  $items = Get-CimInstanceSafe -ClassName 'Win32_Battery'
-  if (-not $items) {
+  $snapshot = Get-BatterySnapshot
+  $items = @($snapshot.battery)
+  if (-not $items -or $items.Count -eq 0) {
+    $pnpItems = @($snapshot.pnpDevices)
+    if ($pnpItems.Count -gt 0) {
+      $list = @()
+      foreach ($item in $pnpItems) {
+        if ($item.deviceId -or $item.name) {
+          $list += [ordered]@{
+            serialNumber = $null
+            deviceId = if ($item.deviceId) { $item.deviceId } else { $item.name }
+            name = $item.name
+          }
+        }
+      }
+      Write-BatteryDiagnostics -Stage 'inventory.win32' -Values ([ordered]@{
+          win32Count = 0
+          capturedCount = $list.Count
+          result = 'using_pnp_fallback'
+          items = @($list | ForEach-Object {
+              if ($_.name) { $_.name } else { $_.deviceId }
+            })
+        })
+      return $list
+    }
     Write-BatteryDiagnostics -Stage 'inventory.win32' -Values ([ordered]@{
         win32Count = 0
         capturedCount = 0
@@ -6037,6 +6348,7 @@ if ($baseboardInventory) { $inventory.baseboard = $baseboardInventory }
 if ($autopilotHashValue) { $inventory.autopilotHash = $autopilotHashValue }
 if ($inventory.Count -gt 0) { $payload.inventory = $inventory }
 
+$debugPayload = [ordered]@{}
 $remoteAccessDebug = [ordered]@{}
 if ($script:RemoteAccessNetworkDebug) {
   if ($script:RemoteAccessNetworkDebug.hostnames) { $remoteAccessDebug.hostnames = @($script:RemoteAccessNetworkDebug.hostnames) }
@@ -6050,9 +6362,37 @@ if ($script:RemoteAccessWinRmDebug) {
 if ($remoteAccessDebug.Count -gt 0) {
   $remoteAccessDebug.collectedAt = (Get-Date).ToString('o')
   $remoteAccessDebug.scriptVersion = $scriptVersion
-  $payload.debug = [ordered]@{
-    remoteAccess = $remoteAccessDebug
+  $debugPayload.remoteAccess = $remoteAccessDebug
+}
+
+$batterySnapshot = Get-BatterySnapshot
+if ($batterySnapshot) {
+  $debugPayload.battery = [ordered]@{
+    snapshotAttempts = $batterySnapshot.attempts
+    wmi = [ordered]@{
+      staticCount = @($batterySnapshot.static).Count
+      fullCount = @($batterySnapshot.full).Count
+      statusCount = @($batterySnapshot.status).Count
+      win32Count = @($batterySnapshot.battery).Count
+      pnpCount = @($batterySnapshot.pnpDevices).Count
+    }
+    systemPower = $batterySnapshot.systemPower
+    info = if ($batteryInfo) { $batteryInfo } else { $null }
+    health = [ordered]@{
+      value = $batteryHealth
+      source = $batteryHealthSource
+    }
+    batteryReport = [ordered]@{
+      requested = $shouldRunBatteryReport
+      status = if ($batteryReport) { $batteryReport.status } else { 'not_requested' }
+      path = if ($batteryReport) { $batteryReport.reportPath } else { $null }
+      parsed = if ($batteryReportData) { $batteryReportData } else { $null }
+    }
   }
+}
+
+if ($debugPayload.Count -gt 0) {
+  $payload.debug = $debugPayload
 }
 
 
