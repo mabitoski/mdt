@@ -25,7 +25,7 @@
           </Directory>
         </Directory>
       </Directory>
-      <Directory Id="CommonDesktopFolder" />
+      <Directory Id="DesktopFolder" />
     </Directory>
 
     <Feature Id="MainFeature" Title="MMA MDT Runner" Level="1">
@@ -82,7 +82,7 @@
   </Fragment>
 
   <Fragment>
-    <DirectoryRef Id="CommonDesktopFolder">
+    <DirectoryRef Id="DesktopFolder">
       <Component Id="RunnerDesktopShortcut" Guid="*">
         <Shortcut
           Id="RunnerDesktopShortcutLink"

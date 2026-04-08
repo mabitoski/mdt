@@ -175,6 +175,13 @@ function New-RunCommandStepNode {
   return $stepNode
 }
 
+function Convert-ToPowerShellEncodedCommand {
+  param([string]$Script)
+
+  $bytes = [Text.Encoding]::Unicode.GetBytes($Script)
+  return [Convert]::ToBase64String($bytes)
+}
+
 function Set-OrCreateRunnerInstallStep {
   param(
     [xml]$SequenceXml,
@@ -183,7 +190,8 @@ function Set-OrCreateRunnerInstallStep {
   )
 
   $runnerSharePath = "\\$ShareServerName\DeploymentShare$\" + $RunnerPackageRelativePath.TrimStart('\')
-  $installAction = '%WINDIR%\System32\msiexec.exe /i "{0}" /qn /norestart' -f $runnerSharePath
+  $localInstallerPath = 'C:\ProgramData\MMA\MdtRunner\Installer\MmaMdtRunner-1.0.0.msi'
+  $installAction = '%WINDIR%\System32\msiexec.exe /i "{0}" /qn /norestart' -f $localInstallerPath
 
   $allGroups = @($SequenceXml.SelectNodes('//group'))
   $targetGroup = $null
@@ -233,7 +241,7 @@ function Set-OrCreateRunnerInstallStep {
   return $runnerSharePath
 }
 
-function Set-OrCreateRunnerDesktopCopyStep {
+function Set-OrCreateRunnerPackageStageStep {
   param(
     [xml]$SequenceXml,
     [string]$ShareServerName,
@@ -241,7 +249,9 @@ function Set-OrCreateRunnerDesktopCopyStep {
   )
 
   $runnerSharePath = "\\$ShareServerName\DeploymentShare$\" + $RunnerPackageRelativePath.TrimStart('\')
-  $desktopCopyAction = 'cmd.exe /c if exist "C:\Users\Administrateur\Desktop" copy /Y "{0}" "C:\Users\Administrateur\Desktop\MmaMdtRunner-1.0.0.msi" >nul & if exist "C:\Users\Public\Desktop" copy /Y "{0}" "C:\Users\Public\Desktop\MmaMdtRunner-1.0.0.msi" >nul' -f $runnerSharePath
+  $localInstallerDir = 'C:\ProgramData\MMA\MdtRunner\Installer'
+  $localInstallerPath = "$localInstallerDir\MmaMdtRunner-1.0.0.msi"
+  $stageAction = 'cmd.exe /c if not exist "{0}" mkdir "{0}" & copy /Y "{1}" "{2}" >nul' -f $localInstallerDir, $runnerSharePath, $localInstallerPath
 
   $allGroups = @($SequenceXml.SelectNodes('//group'))
   $targetGroup = $null
@@ -262,40 +272,129 @@ function Set-OrCreateRunnerDesktopCopyStep {
   }
 
   $installStep = $null
-  $copyStep = $null
+  $stageStep = $null
   foreach ($step in @($targetGroup.step)) {
     if ($step -and [string]$step.name -eq 'install MMA MDT Runner') {
       $installStep = $step
     }
-    if ($step -and [string]$step.name -eq 'copy MMA MDT Runner MSI to desktop') {
-      $copyStep = $step
+    if ($step -and @('stage MMA MDT Runner MSI locally', 'copy MMA MDT Runner MSI to desktop') -contains [string]$step.name) {
+      $stageStep = $step
     }
   }
 
-  if (-not $copyStep) {
-    $copyStep = New-RunCommandStepNode `
+  if (-not $stageStep) {
+    $stageStep = New-RunCommandStepNode `
       -SequenceXml $SequenceXml `
-      -StepName 'copy MMA MDT Runner MSI to desktop' `
-      -Action $desktopCopyAction `
+      -StepName 'stage MMA MDT Runner MSI locally' `
+      -Action $stageAction `
       -ContinueOnError $true
     if ($installStep) {
-      [void]$targetGroup.InsertBefore($copyStep, $installStep)
+      [void]$targetGroup.InsertBefore($stageStep, $installStep)
     } else {
-      [void]$targetGroup.InsertBefore($copyStep, $executeStep)
+      [void]$targetGroup.InsertBefore($stageStep, $executeStep)
     }
   } else {
-    [void]$copyStep.SetAttribute('continueOnError', 'true')
-    [void]$copyStep.SetAttribute('disable', 'false')
-    [void]$copyStep.SetAttribute('successCodeList', '0 3010')
-    $actionNode = $copyStep.SelectSingleNode('action')
+    [void]$stageStep.SetAttribute('name', 'stage MMA MDT Runner MSI locally')
+    [void]$stageStep.SetAttribute('continueOnError', 'true')
+    [void]$stageStep.SetAttribute('disable', 'false')
+    [void]$stageStep.SetAttribute('successCodeList', '0 3010')
+    $actionNode = $stageStep.SelectSingleNode('action')
     if (-not $actionNode) {
       $actionNode = $SequenceXml.CreateElement('action')
-      [void]$copyStep.AppendChild($actionNode)
+      [void]$stageStep.AppendChild($actionNode)
     }
-    $actionNode.InnerText = $desktopCopyAction
+    $actionNode.InnerText = $stageAction
   }
 
   return $runnerSharePath
+}
+
+function Set-OrCreateRunnerLauncherStep {
+  param([xml]$SequenceXml)
+
+  $launcherScript = @'
+$targets = @(
+  'C:\Users\Public\Desktop\Relancer diagnostic MDT.lnk',
+  'C:\Users\Administrateur\Desktop\Relancer diagnostic MDT.lnk'
+)
+$shortcutTarget = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+$shortcutArguments = '-NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\MMA Automation\MdtRunner\MmaMdtRunner.ps1"'
+$workingDirectory = 'C:\Program Files\MMA Automation\MdtRunner'
+$shortcutDescription = 'Relance locale des checks atelier MDT'
+
+if (Test-Path $workingDirectory) {
+  $shell = New-Object -ComObject WScript.Shell
+  foreach ($shortcutPath in $targets) {
+    $directory = Split-Path -Path $shortcutPath -Parent
+    if (-not (Test-Path $directory)) { continue }
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = $shortcutTarget
+    $shortcut.Arguments = $shortcutArguments
+    $shortcut.WorkingDirectory = $workingDirectory
+    $shortcut.Description = $shortcutDescription
+    $shortcut.Save()
+  }
+}
+
+Remove-Item 'C:\Relancer diagnostic MDT.lnk' -Force -ErrorAction SilentlyContinue
+Remove-Item 'C:\Users\Public\Desktop\MmaMdtRunner-1.0.0.msi' -Force -ErrorAction SilentlyContinue
+Remove-Item 'C:\Users\Administrateur\Desktop\MmaMdtRunner-1.0.0.msi' -Force -ErrorAction SilentlyContinue
+'@
+  $encodedLauncherScript = Convert-ToPowerShellEncodedCommand -Script $launcherScript
+  $launcherAction = '%WINDIR%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {0}' -f $encodedLauncherScript
+
+  $allGroups = @($SequenceXml.SelectNodes('//group'))
+  $targetGroup = $null
+  $executeStep = $null
+  $installStep = $null
+  $launcherStep = $null
+  foreach ($group in $allGroups) {
+    foreach ($step in @($group.step)) {
+      if ($step -and [string]$step.name -eq 'execute report script') {
+        $targetGroup = $group
+        $executeStep = $step
+      }
+      if ($step -and [string]$step.name -eq 'install MMA MDT Runner') {
+        $installStep = $step
+      }
+      if ($step -and [string]$step.name -eq 'publish MMA MDT Runner launcher') {
+        $launcherStep = $step
+      }
+    }
+    if ($targetGroup) { break }
+  }
+
+  if (-not $targetGroup -or -not $executeStep) {
+    throw 'Unable to locate the "execute report script" step in TS.xml.'
+  }
+
+  if (-not $launcherStep) {
+    $launcherStep = New-RunCommandStepNode `
+      -SequenceXml $SequenceXml `
+      -StepName 'publish MMA MDT Runner launcher' `
+      -Action $launcherAction `
+      -ContinueOnError $true
+    [void]$targetGroup.InsertBefore($launcherStep, $executeStep)
+  } else {
+    [void]$launcherStep.SetAttribute('continueOnError', 'true')
+    [void]$launcherStep.SetAttribute('disable', 'false')
+    [void]$launcherStep.SetAttribute('successCodeList', '0 3010')
+    $actionNode = $launcherStep.SelectSingleNode('action')
+    if (-not $actionNode) {
+      $actionNode = $SequenceXml.CreateElement('action')
+      [void]$launcherStep.AppendChild($actionNode)
+    }
+    $actionNode.InnerText = $launcherAction
+  }
+
+  if ($installStep) {
+    [void]$targetGroup.RemoveChild($launcherStep)
+    if ($installStep.NextSibling) {
+      [void]$targetGroup.InsertBefore($launcherStep, $installStep.NextSibling)
+    } else {
+      [void]$targetGroup.AppendChild($launcherStep)
+    }
+  }
 }
 
 $controlRoot = Join-Path $DeploymentShareRoot 'Control'
@@ -335,7 +434,7 @@ Set-OrCreateVariableNode -SequenceXml $destinationTsXml -Name 'MMA_TECHNICIAN' -
 Set-OrCreateVariableNode -SequenceXml $destinationTsXml -Name 'MDT_TECHNICIAN' -Value $TechnicianDisplayName
 $runnerSharePath = $null
 if ($InstallRunnerMsi) {
-  $runnerSharePath = Set-OrCreateRunnerDesktopCopyStep `
+  $runnerSharePath = Set-OrCreateRunnerPackageStageStep `
     -SequenceXml $destinationTsXml `
     -ShareServerName $ShareServerName `
     -RunnerPackageRelativePath $RunnerPackageRelativePath
@@ -343,6 +442,7 @@ if ($InstallRunnerMsi) {
     -SequenceXml $destinationTsXml `
     -ShareServerName $ShareServerName `
     -RunnerPackageRelativePath $RunnerPackageRelativePath
+  Set-OrCreateRunnerLauncherStep -SequenceXml $destinationTsXml
 }
 $destinationTsXml.Save($destinationTsXmlPath)
 
