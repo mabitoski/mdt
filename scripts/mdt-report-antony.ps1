@@ -47,6 +47,7 @@ param(
   [switch]$SkipGpuAssessment,
   [switch]$SkipStressScript,
   [switch]$SkipElevation,
+  [switch]$SkipDebugWinRM,
   [switch]$SkipTlsValidation,
   [switch]$FactoryReset,
   [string]$FactoryResetConfirm,
@@ -67,7 +68,7 @@ param(
   [string]$PayloadOutputPath
 )
 
-$scriptVersion = '1.7.8'
+$scriptVersion = '1.7.13'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -126,6 +127,9 @@ if (-not $PSBoundParameters.ContainsKey('QueueOnUploadFailure') -and $env:MDT_QU
 if (-not $PSBoundParameters.ContainsKey('SkipGpuAssessment') -and $env:MDT_SKIP_GPU_ASSESSMENT -eq '1') {
   $SkipGpuAssessment = $true
 }
+if (-not $PSBoundParameters.ContainsKey('SkipDebugWinRM') -and $env:MDT_SKIP_DEBUG_WINRM -eq '1') {
+  $SkipDebugWinRM = $true
+}
 
 if (-not $ObjectStorageEndpoint) { $ObjectStorageEndpoint = 'http://10.1.10.28:9000' }
 if (-not $ObjectStorageBucket) { $ObjectStorageBucket = 'alcyone-archive' }
@@ -161,6 +165,10 @@ $script:ProgressEnabled = $true
 try { $script:ProgressEnabled = [Environment]::UserInteractive } catch { }
 $script:ProgressTotal = 8
 $script:ProgressStep = 0
+$script:RemoteAccessNetworkDebug = $null
+$script:RemoteAccessWinRmDebug = $null
+$script:WinRmBootstrapStatus = 'not_started'
+$script:WinRmBootstrapReason = $null
 
 function Step-Progress {
   param([string]$Status)
@@ -177,6 +185,552 @@ function Step-Progress {
 function Complete-Progress {
   if (-not $script:ProgressEnabled) { return }
   Write-Progress -Activity 'MDT report' -Completed
+}
+
+function Get-FileFingerprint {
+  param([string]$Path)
+
+  if (-not $Path) { return 'missing_path' }
+  if (-not (Test-Path $Path)) { return 'missing' }
+  try {
+    $item = Get-Item -Path $Path -ErrorAction Stop
+    $hash = (Get-FileHash -Algorithm SHA256 -Path $Path -ErrorAction Stop).Hash
+    return "size=$($item.Length) mtime=$($item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')) sha256=$hash"
+  } catch {
+    return "fingerprint_failed: $($_.Exception.Message)"
+  }
+}
+
+function Join-DiagnosticValues {
+  param([object[]]$Values)
+
+  $items = @()
+  foreach ($value in @($Values)) {
+    if ($null -eq $value) { continue }
+    $text = [string]$value
+    if ([string]::IsNullOrWhiteSpace($text)) { continue }
+    $items += $text.Trim()
+  }
+
+  $items = @($items | Select-Object -Unique)
+  if ($items.Count -eq 0) { return 'none' }
+  return ($items -join ', ')
+}
+
+function Convert-BatteryDiagnosticValue {
+  param([object]$Value)
+
+  if ($null -eq $Value) { return 'null' }
+  if ($Value -is [string]) {
+    $text = $Value.Trim()
+    if (-not $text) { return "''" }
+    return $text
+  }
+  if ($Value -is [System.Collections.IDictionary] -or $Value -is [pscustomobject]) {
+    try {
+      return ($Value | ConvertTo-Json -Depth 4 -Compress)
+    } catch {
+      return [string]$Value
+    }
+  }
+  if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+    $items = @()
+    foreach ($item in $Value) {
+      if ($null -eq $item) { continue }
+      $items += (Convert-BatteryDiagnosticValue -Value $item)
+    }
+    if ($items.Count -eq 0) { return 'none' }
+    return ($items -join ', ')
+  }
+  return [string]$Value
+}
+
+function Write-BatteryDiagnostics {
+  param(
+    [string]$Stage,
+    [hashtable]$Values,
+    [string]$Level = 'INFO'
+  )
+
+  $parts = @()
+  if ($Values) {
+    foreach ($key in $Values.Keys) {
+      $parts += ('{0}={1}' -f $key, (Convert-BatteryDiagnosticValue -Value $Values[$key]))
+    }
+  }
+  if ($parts.Count -eq 0) { $parts = @('no_data') }
+  Write-Log ("Battery diagnostics [{0}] {1}" -f $Stage, ($parts -join '; ')) $Level
+}
+
+function Get-RegistryValueSafe {
+  param(
+    [string]$Path,
+    [string]$Name
+  )
+
+  try {
+    $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+    return $item.$Name
+  } catch {
+    return $null
+  }
+}
+
+function Get-NetworkDiagnosticRecords {
+  $configs = @()
+  try {
+    $configs = @(Get-CimInstance -ClassName 'Win32_NetworkAdapterConfiguration' -ErrorAction Stop)
+  } catch {
+    try {
+      $configs = @(Get-WmiObject -Class 'Win32_NetworkAdapterConfiguration' -ErrorAction Stop)
+    } catch {
+      Write-Log "Network adapter enumeration failed: $($_.Exception.Message)" 'WARN'
+      return @()
+    }
+  }
+
+  $records = @()
+  foreach ($cfg in $configs) {
+    $addresses = @($cfg.IPAddress)
+    $ipv4 = @($addresses | Where-Object { $_ -and $_ -match '^(?:\d{1,3}\.){3}\d{1,3}$' })
+    $ipv6 = @($addresses | Where-Object { $_ -and $_ -match ':' })
+    if (($ipv4.Count -eq 0) -and ($ipv6.Count -eq 0) -and -not $cfg.IPEnabled) { continue }
+
+    $records += [pscustomobject]@{
+      Description = if ($cfg.Description) { [string]$cfg.Description } else { 'unknown' }
+      Mac = if ($cfg.MACAddress) { [string]$cfg.MACAddress } else { 'unknown' }
+      Dhcp = if ($null -ne $cfg.DHCPEnabled) { [string]$cfg.DHCPEnabled } else { 'unknown' }
+      Ipv4 = Join-DiagnosticValues -Values $ipv4
+      Ipv6 = Join-DiagnosticValues -Values $ipv6
+      Gateway = Join-DiagnosticValues -Values @($cfg.DefaultIPGateway)
+      Dns = Join-DiagnosticValues -Values @($cfg.DNSServerSearchOrder)
+    }
+  }
+
+  return $records
+}
+
+function Get-NetworkDebugSnapshot {
+  $records = @(Get-NetworkDiagnosticRecords)
+  $hostNames = @($env:COMPUTERNAME)
+  try {
+    $dnsHostName = [System.Net.Dns]::GetHostName()
+    if ($dnsHostName) { $hostNames += $dnsHostName }
+  } catch { }
+  try {
+    $hostEntry = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME)
+    if ($hostEntry -and $hostEntry.HostName) { $hostNames += $hostEntry.HostName }
+  } catch { }
+
+  $ipv4Values = @()
+  $ipv6Values = @()
+  $adapterDetails = @()
+
+  foreach ($record in $records) {
+    $adapterIpv4 = @()
+    $adapterIpv6 = @()
+    $adapterGateway = @()
+    $adapterDns = @()
+
+    if ($record.Ipv4 -and $record.Ipv4 -ne 'none') {
+      $adapterIpv4 = @($record.Ipv4 -split '\s*,\s*' | Where-Object { $_ })
+      $ipv4Values += $adapterIpv4
+    }
+    if ($record.Ipv6 -and $record.Ipv6 -ne 'none') {
+      $adapterIpv6 = @($record.Ipv6 -split '\s*,\s*' | Where-Object { $_ })
+      $ipv6Values += $adapterIpv6
+    }
+    if ($record.Gateway -and $record.Gateway -ne 'none') {
+      $adapterGateway = @($record.Gateway -split '\s*,\s*' | Where-Object { $_ })
+    }
+    if ($record.Dns -and $record.Dns -ne 'none') {
+      $adapterDns = @($record.Dns -split '\s*,\s*' | Where-Object { $_ })
+    }
+
+    $adapterDetails += [ordered]@{
+      description = $record.Description
+      mac = $record.Mac
+      dhcp = $record.Dhcp
+      ipv4 = $adapterIpv4
+      ipv6 = $adapterIpv6
+      gateway = $adapterGateway
+      dns = $adapterDns
+    }
+  }
+
+  return [ordered]@{
+    hostnames = @($hostNames | Where-Object { $_ } | Select-Object -Unique)
+    ipv4 = @($ipv4Values | Where-Object { $_ } | Select-Object -Unique)
+    ipv6 = @($ipv6Values | Where-Object { $_ } | Select-Object -Unique)
+    adapters = $adapterDetails
+  }
+}
+
+function Write-NetworkDebugContext {
+  $snapshot = Get-NetworkDebugSnapshot
+  $script:RemoteAccessNetworkDebug = $snapshot
+  $records = if ($snapshot -and $snapshot.adapters) { @($snapshot.adapters) } else { @() }
+  if ($records.Count -eq 0) {
+    Write-Log 'NetworkDebug: no active adapters with IP addresses found.' 'WARN'
+  } else {
+    foreach ($record in $records) {
+      Write-Log ("NetworkAdapter desc={0} mac={1} dhcp={2} ipv4={3} ipv6={4} gateway={5} dns={6}" -f `
+          $record.Description, `
+          $record.Mac, `
+          $record.Dhcp, `
+          (Join-DiagnosticValues -Values $record.ipv4), `
+          (Join-DiagnosticValues -Values $record.ipv6), `
+          (Join-DiagnosticValues -Values $record.gateway), `
+          (Join-DiagnosticValues -Values $record.dns))
+    }
+  }
+
+  $hostSummary = Join-DiagnosticValues -Values $(if ($snapshot) { $snapshot.hostnames } else { @() })
+  $ipv4Summary = Join-DiagnosticValues -Values $(if ($snapshot) { $snapshot.ipv4 } else { @() })
+  $ipv6Summary = Join-DiagnosticValues -Values $(if ($snapshot) { $snapshot.ipv6 } else { @() })
+  Write-Log "NetworkSummary hostnames=$hostSummary ipv4=$ipv4Summary ipv6=$ipv6Summary"
+  Write-Log "WinRMDebugTargets hostnames=$hostSummary ipv4=$ipv4Summary"
+}
+
+function Get-WinRmFirewallStateSnapshot {
+  $rules = @()
+  try {
+    $matches = @(Get-NetFirewallRule -ErrorAction Stop | Where-Object {
+        $_.Name -like 'MMA-WINRM-*' -or
+        $_.DisplayName -eq 'Allow WinRM HTTP' -or
+        $_.DisplayName -eq 'WinRM 5985 MMA' -or
+        $_.Name -like 'WINRM-HTTP*'
+      })
+    foreach ($rule in $matches) {
+      if (-not $rule) { continue }
+      $remoteAddresses = @()
+      try {
+        $remoteAddresses = @(
+          $rule |
+            Get-NetFirewallAddressFilter -ErrorAction Stop |
+            ForEach-Object { if ($_.RemoteAddress) { [string]$_.RemoteAddress } }
+        )
+      } catch { }
+      $rules += [ordered]@{
+        name = [string]$rule.Name
+        displayName = [string]$rule.DisplayName
+        enabled = [bool]$rule.Enabled
+        profile = [string]$rule.Profile
+        direction = [string]$rule.Direction
+        action = [string]$rule.Action
+        remoteAddress = if ($remoteAddresses.Count -gt 0) { Join-DiagnosticValues -Values $remoteAddresses } else { $null }
+      }
+    }
+  } catch { }
+
+  return @($rules)
+}
+
+function Get-WinRmStateSnapshot {
+  $snapshot = [ordered]@{
+    bootstrapStatus = $script:WinRmBootstrapStatus
+    bootstrapReason = $script:WinRmBootstrapReason
+    serviceStatus = 'unknown'
+    startMode = 'unknown'
+    localAccountTokenFilterPolicy = $null
+    listeners = @()
+    serviceAuth = @()
+    firewallRules = @()
+    testWsMan = [ordered]@{
+      status = 'not_tested'
+      vendor = $null
+      version = $null
+    }
+  }
+
+  try {
+    $svcMeta = $null
+    try {
+      $svcMeta = Get-CimInstance -ClassName 'Win32_Service' -Filter "Name='WinRM'" -ErrorAction Stop | Select-Object -First 1
+    } catch {
+      try {
+        $svcMeta = Get-WmiObject -Class 'Win32_Service' -Filter "Name='WinRM'" -ErrorAction Stop | Select-Object -First 1
+      } catch { }
+    }
+    if ($svcMeta -and $svcMeta.StartMode) { $snapshot.startMode = [string]$svcMeta.StartMode }
+  } catch { }
+
+  try {
+    $service = Get-Service -Name 'WinRM' -ErrorAction Stop
+    $snapshot.serviceStatus = [string]$service.Status
+  } catch { }
+
+  $snapshot.localAccountTokenFilterPolicy = Get-RegistryValueSafe -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'LocalAccountTokenFilterPolicy'
+
+  try {
+    $winrmCommand = Get-Command 'winrm.cmd' -ErrorAction SilentlyContinue
+    if (-not $winrmCommand) {
+      $winrmCommand = Get-Command 'winrm' -ErrorAction SilentlyContinue
+    }
+    if ($winrmCommand) {
+      $listenerLines = @(& $winrmCommand.Source enumerate winrm/config/listener 2>&1 | ForEach-Object { [string]$_ })
+      $filteredLines = @($listenerLines | Where-Object { $_ -and $_.Trim() })
+      $snapshot.listeners = $filteredLines
+    }
+  } catch { }
+
+  try {
+    $winrmCommand = Get-Command 'winrm.cmd' -ErrorAction SilentlyContinue
+    if (-not $winrmCommand) {
+      $winrmCommand = Get-Command 'winrm' -ErrorAction SilentlyContinue
+    }
+    if ($winrmCommand) {
+      $serviceAuthLines = @(& $winrmCommand.Source get winrm/config/service/auth 2>&1 | ForEach-Object { [string]$_ })
+      $snapshot.serviceAuth = @($serviceAuthLines | Where-Object { $_ -and $_.Trim() })
+    }
+  } catch { }
+
+  $snapshot.firewallRules = Get-WinRmFirewallStateSnapshot
+
+  try {
+    $testWsman = Test-WSMan -ComputerName 'localhost' -ErrorAction Stop
+    $snapshot.testWsMan = [ordered]@{
+      status = 'ok'
+      vendor = if ($testWsman.ProductVendor) { [string]$testWsman.ProductVendor } else { $null }
+      version = if ($testWsman.ProductVersion) { [string]$testWsman.ProductVersion } else { $null }
+    }
+  } catch {
+    $snapshot.testWsMan = [ordered]@{
+      status = 'failed'
+      vendor = $null
+      version = $null
+      error = $_.Exception.Message
+    }
+  }
+
+  return $snapshot
+}
+
+function Write-WinRmState {
+  $snapshot = Get-WinRmStateSnapshot
+  $script:RemoteAccessWinRmDebug = $snapshot
+
+  Write-Log ("WinRM bootstrap status={0} reason={1}" -f `
+      $snapshot.bootstrapStatus, `
+      $(if ($snapshot.bootstrapReason) { $snapshot.bootstrapReason } else { 'none' }))
+  Write-Log "WinRM service status=$($snapshot.serviceStatus) startMode=$($snapshot.startMode)"
+
+  $latfpText = if ($null -ne $snapshot.localAccountTokenFilterPolicy) { [string]$snapshot.localAccountTokenFilterPolicy } else { 'missing' }
+  Write-Log "WinRM LocalAccountTokenFilterPolicy=$latfpText"
+
+  if ($snapshot.listeners -and $snapshot.listeners.Count -gt 0) {
+    foreach ($line in $snapshot.listeners) {
+      Write-Log "WinRM listener: $line"
+    }
+  } else {
+    Write-Log 'WinRM listener enumeration returned no data.' 'WARN'
+  }
+
+  if ($snapshot.serviceAuth -and $snapshot.serviceAuth.Count -gt 0) {
+    foreach ($line in $snapshot.serviceAuth) {
+      Write-Log "WinRM service auth: $line"
+    }
+  } else {
+    Write-Log 'WinRM service auth enumeration returned no data.' 'WARN'
+  }
+
+  if ($snapshot.firewallRules -and $snapshot.firewallRules.Count -gt 0) {
+    foreach ($rule in $snapshot.firewallRules) {
+      $remoteAddressText = if ($rule.remoteAddress) { $rule.remoteAddress } else { 'default' }
+      Write-Log ("WinRM firewall: name={0} display={1} enabled={2} profile={3} direction={4} action={5} remote={6}" -f `
+          $rule.name, `
+          $rule.displayName, `
+          $rule.enabled, `
+          $rule.profile, `
+          $rule.direction, `
+          $rule.action, `
+          $remoteAddressText)
+    }
+  } else {
+    Write-Log 'WinRM firewall enumeration returned no data.' 'WARN'
+  }
+
+  if ($snapshot.testWsMan -and $snapshot.testWsMan.status -eq 'ok') {
+    $productVendor = if ($snapshot.testWsMan.vendor) { $snapshot.testWsMan.vendor } else { 'unknown' }
+    $productVersion = if ($snapshot.testWsMan.version) { $snapshot.testWsMan.version } else { 'unknown' }
+    Write-Log "Test-WSMan localhost OK vendor=$productVendor version=$productVersion"
+  } else {
+    $message = if ($snapshot.testWsMan -and $snapshot.testWsMan.error) { $snapshot.testWsMan.error } else { 'unknown error' }
+    Write-Log "Test-WSMan localhost failed: $message" 'WARN'
+  }
+}
+
+function Enable-DebugWinRM {
+  if ($SkipDebugWinRM) {
+    $script:WinRmBootstrapStatus = 'skipped'
+    $script:WinRmBootstrapReason = 'SkipDebugWinRM'
+    Write-Log 'Debug WinRM bootstrap skipped (SkipDebugWinRM set).' 'WARN'
+    return
+  }
+  if ($script:IsWinPE) {
+    $script:WinRmBootstrapStatus = 'skipped'
+    $script:WinRmBootstrapReason = 'WinPE'
+    Write-Log 'Debug WinRM bootstrap skipped in WinPE.' 'WARN'
+    return
+  }
+  if (-not $script:IsAdmin) {
+    $script:WinRmBootstrapStatus = 'skipped'
+    $script:WinRmBootstrapReason = 'admin_required'
+    Write-Log 'Debug WinRM bootstrap skipped (admin required).' 'WARN'
+    return
+  }
+
+  Write-Log 'Configuring WinRM for MDT debug access.'
+  $errors = @()
+  try {
+    Set-Service -Name 'WinRM' -StartupType Automatic -ErrorAction Stop
+    Write-Log 'WinRM startup type set to Automatic'
+  } catch {
+    $errors += "Set-Service: $($_.Exception.Message)"
+    Write-Log "Set-Service WinRM failed: $($_.Exception.Message)" 'WARN'
+  }
+
+  try {
+    Start-Service -Name 'WinRM' -ErrorAction Stop
+    Write-Log 'WinRM service started'
+  } catch {
+    $errors += "Start-Service: $($_.Exception.Message)"
+    Write-Log "Start-Service WinRM failed: $($_.Exception.Message)" 'WARN'
+  }
+
+  try {
+    Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction Stop
+    Write-Log 'Enable-PSRemoting completed'
+  } catch {
+    $errors += "Enable-PSRemoting: $($_.Exception.Message)"
+    Write-Log "Enable-PSRemoting failed: $($_.Exception.Message)" 'WARN'
+  }
+
+  try {
+    New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Force | Out-Null
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'LocalAccountTokenFilterPolicy' -PropertyType DWord -Value 1 -Force | Out-Null
+    Write-Log 'LocalAccountTokenFilterPolicy set to 1'
+  } catch {
+    $errors += "LocalAccountTokenFilterPolicy: $($_.Exception.Message)"
+    Write-Log "LocalAccountTokenFilterPolicy update failed: $($_.Exception.Message)" 'WARN'
+  }
+
+  foreach ($ruleSpec in @(
+      @{ Name = 'MMA-WINRM-HTTP'; DisplayName = 'Allow WinRM HTTP' },
+      @{ Name = 'MMA-WINRM-5985'; DisplayName = 'WinRM 5985 MMA' }
+    )) {
+    try {
+      $existingRules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {
+          $_.Name -eq $ruleSpec.Name -or $_.DisplayName -eq $ruleSpec.DisplayName
+        })
+      foreach ($existingRule in $existingRules) {
+        Remove-NetFirewallRule -InputObject $existingRule -ErrorAction SilentlyContinue | Out-Null
+      }
+      New-NetFirewallRule `
+        -Name $ruleSpec.Name `
+        -DisplayName $ruleSpec.DisplayName `
+        -Direction Inbound `
+        -Action Allow `
+        -Enabled True `
+        -Profile Any `
+        -Protocol TCP `
+        -LocalPort 5985 `
+        -RemoteAddress Any `
+        -ErrorAction Stop | Out-Null
+      Write-Log "WinRM firewall rule ensured: $($ruleSpec.DisplayName) (TCP/5985, Profile=Any, RemoteAddress=Any)"
+    } catch {
+      $errors += "Firewall-$($ruleSpec.Name): $($_.Exception.Message)"
+      Write-Log "WinRM firewall rule failed for $($ruleSpec.DisplayName): $($_.Exception.Message)" 'WARN'
+    }
+  }
+
+  if ($errors.Count -gt 0) {
+    $script:WinRmBootstrapStatus = 'partial'
+    $script:WinRmBootstrapReason = $errors -join ' | '
+  } else {
+    $script:WinRmBootstrapStatus = 'configured'
+    $script:WinRmBootstrapReason = $null
+  }
+}
+
+function Write-ErrorRecordDetails {
+  param(
+    $ErrorRecord,
+    [string]$Prefix = 'Error'
+  )
+
+  if (-not $ErrorRecord) { return }
+
+  $message = $null
+  try {
+    if ($ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
+      $message = $ErrorRecord.Exception.Message
+    }
+  } catch { }
+  if (-not $message) {
+    try { $message = [string]$ErrorRecord } catch { }
+  }
+  if ($message) {
+    Write-Log "$Prefix message: $message" 'ERROR'
+  }
+  try {
+    if ($ErrorRecord.FullyQualifiedErrorId) {
+      Write-Log "$Prefix id: $($ErrorRecord.FullyQualifiedErrorId)" 'ERROR'
+    }
+  } catch { }
+  try {
+    if ($ErrorRecord.InvocationInfo) {
+      $location = '{0}:{1}' -f $ErrorRecord.InvocationInfo.ScriptName, $ErrorRecord.InvocationInfo.ScriptLineNumber
+      Write-Log "$Prefix location: $location" 'ERROR'
+      if ($ErrorRecord.InvocationInfo.Line) {
+        Write-Log "$Prefix line: $($ErrorRecord.InvocationInfo.Line.Trim())" 'ERROR'
+      }
+    }
+  } catch { }
+  try {
+    if ($ErrorRecord.ScriptStackTrace) {
+      Write-Log "$Prefix stack: $($ErrorRecord.ScriptStackTrace)" 'ERROR'
+    }
+  } catch { }
+}
+
+function Write-DiagnosticContext {
+  $scriptPath = $null
+  try { $scriptPath = $PSCommandPath } catch { }
+  if (-not $scriptPath) {
+    try { $scriptPath = $MyInvocation.PSCommandPath } catch { }
+  }
+  if (-not $scriptPath) {
+    try { $scriptPath = $MyInvocation.MyCommand.Path } catch { }
+  }
+
+  Write-Log "ExecutionPath=$scriptPath"
+  try { Write-Log "WorkingDirectory=$((Get-Location).Path)" } catch { }
+  Write-Log "PSScriptRoot=$PSScriptRoot"
+  Write-Log "ComputerName=$env:COMPUTERNAME UserName=$env:USERNAME"
+  Write-Log "Env: TEMP=$env:TEMP SystemRoot=$env:SystemRoot"
+  Write-Log "Context: IsTaskSequence=$script:IsTaskSequenceContext IsInteractive=$script:IsInteractive IsAdmin=$script:IsAdmin"
+  Write-Log "SMSTS: CurrentAction=$env:_SMSTSCurrentActionName Package=$env:_SMSTSPackageName Advert=$env:_SMSTSAdvertID LogPath=$env:_SMSTSLogPath LaunchMode=$env:_SMSTSLaunchMode"
+  Write-Log "MDT: ApiUrl=$env:MDT_API_URL OutboxRoot=$env:MDT_OUTBOX_ROOT FailOnError=$env:MDT_FAIL_TS_ON_REPORT_ERROR QueueOnUploadFailure=$env:MDT_QUEUE_ON_UPLOAD_FAILURE SkipRawUpload=$env:MDT_SKIP_RAW_UPLOAD CommentCaptureInTs=$env:MDT_ENABLE_COMMENT_CAPTURE_IN_TS"
+  Write-NetworkDebugContext
+  Write-WinRmState
+
+  if ($scriptPath) {
+    Write-Log "ScriptFingerprint=$(Get-FileFingerprint -Path $scriptPath)"
+  }
+
+  foreach ($supportFile in @('keyboard_capture.ps1', 'camera.exe', 'mdt-stress.ps1')) {
+    try {
+      $supportPath = Join-Path $PSScriptRoot $supportFile
+      Write-Log "SupportFile[$supportFile]=$(Get-FileFingerprint -Path $supportPath)"
+    } catch { }
+  }
+}
+
+trap {
+  try { Write-ErrorRecordDetails -ErrorRecord $_ -Prefix 'Unhandled terminating error' } catch { }
+  try { Complete-Progress } catch { }
+  throw
 }
 
 function Initialize-WindowApi {
@@ -1394,6 +1948,7 @@ function Invoke-JsonPost {
 
   if (-not $Url -or -not $Json) { return $null }
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($Json)
+  Write-Log "Invoke-JsonPost url=$Url timeout=${TimeoutSec}s bytes=$($bytes.Length)"
   return Invoke-RestMethod -Uri $Url -Method Post -ContentType 'application/json; charset=utf-8' -Body $bytes -TimeoutSec $TimeoutSec
 }
 
@@ -1589,12 +2144,15 @@ function Upload-RunArtifacts {
   $result.bucket = $Bucket
   $result.prefix = $rootPrefix
   $result.destination = $destPath
+  Write-Log "Upload-RunArtifacts runDir=$RunDir endpoint=$Endpoint bucket=$Bucket prefix=$rootPrefix clientRunId=$ClientRunId"
 
   $resolvedMcPath = Resolve-McPath -Value $McPath
   if (-not $resolvedMcPath) {
+    Write-Log 'mc.exe unavailable for raw artifact upload.' 'WARN'
     $result.error = 'mc_missing'
     return $result
   }
+  Write-Log "Resolved mc path: $resolvedMcPath"
 
   try {
     & $resolvedMcPath alias set diagobj $Endpoint $AccessKey $SecretKey *> $null
@@ -2134,6 +2692,8 @@ $rawUploadResult = $null
 Set-ConsoleFullscreen
 Write-Log "Start script version $scriptVersion"
 Write-Log "ApiUrl=$ApiUrl Category=$Category TestMode=$TestMode"
+Enable-DebugWinRM
+Write-DiagnosticContext
 Step-Progress -Status 'Initialisation'
 
 $winsatRoots = @()
@@ -2851,8 +3411,17 @@ function Get-RamSlots {
 function Get-BatteryHealth {
   $static = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryStaticData'
   $full = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryFullChargedCapacity'
+  $staticCount = @($static).Count
+  $fullCount = @($full).Count
 
-  if (-not $static -or -not $full) { return $null }
+  if (-not $static -or -not $full) {
+    Write-BatteryDiagnostics -Stage 'health.wmi' -Level 'WARN' -Values ([ordered]@{
+        staticCount = $staticCount
+        fullCount = $fullCount
+        result = 'missing_wmi_capacity'
+      })
+    return $null
+  }
 
   $values = @()
   foreach ($item in $static) {
@@ -2870,9 +3439,23 @@ function Get-BatteryHealth {
   }
 
   if ($values.Count -gt 0) {
-    return [int][math]::Round(($values | Measure-Object -Average).Average)
+    $averageHealth = [int][math]::Round(($values | Measure-Object -Average).Average)
+    Write-BatteryDiagnostics -Stage 'health.wmi' -Values ([ordered]@{
+        staticCount = $staticCount
+        fullCount = $fullCount
+        matchedSamples = $values.Count
+        healthValues = $values
+        averageHealth = $averageHealth
+      })
+    return $averageHealth
   }
 
+  Write-BatteryDiagnostics -Stage 'health.wmi' -Level 'WARN' -Values ([ordered]@{
+      staticCount = $staticCount
+      fullCount = $fullCount
+      matchedSamples = 0
+      result = 'no_valid_capacity_pairs'
+    })
   return $null
 }
 
@@ -2881,6 +3464,10 @@ function Get-BatteryInfo {
   $full = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryFullChargedCapacity'
   $status = Get-CimInstanceSafe -Namespace 'root\wmi' -ClassName 'BatteryStatus'
   $battery = Get-CimInstanceSafe -ClassName 'Win32_Battery'
+  $staticCount = @($static).Count
+  $fullCount = @($full).Count
+  $statusCount = @($status).Count
+  $win32Count = @($battery).Count
 
   $designWh = $null
   $fullWh = $null
@@ -2889,6 +3476,7 @@ function Get-BatteryInfo {
   $powerSource = $null
   $batteryItem = $null
   $infoStatus = $null
+  $statusValue = $null
 
   foreach ($item in $static) {
     $design = $item.DesignedCapacity
@@ -2924,7 +3512,7 @@ function Get-BatteryInfo {
     $infoStatus = 'not_tested'
   }
 
-  return [ordered]@{
+  $result = [ordered]@{
     designCapacityWh = $designWh
     fullChargeCapacityWh = $fullWh
     remainingCapacityWh = $remainingWh
@@ -2933,6 +3521,22 @@ function Get-BatteryInfo {
     powerSource = $powerSource
     status = $infoStatus
   }
+  $logLevel = if ($designWh -eq $null -and $fullWh -eq $null -and $chargePercent -eq $null) { 'WARN' } else { 'INFO' }
+  Write-BatteryDiagnostics -Stage 'info.wmi' -Level $logLevel -Values ([ordered]@{
+      staticCount = $staticCount
+      fullCount = $fullCount
+      statusCount = $statusCount
+      win32Count = $win32Count
+      designWh = $designWh
+      fullWh = $fullWh
+      remainingWh = $remainingWh
+      chargePercent = $chargePercent
+      estimatedRuntimeMin = $estimatedRuntimeMin
+      powerSource = $powerSource
+      batteryStatusCode = $statusValue
+      infoStatus = $infoStatus
+    })
+  return $result
 }
 
 function Invoke-BatteryReport {
@@ -2948,6 +3552,11 @@ function Invoke-BatteryReport {
   $cmd = Get-Command powercfg -ErrorAction SilentlyContinue
   if (-not $cmd) {
     $result.status = 'absent'
+    Write-BatteryDiagnostics -Stage 'report.invoke' -Level 'WARN' -Values ([ordered]@{
+        command = 'missing'
+        outputDir = $OutputDir
+        result = 'powercfg_missing'
+      })
     return $result
   }
 
@@ -2961,22 +3570,50 @@ function Invoke-BatteryReport {
   $OutputDir = Ensure-Directory -Path $OutputDir
   if (-not $OutputDir) {
     $result.status = 'nok'
+    Write-BatteryDiagnostics -Stage 'report.invoke' -Level 'WARN' -Values ([ordered]@{
+        command = $cmd.Source
+        outputDir = $OutputDir
+        result = 'output_dir_unavailable'
+      })
     return $result
   }
 
   $reportPath = Join-Path $OutputDir 'battery-report.html'
   $result.reportPath = $reportPath
+  Write-BatteryDiagnostics -Stage 'report.invoke' -Values ([ordered]@{
+      command = $cmd.Source
+      outputDir = $OutputDir
+      reportPath = $reportPath
+      result = 'starting'
+    })
 
   try {
     & $cmd.Source /batteryreport /output $reportPath | Out-Null
+    $reportSize = $null
     if (Test-Path $reportPath) {
       $result.status = 'ok'
+      try { $reportSize = (Get-Item -Path $reportPath -ErrorAction Stop).Length } catch { }
     } else {
       $result.status = 'nok'
     }
+    $logLevel = if ($result.status -eq 'ok') { 'INFO' } else { 'WARN' }
+    Write-BatteryDiagnostics -Stage 'report.invoke' -Level $logLevel -Values ([ordered]@{
+        command = $cmd.Source
+        outputDir = $OutputDir
+        reportPath = $reportPath
+        status = $result.status
+        sizeBytes = $reportSize
+      })
   } catch {
     Write-Log "Battery report failed: $($_.Exception.Message)" 'WARN'
     $result.status = 'nok'
+    Write-BatteryDiagnostics -Stage 'report.invoke' -Level 'WARN' -Values ([ordered]@{
+        command = $cmd.Source
+        outputDir = $OutputDir
+        reportPath = $reportPath
+        status = $result.status
+        exception = $_.Exception.Message
+      })
   }
 
   return $result
@@ -3038,6 +3675,10 @@ function Parse-BatteryReport {
   )
 
   if (-not $ReportPath -or -not (Test-Path -Path $ReportPath)) {
+    Write-BatteryDiagnostics -Stage 'report.parse' -Level 'WARN' -Values ([ordered]@{
+        reportPath = $ReportPath
+        result = 'missing_report_path'
+      })
     return $null
   }
 
@@ -3046,10 +3687,19 @@ function Parse-BatteryReport {
     $content = Get-Content -Path $ReportPath -Raw -ErrorAction Stop
   } catch {
     Write-Log "Battery report parsing failed: $($_.Exception.Message)" 'WARN'
+    Write-BatteryDiagnostics -Stage 'report.parse' -Level 'WARN' -Values ([ordered]@{
+        reportPath = $ReportPath
+        result = 'read_failed'
+        exception = $_.Exception.Message
+      })
     return $null
   }
 
   if (-not $content) {
+    Write-BatteryDiagnostics -Stage 'report.parse' -Level 'WARN' -Values ([ordered]@{
+        reportPath = $ReportPath
+        result = 'empty_report'
+      })
     return $null
   }
 
@@ -3061,6 +3711,10 @@ function Parse-BatteryReport {
     -replace '\s+', ' '
   $normalized = Normalize-BatteryReportText -Text $plain
   if (-not $normalized) {
+    Write-BatteryDiagnostics -Stage 'report.parse' -Level 'WARN' -Values ([ordered]@{
+        reportPath = $ReportPath
+        result = 'normalized_content_empty'
+      })
     return $null
   }
 
@@ -3068,6 +3722,10 @@ function Parse-BatteryReport {
   $fullMwh = Find-BatteryReportMetric -Text $normalized -Labels @('full charge capacity', 'capacite de charge complete')
 
   if ($designMwh -eq $null -and $fullMwh -eq $null) {
+    Write-BatteryDiagnostics -Stage 'report.parse' -Level 'WARN' -Values ([ordered]@{
+        reportPath = $ReportPath
+        result = 'capacity_metrics_not_found'
+      })
     return $null
   }
 
@@ -3080,12 +3738,20 @@ function Parse-BatteryReport {
     if ($healthPercent -lt 0) { $healthPercent = 0 }
   }
 
-  return [ordered]@{
+  $result = [ordered]@{
     designCapacityWh = $designWh
     fullChargeCapacityWh = $fullWh
     healthPercent = if ($healthPercent -ne $null) { [int]$healthPercent } else { $null }
     source = 'battery_report'
   }
+  Write-BatteryDiagnostics -Stage 'report.parse' -Values ([ordered]@{
+      reportPath = $ReportPath
+      designWh = $designWh
+      fullWh = $fullWh
+      healthPercent = $result.healthPercent
+      source = $result.source
+    })
+  return $result
 }
 
 function Get-DiskSmartStatus {
@@ -4402,7 +5068,14 @@ function Normalize-InventoryString {
 
 function Get-BatteryInventory {
   $items = Get-CimInstanceSafe -ClassName 'Win32_Battery'
-  if (-not $items) { return @() }
+  if (-not $items) {
+    Write-BatteryDiagnostics -Stage 'inventory.win32' -Values ([ordered]@{
+        win32Count = 0
+        capturedCount = 0
+        result = 'no_win32_battery'
+      })
+    return @()
+  }
   $list = @()
   foreach ($item in $items) {
     $serial = Normalize-InventoryString $item.SerialNumber
@@ -4411,6 +5084,17 @@ function Get-BatteryInventory {
       $list += [ordered]@{ serialNumber = $serial; deviceId = $deviceId }
     }
   }
+  $labels = @(
+    $list | ForEach-Object {
+      if ($_.serialNumber) { $_.serialNumber }
+      elseif ($_.deviceId) { $_.deviceId }
+    }
+  )
+  Write-BatteryDiagnostics -Stage 'inventory.win32' -Values ([ordered]@{
+      win32Count = @($items).Count
+      capturedCount = $list.Count
+      items = $labels
+    })
   return $list
 }
 
@@ -4654,8 +5338,8 @@ $osVersion = Get-OsVersion
 $ramMb = Get-RamMb
 $slotsInfo = Get-RamSlots
 $batteryHealth = Get-BatteryHealth
+$batteryHealthSource = if ($batteryHealth -ne $null) { 'wmi_capacity' } else { $null }
 $batteryInfo = Get-BatteryInfo
-$batteryHealthSource = $null
 if ($batteryHealth -eq $null -and $batteryInfo -and $batteryInfo.chargePercent -ne $null) {
   $batteryHealth = [int]$batteryInfo.chargePercent
   $batteryHealthSource = 'estimated_charge'
@@ -4663,7 +5347,20 @@ if ($batteryHealth -eq $null -and $batteryInfo -and $batteryInfo.chargePercent -
 $batteryInventory = Get-BatteryInventory
 $batteryReport = $null
 $batteryReportData = $null
-if ($categoryValue -eq 'laptop' -or $batteryHealth -eq $null -or ($batteryInfo -and $batteryInfo.status -eq 'not_tested')) {
+$shouldRunBatteryReport = $categoryValue -eq 'laptop' -or $batteryHealth -eq $null -or ($batteryInfo -and $batteryInfo.status -eq 'not_tested')
+Write-BatteryDiagnostics -Stage 'pipeline.initial' -Values ([ordered]@{
+    category = $categoryValue
+    initialHealth = $batteryHealth
+    initialHealthSource = $batteryHealthSource
+    infoStatus = if ($batteryInfo) { $batteryInfo.status } else { $null }
+    designWh = if ($batteryInfo) { $batteryInfo.designCapacityWh } else { $null }
+    fullWh = if ($batteryInfo) { $batteryInfo.fullChargeCapacityWh } else { $null }
+    remainingWh = if ($batteryInfo) { $batteryInfo.remainingCapacityWh } else { $null }
+    chargePercent = if ($batteryInfo) { $batteryInfo.chargePercent } else { $null }
+    inventoryCount = @($batteryInventory).Count
+    shouldRunBatteryReport = $shouldRunBatteryReport
+  })
+if ($shouldRunBatteryReport) {
   $batteryReportOutputDir = if ($artifactRunDir) { Join-Path $artifactRunDir 'Battery' } else { $null }
   $batteryReport = Invoke-BatteryReport -OutputDir $batteryReportOutputDir
   if ($batteryReport -and $batteryReport.reportPath) {
@@ -4688,6 +5385,31 @@ if ($batteryReportData) {
 if ($batteryHealth -eq $null -and $batteryInfo -and $batteryInfo.status -eq $null) {
   $batteryInfo.status = 'not_tested'
 }
+$finalBatteryLogLevel = if (
+  $categoryValue -eq 'laptop' -and
+  $batteryHealth -eq $null -and
+  ($batteryInfo.designCapacityWh -eq $null) -and
+  ($batteryInfo.fullChargeCapacityWh -eq $null)
+) {
+  'WARN'
+} else {
+  'INFO'
+}
+Write-BatteryDiagnostics -Stage 'pipeline.final' -Level $finalBatteryLogLevel -Values ([ordered]@{
+    category = $categoryValue
+    finalHealth = $batteryHealth
+    finalHealthSource = $batteryHealthSource
+    infoStatus = if ($batteryInfo) { $batteryInfo.status } else { $null }
+    designWh = if ($batteryInfo) { $batteryInfo.designCapacityWh } else { $null }
+    fullWh = if ($batteryInfo) { $batteryInfo.fullChargeCapacityWh } else { $null }
+    remainingWh = if ($batteryInfo) { $batteryInfo.remainingCapacityWh } else { $null }
+    chargePercent = if ($batteryInfo) { $batteryInfo.chargePercent } else { $null }
+    powerSource = if ($batteryInfo) { $batteryInfo.powerSource } else { $null }
+    inventoryCount = @($batteryInventory).Count
+    batteryReportStatus = if ($batteryReport) { $batteryReport.status } else { 'not_requested' }
+    batteryReportPath = if ($batteryReport) { $batteryReport.reportPath } else { $null }
+    batteryReportHealth = if ($batteryReportData) { $batteryReportData.healthPercent } else { $null }
+  })
 Step-Progress -Status 'Inventaire materiel'
 
 $skipPeripheralTests = $categoryValue -eq 'desktop'
@@ -5314,6 +6036,24 @@ if ($memorySerials -and $memorySerials.Count -gt 0) { $inventory.memory = $memor
 if ($baseboardInventory) { $inventory.baseboard = $baseboardInventory }
 if ($autopilotHashValue) { $inventory.autopilotHash = $autopilotHashValue }
 if ($inventory.Count -gt 0) { $payload.inventory = $inventory }
+
+$remoteAccessDebug = [ordered]@{}
+if ($script:RemoteAccessNetworkDebug) {
+  if ($script:RemoteAccessNetworkDebug.hostnames) { $remoteAccessDebug.hostnames = @($script:RemoteAccessNetworkDebug.hostnames) }
+  if ($script:RemoteAccessNetworkDebug.ipv4) { $remoteAccessDebug.ipv4 = @($script:RemoteAccessNetworkDebug.ipv4) }
+  if ($script:RemoteAccessNetworkDebug.ipv6) { $remoteAccessDebug.ipv6 = @($script:RemoteAccessNetworkDebug.ipv6) }
+  if ($script:RemoteAccessNetworkDebug.adapters) { $remoteAccessDebug.adapters = @($script:RemoteAccessNetworkDebug.adapters) }
+}
+if ($script:RemoteAccessWinRmDebug) {
+  $remoteAccessDebug.winrm = $script:RemoteAccessWinRmDebug
+}
+if ($remoteAccessDebug.Count -gt 0) {
+  $remoteAccessDebug.collectedAt = (Get-Date).ToString('o')
+  $remoteAccessDebug.scriptVersion = $scriptVersion
+  $payload.debug = [ordered]@{
+    remoteAccess = $remoteAccessDebug
+  }
+}
 
 
 $payload.diag = $diag

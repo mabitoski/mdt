@@ -35,7 +35,7 @@ const state = {
   activeToken: null,
   quickCommentId: null,
   search: '',
-  sort: 'lastSeen',
+  sort: 'activity',
   layout: '3',
   expandedId: null,
   detailOverrideId: null,
@@ -46,6 +46,8 @@ const state = {
   canAccessAdmin: false,
   canCreateReportZero: false,
   canEditReports: false,
+  canEditBatteryHealth: false,
+  canEditTechnician: false,
   canManageLots: false,
   canManagePallets: false,
   canManageLogistics: false,
@@ -165,9 +167,17 @@ const timelineSummaryEl = document.getElementById('timeline-summary');
 const timelineListEl = document.getElementById('timeline-list');
 const resetFiltersBtn = document.getElementById('reset-filters-btn');
 const activeFiltersChip = document.getElementById('active-filters-chip');
+const resultsCountLabelEl = document.getElementById('results-count-label');
+const resultsFiltersSummaryEl = document.getElementById('results-filters-summary');
+const resultsCountInlineEl = document.getElementById('results-count-inline');
+const resultsFiltersInlineEl = document.getElementById('results-filters-inline');
+const sortSelect = document.getElementById('sort-select');
 const filterHubEl = document.getElementById('section-filters');
 const filterHubBodyEl = document.getElementById('filter-hub-body');
 const filterToggleBtn = document.getElementById('filter-toggle-btn');
+const summaryFilterButtons = document.querySelectorAll('.summary-filter-btn[data-summary]');
+const categoryFilterButtons = document.querySelectorAll('.category-filter-btn[data-category]');
+const signalFilterButtons = document.querySelectorAll('.signal-filter-btn[data-signal]');
 const kpiTotalEl = document.getElementById('kpi-total');
 const kpiActiveEl = document.getElementById('kpi-active');
 const kpiOkEl = document.getElementById('kpi-ok');
@@ -200,7 +210,7 @@ const categoryCycle = ['desktop', 'unknown', 'laptop'];
 const DEFAULT_TAG_LABEL = 'En cours';
 const DEFAULT_LOT_LABEL = 'Aucun lot';
 const DEFAULT_PALLET_LABEL = 'Aucune palette';
-const BATTERY_ALERT_THRESHOLD = 78;
+const BATTERY_ALERT_THRESHOLD = 75;
 const boardViewOptions = new Set(['workspace', 'battery-alerts']);
 
 const statusLabels = {
@@ -281,6 +291,7 @@ const delayClasses = [
 ];
 
 const layoutOptions = new Set(['1', '2', '3', '6']);
+const sortOptions = new Set(['activity', 'lastSeen', 'status', 'technician', 'name', 'category']);
 const layoutStorageKey = `mdt-layout${storageSuffix}`;
 const storedLayout = window.localStorage ? localStorage.getItem(layoutStorageKey) : null;
 if (storedLayout && layoutOptions.has(storedLayout)) {
@@ -315,6 +326,9 @@ const listTopSentinel = document.getElementById('scroll-top-sentinel');
 applyPreferences();
 if (searchInput) {
   searchInput.value = state.search;
+}
+if (!sortOptions.has(state.sort)) {
+  state.sort = 'activity';
 }
 updateSearchCollapse();
 
@@ -356,6 +370,7 @@ function savePreferences() {
     dateTo: state.dateTo,
     timelineGranularity: state.timelineGranularity,
     boardView: state.boardView,
+    sort: state.sort,
     search: state.search,
     quickFilter: state.quickFilter
   };
@@ -413,6 +428,9 @@ function applyPreferences() {
   }
   if (boardViewOptions.has(prefs.boardView)) {
     state.boardView = prefs.boardView;
+  }
+  if (typeof prefs.sort === 'string' && prefs.sort.trim()) {
+    state.sort = prefs.sort.trim();
   }
   if (dateFilterOrder.includes(prefs.dateFilter)) {
     state.dateFilter = prefs.dateFilter;
@@ -560,6 +578,7 @@ function updateDateFilterButtons() {
 
 function syncDateFilterControls() {
   updateDateFilterButtons();
+  updateSignalFilterButtons();
   renderTimeline();
 }
 
@@ -1317,6 +1336,14 @@ function updateLayoutButtons() {
   });
 }
 
+function updateSortSelect() {
+  if (!sortSelect) {
+    return;
+  }
+  const value = state.sort === 'lastSeen' ? 'activity' : state.sort;
+  sortSelect.value = sortOptions.has(value) ? value : 'activity';
+}
+
 function updateTestFilterButtons() {
   if (!testFilterButtons.length) {
     return;
@@ -1330,6 +1357,52 @@ function updateTestFilterButtons() {
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
   updateFilterDockState();
+}
+
+function updateSummaryFilterButtons() {
+  if (!summaryFilterButtons.length) {
+    return;
+  }
+  summaryFilterButtons.forEach((btn) => {
+    const value = btn.dataset.summary || '';
+    const active =
+      state.quickFilter &&
+      state.quickFilter.type === 'summary' &&
+      state.quickFilter.value === value;
+    btn.classList.toggle('active', Boolean(active));
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function updateCategoryFilterButtons() {
+  if (!categoryFilterButtons.length) {
+    return;
+  }
+  categoryFilterButtons.forEach((btn) => {
+    const value = btn.dataset.category || 'all';
+    const active = (state.filter || 'all') === value;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function updateSignalFilterButtons() {
+  if (!signalFilterButtons.length) {
+    return;
+  }
+  signalFilterButtons.forEach((btn) => {
+    const signal = btn.dataset.signal || '';
+    let active = false;
+    if (signal === 'battery-alerts') {
+      active = isBatteryAlertsView();
+    } else if (signal === 'recent') {
+      active = state.dateFilter === 'today';
+    } else if (signal === 'commented') {
+      active = state.commentFilter === 'with';
+    }
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
 }
 
 function normalizeTech(value) {
@@ -2025,6 +2098,9 @@ function getActiveFilterCount() {
   if (state.filter && state.filter !== 'all') {
     count += 1;
   }
+  if (isBatteryAlertsView()) {
+    count += 1;
+  }
   if (hasActiveDateFilter()) {
     count += 1;
   }
@@ -2047,6 +2123,80 @@ function getActiveFilterCount() {
     count += 1;
   }
   return count;
+}
+
+function buildActiveFilterLabels() {
+  const labels = [];
+  if (state.quickFilter && state.quickFilter.type === 'summary' && state.quickFilter.value) {
+    const summaryMap = { ok: 'OK', nok: 'NOK', nt: 'NT' };
+    labels.push(summaryMap[state.quickFilter.value] || state.quickFilter.value);
+  }
+  if (state.filter && state.filter !== 'all') {
+    labels.push(categoryLabels[normalizeCategory(state.filter)] || state.filter);
+  }
+  if (isBatteryAlertsView()) {
+    labels.push('Alertes batterie / RTC');
+  }
+  if (state.dateFilter === 'today') {
+    labels.push('Activite recente');
+  } else if (hasActiveDateFilter()) {
+    labels.push(buildDateFilterSummary());
+  }
+  if (!isTechnicianFilterLocked() && state.techFilter && state.techFilter !== 'all') {
+    const match = Array.isArray(state.techOptions)
+      ? state.techOptions.find((value) => techKey(value) === state.techFilter)
+      : null;
+    labels.push(normalizeTech(match) || state.techFilter);
+  }
+  if (Array.isArray(state.tagFilter) && state.tagFilter.length) {
+    const tagNames = state.tagFilter
+      .map((id) => {
+        const match = Array.isArray(state.tags)
+          ? state.tags.find((tag) => normalizeTagId(tag.id || '') === normalizeTagId(id))
+          : null;
+        return match && match.name ? String(match.name) : null;
+      })
+      .filter(Boolean);
+    if (tagNames.length) {
+      labels.push(`Tags ${buildTagSummaryFromLabels(tagNames)}`);
+    }
+  }
+  if (state.componentFilter && state.componentFilter !== 'all') {
+    const componentLabel = componentLabels[state.componentFilter] || state.componentFilter;
+    labels.push(componentLabel);
+  }
+  if (state.commentFilter === 'with') {
+    labels.push('Avec commentaire');
+  } else if (state.commentFilter === 'without') {
+    labels.push('Sans commentaire');
+  }
+  if (state.search && state.search.trim()) {
+    labels.push(`Recherche "${state.search.trim()}"`);
+  }
+  return labels;
+}
+
+function formatResultCountLabel(count) {
+  const numeric = Number.isFinite(count) ? count : 0;
+  return `${numeric} poste${numeric > 1 ? 's' : ''}`;
+}
+
+function updateResultsSummary(count = null) {
+  const labels = buildActiveFilterLabels();
+  const filtersText = labels.length ? `Filtres : ${labels.join(' + ')}` : 'Filtres : aucun';
+  const countText = count == null ? 'Resultats : -- poste' : `Resultats : ${formatResultCountLabel(count)}`;
+  if (resultsCountLabelEl) {
+    resultsCountLabelEl.textContent = countText;
+  }
+  if (resultsFiltersSummaryEl) {
+    resultsFiltersSummaryEl.textContent = filtersText;
+  }
+  if (resultsCountInlineEl) {
+    resultsCountInlineEl.textContent = count == null ? '-- poste' : formatResultCountLabel(count);
+  }
+  if (resultsFiltersInlineEl) {
+    resultsFiltersInlineEl.textContent = filtersText;
+  }
 }
 
 function loadFilterCollapsedPreference() {
@@ -2107,7 +2257,7 @@ function initFilterHub() {
     return;
   }
   const storedCollapsed = loadFilterCollapsedPreference();
-  const defaultCollapsed = storedCollapsed === null ? true : storedCollapsed;
+  const defaultCollapsed = storedCollapsed === null ? false : storedCollapsed;
   setFilterHubCollapsed(defaultCollapsed, { persist: false });
   if (filterToggleBtn) {
     filterToggleBtn.addEventListener('click', () => {
@@ -2128,6 +2278,7 @@ function updateFilterDockState() {
     resetFiltersBtn.disabled = count === 0;
   }
   updateFilterToggleLabel(count);
+  updateResultsSummary();
 }
 
 function updateSearchCollapse() {
@@ -2361,6 +2512,7 @@ function updateCommentFilterButtons() {
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   });
+  updateSignalFilterButtons();
   updateFilterDockState();
 }
 
@@ -2445,6 +2597,8 @@ function applyPermissions(permissions) {
   state.canAccessAdmin = source.canAccessAdminPage === true;
   state.canCreateReportZero = source.canCreateReportZero === true;
   state.canEditReports = source.canEditReports === true;
+  state.canEditBatteryHealth = source.canEditBatteryHealth === true;
+  state.canEditTechnician = source.canEditTechnician === true;
   state.canManageLots = source.canManageLots === true;
   state.canManagePallets = source.canManagePallets === true;
   state.canManageLogistics = source.canManageLogistics === true;
@@ -2839,6 +2993,22 @@ function normalizeSummaryStatusForKey(key, value) {
   return status;
 }
 
+function getBatteryHealthValue(detail) {
+  if (!detail || typeof detail !== 'object') {
+    return null;
+  }
+  const telemetry = getBatteryTelemetry(detail);
+  return parseBatteryHealthValue(detail.batteryHealth != null ? detail.batteryHealth : telemetry.healthPercent);
+}
+
+function getBatteryHealthStatus(detail) {
+  const batteryHealth = getBatteryHealthValue(detail);
+  if (batteryHealth == null) {
+    return null;
+  }
+  return batteryHealth < BATTERY_ALERT_THRESHOLD ? 'nok' : 'ok';
+}
+
 function summarizeDetailForDrawer(detail) {
   const summary = { ok: 0, nok: 0, other: 0, total: 0 };
   if (!detail || typeof detail !== 'object') {
@@ -2905,12 +3075,142 @@ function summarizeDetailForDrawer(detail) {
     }
   });
 
+  const batteryStatus = getBatteryHealthStatus(detail);
+  if (batteryStatus) {
+    addSummaryStatus(summary, batteryStatus);
+  }
+
   const hasComment = typeof detail.comment === 'string' && detail.comment.trim();
   if (hasComment) {
     addSummaryStatus(summary, 'nok');
   }
 
   return summary;
+}
+
+function collectDetailNokEntries(detail) {
+  if (!detail || typeof detail !== 'object') {
+    return [];
+  }
+
+  const payload = detail.payload && typeof detail.payload === 'object' ? detail.payload : null;
+  const tests =
+    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
+      ? payload.tests
+      : null;
+  const components = resolveDetailComponents(detail);
+  const entries = [];
+  const seen = new Set();
+
+  function addEntry(label, key, tab, value) {
+    const normalized = normalizeSummaryStatusForKey(key, value);
+    if (normalized !== 'nok') {
+      return;
+    }
+    const dedupeKey = `${tab}:${key}`;
+    if (seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+    entries.push({ label, key, tab });
+  }
+
+  addEntry('Lecture disque', 'diskReadTest', 'diagnostics', components.diskReadTest || (tests && tests.diskRead) || 'not_tested');
+  addEntry(
+    'Ecriture disque',
+    'diskWriteTest',
+    'diagnostics',
+    components.diskWriteTest || (tests && tests.diskWrite) || 'not_tested'
+  );
+  addEntry('RAM (WinSAT)', 'ramTest', 'diagnostics', (tests && tests.ram) || components.ramTest || 'not_tested');
+  addEntry('CPU (WinSAT)', 'cpuTest', 'diagnostics', (tests && tests.cpu) || components.cpuTest || 'not_tested');
+  addEntry('GPU (WinSAT)', 'gpuTest', 'diagnostics', (tests && tests.gpu) || components.gpuTest || 'not_tested');
+  addEntry(
+    'Ping',
+    'networkPing',
+    'diagnostics',
+    (tests && tests.networkPing) || components.networkPing || 'not_tested'
+  );
+  if ((tests && tests.fsCheck) || components.fsCheck) {
+    addEntry('Check disque', 'fsCheck', 'diagnostics', (tests && tests.fsCheck) || components.fsCheck || 'not_tested');
+  }
+
+  addEntry('Ports USB', 'usb', 'composants', resolveUnifiedComponentStatus('usb', components, tests));
+  addEntry('Clavier', 'keyboard', 'composants', resolveUnifiedComponentStatus('keyboard', components, tests));
+  addEntry('Camera', 'camera', 'composants', resolveUnifiedComponentStatus('camera', components, tests));
+  addEntry('Pave tactile', 'pad', 'composants', resolveUnifiedComponentStatus('pad', components, tests));
+  addEntry('Lecteur badge', 'badgeReader', 'composants', resolveUnifiedComponentStatus('badgeReader', components, tests));
+  addEntry('CPU OK', 'cpu', 'composants', resolveUnifiedComponentStatus('cpu', components, tests));
+  addEntry('GPU OK', 'gpu', 'composants', resolveUnifiedComponentStatus('gpu', components, tests));
+
+  addEntry('Pile BIOS', 'biosBattery', 'bios_wifi', components.biosBattery || 'not_tested');
+  addEntry('Langue BIOS', 'biosLanguage', 'bios_wifi', components.biosLanguage || 'not_tested');
+  addEntry('Mot de passe BIOS', 'biosPassword', 'bios_wifi', components.biosPassword || 'not_tested');
+  addEntry('Norme Wi-Fi', 'wifiStandard', 'bios_wifi', components.wifiStandard || 'not_tested');
+
+  if (getBatteryHealthStatus(detail) === 'nok') {
+    entries.push({ label: 'Sante batterie', key: 'batteryHealth', tab: 'identifiants' });
+  }
+
+  const commentValue = typeof detail.comment === 'string' ? detail.comment.trim() : '';
+  if (commentValue) {
+    entries.push({ label: 'Commentaire operateur', key: 'comment', tab: 'commentaires' });
+  }
+
+  return entries;
+}
+
+function getPrimaryDetailNokEntry(detail) {
+  const entries = collectDetailNokEntries(detail);
+  return entries.length ? entries[0] : null;
+}
+
+function focusDrawerIssue(tab, key = '') {
+  if (!detailsDrawerBody) {
+    return;
+  }
+  const targetTab = typeof tab === 'string' && tab ? tab : 'composants';
+  setDrawerTab(targetTab);
+  if (!key) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    const selector = `[data-tab-panel="${targetTab}"] [data-detail-key="${key}"]`;
+    const target = detailsDrawerBody.querySelector(selector);
+    if (!target) {
+      return;
+    }
+    target.classList.add('is-focused');
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => {
+      target.classList.remove('is-focused');
+    }, 1800);
+  });
+}
+
+function getMachinePrimaryStatus(machine) {
+  const summary = summarizeDetailForDrawer(machine);
+  if (summary.nok > 0) {
+    return 'nok';
+  }
+  if (summary.other > 0) {
+    return 'nt';
+  }
+  if (summary.ok > 0) {
+    return 'ok';
+  }
+  return 'nt';
+}
+
+function getMachinePrimaryStatusLabel(machine) {
+  const status = getMachinePrimaryStatus(machine);
+  if (status === 'nok') {
+    return 'NOK';
+  }
+  if (status === 'ok') {
+    return 'OK';
+  }
+  return 'NT';
 }
 
 function normalizeCategory(value) {
@@ -2979,6 +3279,191 @@ function formatMacSummary(machine) {
     return `${primary} / ${secondary}`;
   }
   return primary || '--';
+}
+
+function normalizeDebugValueArray(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (item == null ? '' : String(item).trim()))
+      .filter(Boolean);
+  }
+  if (value == null) {
+    return [];
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return [];
+  }
+  return text
+    .split(/\s*,\s*/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeDebugRawArray(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (item == null ? '' : String(item).trim()))
+      .filter(Boolean);
+  }
+  if (value == null) {
+    return [];
+  }
+  const text = String(value).trim();
+  return text ? [text] : [];
+}
+
+function formatDebugValueList(values, separator = ' / ') {
+  const list = normalizeDebugValueArray(values);
+  return list.length ? list.join(separator) : '--';
+}
+
+function getRemoteAccessDebug(detail) {
+  if (!detail || typeof detail !== 'object') {
+    return null;
+  }
+  const payload =
+    detail.payload && typeof detail.payload === 'object' && !Array.isArray(detail.payload)
+      ? detail.payload
+      : null;
+  const debug =
+    payload && payload.debug && typeof payload.debug === 'object' && !Array.isArray(payload.debug)
+      ? payload.debug
+      : null;
+  const remoteAccess =
+    debug &&
+    debug.remoteAccess &&
+    typeof debug.remoteAccess === 'object' &&
+    !Array.isArray(debug.remoteAccess)
+      ? debug.remoteAccess
+      : null;
+  if (!remoteAccess) {
+    return null;
+  }
+
+  const adaptersRaw = Array.isArray(remoteAccess.adapters) ? remoteAccess.adapters : [];
+  const adapters = adaptersRaw
+    .map((adapter) => {
+      if (!adapter || typeof adapter !== 'object' || Array.isArray(adapter)) {
+        return null;
+      }
+      return {
+        description: adapter.description ? String(adapter.description).trim() : '',
+        mac: adapter.mac ? String(adapter.mac).trim() : '',
+        dhcp: adapter.dhcp == null ? '' : String(adapter.dhcp).trim(),
+        ipv4: normalizeDebugValueArray(adapter.ipv4),
+        ipv6: normalizeDebugValueArray(adapter.ipv6),
+        gateway: normalizeDebugValueArray(adapter.gateway),
+        dns: normalizeDebugValueArray(adapter.dns)
+      };
+    })
+    .filter(Boolean);
+
+  const winrmRaw =
+    remoteAccess.winrm &&
+    typeof remoteAccess.winrm === 'object' &&
+    !Array.isArray(remoteAccess.winrm)
+      ? remoteAccess.winrm
+      : null;
+
+  return {
+    hostnames: normalizeDebugValueArray(remoteAccess.hostnames),
+    ipv4: normalizeDebugValueArray(remoteAccess.ipv4),
+    ipv6: normalizeDebugValueArray(remoteAccess.ipv6),
+    adapters,
+    collectedAt:
+      typeof remoteAccess.collectedAt === 'string' && remoteAccess.collectedAt.trim()
+        ? remoteAccess.collectedAt.trim()
+        : null,
+    scriptVersion:
+      typeof remoteAccess.scriptVersion === 'string' && remoteAccess.scriptVersion.trim()
+        ? remoteAccess.scriptVersion.trim()
+        : null,
+    winrm: winrmRaw
+      ? {
+          bootstrapStatus: winrmRaw.bootstrapStatus ? String(winrmRaw.bootstrapStatus).trim() : '',
+          bootstrapReason: winrmRaw.bootstrapReason ? String(winrmRaw.bootstrapReason).trim() : '',
+          serviceStatus: winrmRaw.serviceStatus ? String(winrmRaw.serviceStatus).trim() : '',
+          startMode: winrmRaw.startMode ? String(winrmRaw.startMode).trim() : '',
+          localAccountTokenFilterPolicy:
+            winrmRaw.localAccountTokenFilterPolicy == null
+              ? ''
+              : String(winrmRaw.localAccountTokenFilterPolicy).trim(),
+          listeners: normalizeDebugRawArray(winrmRaw.listeners),
+          testWsManStatus:
+            winrmRaw.testWsMan && winrmRaw.testWsMan.status
+              ? String(winrmRaw.testWsMan.status).trim()
+              : '',
+          testWsManVendor:
+            winrmRaw.testWsMan && winrmRaw.testWsMan.vendor
+              ? String(winrmRaw.testWsMan.vendor).trim()
+              : '',
+          testWsManVersion:
+            winrmRaw.testWsMan && winrmRaw.testWsMan.version
+              ? String(winrmRaw.testWsMan.version).trim()
+              : ''
+        }
+      : null
+  };
+}
+
+function formatRemoteAccessAdapters(remoteAccess) {
+  if (!remoteAccess || !Array.isArray(remoteAccess.adapters) || !remoteAccess.adapters.length) {
+    return '--';
+  }
+  const chunks = remoteAccess.adapters
+    .map((adapter) => {
+      const parts = [];
+      if (adapter.description) {
+        parts.push(adapter.description);
+      }
+      const ipv4 = formatDebugValueList(adapter.ipv4);
+      if (ipv4 !== '--') {
+        parts.push(`IPv4 ${ipv4}`);
+      }
+      const ipv6 = formatDebugValueList(adapter.ipv6);
+      if (ipv6 !== '--') {
+        parts.push(`IPv6 ${ipv6}`);
+      }
+      if (adapter.mac) {
+        parts.push(`MAC ${adapter.mac}`);
+      }
+      return parts.join(' · ');
+    })
+    .filter(Boolean);
+  return chunks.length ? chunks.join(' | ') : '--';
+}
+
+function formatRemoteAccessWinRm(remoteAccess) {
+  const winrm = remoteAccess && remoteAccess.winrm ? remoteAccess.winrm : null;
+  if (!winrm) {
+    return '--';
+  }
+  const parts = [];
+  if (winrm.bootstrapStatus) {
+    parts.push(`bootstrap ${winrm.bootstrapStatus}`);
+  }
+  if (winrm.serviceStatus) {
+    parts.push(`service ${winrm.serviceStatus}`);
+  }
+  if (winrm.startMode) {
+    parts.push(`start ${winrm.startMode}`);
+  }
+  if (winrm.localAccountTokenFilterPolicy) {
+    parts.push(`LATFP ${winrm.localAccountTokenFilterPolicy}`);
+  }
+  if (winrm.testWsManStatus) {
+    parts.push(`WSMan ${winrm.testWsManStatus}`);
+  }
+  return parts.length ? parts.join(' · ') : '--';
+}
+
+function formatRemoteAccessWinRmListeners(remoteAccess) {
+  const winrm = remoteAccess && remoteAccess.winrm ? remoteAccess.winrm : null;
+  if (!winrm || !Array.isArray(winrm.listeners) || !winrm.listeners.length) {
+    return '--';
+  }
+  return winrm.listeners.join(' | ');
 }
 
 function normalizeAutopilotHashValue(value) {
@@ -4608,12 +5093,101 @@ function applyCommentUpdate(id, comment, commentedAt) {
   invalidateListCache();
 }
 
+function applyBatteryHealthUpdate(id, batteryHealth) {
+  const normalizedValue = parseBatteryHealthValue(batteryHealth);
+  state.machines = state.machines.map((machine) => {
+    if (machine.id !== id) {
+      return machine;
+    }
+    return {
+      ...machine,
+      batteryHealth: normalizedValue
+    };
+  });
+
+  if (state.details[id]) {
+    state.details[id] = {
+      ...state.details[id],
+      batteryHealth: normalizedValue
+    };
+  }
+  invalidateListCache();
+}
+
+function applyTechnicianUpdate(id, technician) {
+  const normalizedValue = normalizeTech(technician);
+  state.machines = state.machines.map((machine) => {
+    if (machine.id !== id) {
+      return machine;
+    }
+    return {
+      ...machine,
+      technician: normalizedValue || null
+    };
+  });
+
+  if (state.details[id]) {
+    state.details[id] = {
+      ...state.details[id],
+      technician: normalizedValue || null,
+      relatedReports: Array.isArray(state.details[id].relatedReports)
+        ? state.details[id].relatedReports.map((report) => ({
+            ...report,
+            technician: normalizedValue || null
+          }))
+        : state.details[id].relatedReports
+    };
+  }
+
+  if (normalizedValue) {
+    const currentOptions = Array.isArray(state.techOptions) ? state.techOptions : [];
+    const existingKeys = new Set(currentOptions.map((value) => techKey(value)).filter(Boolean));
+    if (!existingKeys.has(techKey(normalizedValue))) {
+      state.techOptions = [...currentOptions, normalizedValue].sort((a, b) => a.localeCompare(b, 'fr'));
+      renderTechnicianOptions();
+    }
+  }
+  invalidateListCache();
+}
+
 function setCommentButtonsLoading(id, loading) {
   const buttons = document.querySelectorAll(`[data-action="clear-comment"][data-id="${id}"]`);
   buttons.forEach((button) => {
     button.disabled = loading;
     button.classList.toggle('is-loading', loading);
   });
+}
+
+function setBatteryHealthButtonsLoading(id, loading) {
+  const buttons = document.querySelectorAll(`[data-action="save-battery-health"][data-id="${id}"]`);
+  buttons.forEach((button) => {
+    button.disabled = loading;
+    button.classList.toggle('is-loading', loading);
+  });
+  if (!detailsDrawerShell) {
+    return;
+  }
+  const safeId = String(id).replace(/"/g, '\\"');
+  const input = detailsDrawerShell.querySelector(`[data-battery-input-for="${safeId}"]`);
+  if (input) {
+    input.disabled = loading;
+  }
+}
+
+function setTechnicianButtonsLoading(id, loading) {
+  const buttons = document.querySelectorAll(`[data-action="save-technician"][data-id="${id}"]`);
+  buttons.forEach((button) => {
+    button.disabled = loading;
+    button.classList.toggle('is-loading', loading);
+  });
+  if (!detailsDrawerShell) {
+    return;
+  }
+  const safeId = String(id).replace(/"/g, '\\"');
+  const input = detailsDrawerShell.querySelector(`[data-technician-input-for="${safeId}"]`);
+  if (input) {
+    input.disabled = loading;
+  }
 }
 
 async function updateComment(id, comment) {
@@ -4648,6 +5222,107 @@ async function updateComment(id, comment) {
     window.alert("Impossible d'enregistrer le commentaire.");
   } finally {
     setCommentButtonsLoading(id, false);
+  }
+}
+
+async function updateBatteryHealth(id, rawValue) {
+  if (!state.canEditBatteryHealth) {
+    window.alert("Pas les droits pour modifier la batterie.");
+    return;
+  }
+
+  const normalizedRaw = String(rawValue || '').trim();
+  const batteryHealth = Number.parseInt(normalizedRaw, 10);
+  if (!normalizedRaw || !Number.isFinite(batteryHealth) || batteryHealth < 0 || batteryHealth > 100) {
+    window.alert('Le pourcentage batterie doit etre un entier entre 0 et 100.');
+    return;
+  }
+
+  const currentMachine = state.details[id] && !state.details[id].error ? state.details[id] : getMachineById(id);
+  const currentValue = parseBatteryHealthValue(currentMachine && currentMachine.batteryHealth);
+  if (currentValue != null && currentValue === batteryHealth) {
+    return;
+  }
+
+  setBatteryHealthButtonsLoading(id, true);
+  try {
+    const response = await fetch(`/api/machines/${encodeURIComponent(id)}/battery-health`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ batteryHealth })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.alert("Pas les droits pour modifier la batterie.");
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('battery_health_update_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('battery_health_update_failed');
+    }
+    applyBatteryHealthUpdate(id, data.batteryHealth);
+    renderList();
+    refreshActiveDrawerIfNeeded(id);
+  } catch (error) {
+    window.alert("Impossible d'enregistrer la batterie.");
+  } finally {
+    setBatteryHealthButtonsLoading(id, false);
+  }
+}
+
+async function updateTechnician(id, rawValue) {
+  if (!state.canEditTechnician) {
+    window.alert("Pas les droits pour modifier le technicien.");
+    return;
+  }
+
+  const technician = normalizeTech(rawValue);
+  if (!technician) {
+    window.alert('Le technicien doit etre renseigne.');
+    return;
+  }
+
+  const currentMachine = state.details[id] && !state.details[id].error ? state.details[id] : getMachineById(id);
+  const currentValue = normalizeTech(currentMachine && currentMachine.technician);
+  if (currentValue && techKey(currentValue) === techKey(technician)) {
+    return;
+  }
+
+  setTechnicianButtonsLoading(id, true);
+  try {
+    const response = await fetch(`/api/machines/${encodeURIComponent(id)}/technician`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ technician })
+    });
+    if (response.status === 401) {
+      window.location.href = '/login';
+      return;
+    }
+    if (response.status === 403) {
+      window.alert("Pas les droits pour modifier le technicien.");
+      return;
+    }
+    if (!response.ok) {
+      throw new Error('technician_update_failed');
+    }
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error('technician_update_failed');
+    }
+    applyTechnicianUpdate(id, data.technician);
+    renderList();
+    refreshActiveDrawerIfNeeded(id);
+  } catch (error) {
+    window.alert("Impossible d'enregistrer le technicien.");
+  } finally {
+    setTechnicianButtonsLoading(id, false);
   }
 }
 
@@ -4955,12 +5630,37 @@ function applyFilters() {
 
 function sortMachines(list) {
   const sorted = [...list];
-  if (state.sort === 'name') {
+  const sortMode = state.sort === 'lastSeen' ? 'activity' : state.sort;
+  if (sortMode === 'status') {
+    const order = { nok: 0, nt: 1, ok: 2 };
+    sorted.sort((a, b) => {
+      const statusA = getMachinePrimaryStatus(a);
+      const statusB = getMachinePrimaryStatus(b);
+      if (order[statusA] !== order[statusB]) {
+        return order[statusA] - order[statusB];
+      }
+      return (b.lastSeen || '').localeCompare(a.lastSeen || '');
+    });
+    return sorted;
+  }
+  if (sortMode === 'technician') {
+    sorted.sort((a, b) => {
+      const techA = normalizeTech(a.technician || 'ZZZ');
+      const techB = normalizeTech(b.technician || 'ZZZ');
+      const techCompare = techA.localeCompare(techB, 'fr');
+      if (techCompare !== 0) {
+        return techCompare;
+      }
+      return (b.lastSeen || '').localeCompare(a.lastSeen || '');
+    });
+    return sorted;
+  }
+  if (sortMode === 'name') {
     sorted.sort((a, b) => formatPrimary(a).localeCompare(formatPrimary(b), 'fr'));
     return sorted;
   }
 
-  if (state.sort === 'category') {
+  if (sortMode === 'category') {
     const order = { laptop: 0, desktop: 1, unknown: 2 };
     sorted.sort((a, b) => {
       const categoryA = normalizeCategory(a.category);
@@ -5310,12 +6010,13 @@ function buildDrawerDiagnosticsRows(detail) {
   function addRow(label, status, extra, key) {
     const statusValue =
       key && Object.prototype.hasOwnProperty.call(components, key) ? components[key] : status;
+    const isNok = normalizeSummaryStatusForKey(key, statusValue) === 'nok';
     const statusHtml = key
       ? renderStatusValue(statusValue, { id: detailId, key })
       : renderStatusValue(statusValue);
     const metricHtml = extra ? `<span class="drawer-metric">${escapeHtml(extra)}</span>` : '';
     rows.push(`
-      <div class="drawer-status-row">
+      <div class="drawer-status-row${isNok ? ' is-nok' : ''}"${key ? ` data-detail-key="${escapeHtml(key)}"` : ''}>
         <span>${escapeHtml(label)}</span>
         <div class="drawer-status-stack">${statusHtml}${metricHtml}</div>
       </div>
@@ -5371,6 +6072,8 @@ function buildDrawerDetailHtml(detail) {
   const shipment = getMachineShipment(detail);
   const lotSelectOptions = buildLotAssignmentOptions(lot);
   const summary = summarizeDetailForDrawer(detail);
+  const nokEntries = collectDetailNokEntries(detail);
+  const primaryNokEntry = nokEntries.length ? nokEntries[0] : null;
   const components = resolveDetailComponents(detail);
   const clockAlert = normalizeClockAlert(detail.clockAlert);
 
@@ -5387,10 +6090,21 @@ function buildDrawerDetailHtml(detail) {
   const volumeInfoRaw = payload ? payload.volumes : null;
   const volumeInfo = Array.isArray(volumeInfoRaw) ? volumeInfoRaw : volumeInfoRaw ? [volumeInfoRaw] : [];
   const batteryTelemetry = getBatteryTelemetry(detail);
+  const batteryHealthValue = getBatteryHealthValue(detail);
+  const isBatteryAlert = batteryHealthValue != null && batteryHealthValue < BATTERY_ALERT_THRESHOLD;
   const batteryHealthLabel = formatBatteryHealth(detail.batteryHealth ?? batteryTelemetry.healthPercent);
   const batteryChargeLabel = formatBatteryCharge(batteryTelemetry.chargePercent);
   const batteryCapacityLabel = formatBatteryCapacitySummary(batteryTelemetry);
   const batteryPowerSourceLabel = formatBatteryPowerSource(batteryTelemetry.powerSource);
+  const remoteAccess = getRemoteAccessDebug(detail);
+  const remoteHostnames = formatDebugValueList(remoteAccess && remoteAccess.hostnames);
+  const remoteIpv4 = formatDebugValueList(remoteAccess && remoteAccess.ipv4);
+  const remoteIpv6 = formatDebugValueList(remoteAccess && remoteAccess.ipv6);
+  const remoteAdapters = formatRemoteAccessAdapters(remoteAccess);
+  const remoteWinRm = formatRemoteAccessWinRm(remoteAccess);
+  const remoteWinRmListeners = formatRemoteAccessWinRmListeners(remoteAccess);
+  const remoteCollectedAt =
+    remoteAccess && remoteAccess.collectedAt ? formatDateTime(remoteAccess.collectedAt) : '--';
 
   if (detailsDrawerTitle) {
     detailsDrawerTitle.textContent = formatPrimary(detail);
@@ -5414,10 +6128,42 @@ function buildDrawerDetailHtml(detail) {
       <p>${subtitle}</p>
       <div class="drawer-header-meta">
         <span class="summary-chip ok">OK ${summary.ok}</span>
-        <span class="summary-chip nok">NOK ${summary.nok}</span>
+        ${
+          primaryNokEntry
+            ? `<button class="summary-chip nok drawer-summary-chip-action" type="button" data-action="focus-noks" data-tab="${escapeHtml(
+                primaryNokEntry.tab
+              )}" data-key="${escapeHtml(primaryNokEntry.key)}">NOK ${summary.nok}</button>`
+            : `<span class="summary-chip nok">NOK ${summary.nok}</span>`
+        }
         <span class="summary-chip nt">NT ${summary.other}</span>
         <span class="drawer-seen">${escapeHtml(formatDateTime(detail.lastSeen))}</span>
       </div>
+      ${
+        nokEntries.length
+          ? `
+            <div class="drawer-nok-summary">
+              <span class="drawer-nok-summary-label">NOK detectes</span>
+              <div class="drawer-nok-summary-list">
+                ${nokEntries
+                  .map(
+                    (entry) => `
+                      <button
+                        class="drawer-nok-chip"
+                        type="button"
+                        data-action="focus-nok"
+                        data-tab="${escapeHtml(entry.tab)}"
+                        data-key="${escapeHtml(entry.key)}"
+                      >
+                        ${escapeHtml(entry.label)}
+                      </button>
+                    `
+                  )
+                  .join('')}
+              </div>
+            </div>
+          `
+          : ''
+      }
       <div class="drawer-actions">
         <button class="drawer-action-btn" type="button" data-action="export-pdf" data-id="${detailId}">Telecharger PDF</button>
         ${deleteButton}
@@ -5431,7 +6177,9 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-mini-card"><span>RAM</span><strong>${escapeHtml(formatRam(detail.ramMb))}</strong></div>
       <div class="drawer-mini-card"><span>Stockage</span><strong>${escapeHtml(formatTotalStorage(diskInfo, volumeInfo))}</strong></div>
       <div class="drawer-mini-card"><span>GPU</span><strong>${escapeHtml((gpuInfo && gpuInfo.name) || '--')}</strong></div>
-      <div class="drawer-mini-card"><span>Sante batterie</span><strong>${escapeHtml(batteryHealthLabel)}</strong></div>
+      <div class="drawer-mini-card${isBatteryAlert ? ' is-alert' : ''}"><span>Sante batterie</span><strong>${escapeHtml(
+        batteryHealthLabel
+      )}</strong></div>
       <div class="drawer-mini-card"><span>Charge batterie</span><strong>${escapeHtml(batteryChargeLabel)}</strong></div>
       <div class="drawer-mini-card"><span>Capacite utile</span><strong>${escapeHtml(batteryCapacityLabel)}</strong></div>
       <div class="drawer-mini-card"><span>Alimentation</span><strong>${escapeHtml(batteryPowerSourceLabel)}</strong></div>
@@ -5481,9 +6229,65 @@ function buildDrawerDetailHtml(detail) {
       </div>
     `;
 
+  const technicianValue = normalizeTech(detail.technician);
+  const technicianFieldHtml = state.canEditTechnician
+    ? `
+      <div class="drawer-lot-field" data-detail-key="technician">
+        <span>Technicien</span>
+        <div class="drawer-lot-editor">
+          <input
+            class="drawer-lot-select drawer-technician-input"
+            type="text"
+            list="technician-options"
+            data-technician-input-for="${detailId}"
+            value="${escapeHtml(technicianValue)}"
+            placeholder="Technicien"
+          />
+          <button class="drawer-action-btn" type="button" data-action="save-technician" data-id="${detailId}">Appliquer</button>
+        </div>
+        <strong>${escapeHtml(technicianValue || '--')}</strong>
+      </div>
+    `
+    : `
+      <div data-detail-key="technician">
+        <span>Technicien</span>
+        <strong>${escapeHtml(technicianValue || '--')}</strong>
+      </div>
+    `;
+
+  const batteryInputValue = batteryHealthValue != null ? String(batteryHealthValue) : '';
+  const batteryFieldHtml = state.canEditBatteryHealth
+    ? `
+      <div class="drawer-lot-field${isBatteryAlert ? ' drawer-alert-cell is-alert' : ''}" data-detail-key="batteryHealth">
+        <span>Sante batterie</span>
+        <div class="drawer-lot-editor">
+          <input
+            class="drawer-lot-select drawer-battery-input"
+            type="number"
+            min="0"
+            max="100"
+            step="1"
+            inputmode="numeric"
+            data-battery-input-for="${detailId}"
+            value="${escapeHtml(batteryInputValue)}"
+            placeholder="0-100"
+          />
+          <button class="drawer-action-btn" type="button" data-action="save-battery-health" data-id="${detailId}">Appliquer</button>
+        </div>
+        <strong>${escapeHtml(batteryHealthLabel)}</strong>
+      </div>
+    `
+    : `
+      <div${isBatteryAlert ? ' class="drawer-alert-cell is-alert"' : ''} data-detail-key="batteryHealth">
+        <span>Sante batterie</span>
+        <strong>${escapeHtml(batteryHealthLabel)}</strong>
+      </div>
+    `;
+
   const identifiersPanel = `
     <div class="drawer-table">
       ${lotEditorHtml}
+      ${technicianFieldHtml}
       <div><span>Palette</span><strong>${escapeHtml(palletLabel)}</strong></div>
       <div><span>Statut palette</span><strong>${escapeHtml((pallet && pallet.statusLabel) || '--')}</strong></div>
       <div><span>Commande</span><strong>${escapeHtml((shipment && shipment.orderNumber) || '--')}</strong></div>
@@ -5493,7 +6297,7 @@ function buildDrawerDetailHtml(detail) {
       <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
       <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
       <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
-      <div><span>Sante batterie</span><strong>${escapeHtml(batteryHealthLabel)}</strong></div>
+      ${batteryFieldHtml}
       <div><span>Charge batterie</span><strong>${escapeHtml(batteryChargeLabel)}</strong></div>
       <div><span>Capacite utile</span><strong>${escapeHtml(batteryCapacityLabel)}</strong></div>
       <div><span>Alimentation</span><strong>${escapeHtml(batteryPowerSourceLabel)}</strong></div>
@@ -5509,6 +6313,20 @@ function buildDrawerDetailHtml(detail) {
       }</div>
       <div><span>Premier passage</span><strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong></div>
       <div><span>Dernier passage</span><strong>${escapeHtml(formatDateTime(detail.lastSeen))}</strong></div>
+      <div><span>IP serveur</span><strong>${escapeHtml(detail.lastIp || '--')}</strong></div>
+      ${
+        remoteAccess
+          ? `
+      <div class="drawer-wide-row"><span>Hostnames debug</span><strong class="drawer-long-value">${escapeHtml(remoteHostnames)}</strong></div>
+      <div class="drawer-wide-row"><span>IPv4 locales</span><strong class="drawer-long-value">${escapeHtml(remoteIpv4)}</strong></div>
+      <div class="drawer-wide-row"><span>IPv6 locales</span><strong class="drawer-long-value">${escapeHtml(remoteIpv6)}</strong></div>
+      <div class="drawer-wide-row"><span>WinRM</span><strong class="drawer-long-value">${escapeHtml(remoteWinRm)}</strong></div>
+      <div class="drawer-wide-row"><span>Listeners WinRM</span><strong class="drawer-long-value">${escapeHtml(remoteWinRmListeners)}</strong></div>
+      <div class="drawer-wide-row"><span>Adaptateurs debug</span><strong class="drawer-long-value">${escapeHtml(remoteAdapters)}</strong></div>
+      <div><span>Collecte debug</span><strong>${escapeHtml(remoteCollectedAt)}</strong></div>
+          `
+          : ''
+      }
       ${buildClockAlertFields(clockAlert, 'drawer')}
     </div>
   `;
@@ -5530,7 +6348,9 @@ function buildDrawerDetailHtml(detail) {
   ]
     .map(
       ([label, key]) => `
-        <div class="drawer-status-row">
+        <div class="drawer-status-row${
+          normalizeSummaryStatusForKey(key, resolveUnifiedComponentStatus(key, components, tests)) === 'nok' ? ' is-nok' : ''
+        }" data-detail-key="${escapeHtml(key)}">
           <span>${escapeHtml(label)}</span>
           ${renderStatusValue(resolveUnifiedComponentStatus(key, components, tests), { id: detailId, key })}
         </div>
@@ -5546,7 +6366,9 @@ function buildDrawerDetailHtml(detail) {
   ]
     .map(
       ([label, key]) => `
-        <div class="drawer-status-row">
+        <div class="drawer-status-row${
+          normalizeSummaryStatusForKey(key, components[key] || 'not_tested') === 'nok' ? ' is-nok' : ''
+        }" data-detail-key="${escapeHtml(key)}">
           <span>${escapeHtml(label)}</span>
           ${renderStatusValue(components[key] || 'not_tested', { id: detailId, key })}
         </div>
@@ -5561,7 +6383,7 @@ function buildDrawerDetailHtml(detail) {
   const commentDisplay = commentValue || '--';
   const commentsPanel = state.canEditReports
     ? `
-      <div class="drawer-comment-block">
+      <div class="drawer-comment-block" data-detail-key="comment">
         <textarea class="drawer-comment-input" data-comment-id="${detailId}" maxlength="800" placeholder="Ajouter un commentaire">${escapeHtml(
           commentValue
         )}</textarea>
@@ -5573,7 +6395,7 @@ function buildDrawerDetailHtml(detail) {
       ${buildReportHistory(detail)}
     `
     : `
-      <div class="drawer-comment-block">
+      <div class="drawer-comment-block" data-detail-key="comment">
         <div class="drawer-comment-readonly">${escapeHtml(commentDisplay)}</div>
         ${commentMeta}
       </div>
@@ -5718,6 +6540,10 @@ function renderList(isScrollUpdate = false) {
   updateTimeFilterLabel();
   updateStats();
   updateStatFilterCards();
+  updateSummaryFilterButtons();
+  updateCategoryFilterButtons();
+  updateSignalFilterButtons();
+  updateSortSelect();
   updateFilterDockState();
   const useQuickFilter = Boolean(state.quickFilter && state.quickFilter.value);
   const cacheKey = JSON.stringify({
@@ -5745,6 +6571,7 @@ function renderList(isScrollUpdate = false) {
     : Number.isFinite(state.totalCount)
       ? state.totalCount
       : state.machines.length;
+  updateResultsSummary(totalCount);
 
   if (!totalCount) {
     if (listEl) {
@@ -5822,12 +6649,6 @@ function renderList(isScrollUpdate = false) {
       const categoryBadge = buildCategoryBadge(category, machine.id);
       const title = escapeHtml(formatPrimary(machine));
       const subtitle = escapeHtml(formatSubtitle(machine));
-      const serialValue = machine.serialNumber || '';
-      const macLabel = formatMacSummary(machine);
-      const macValue =
-        machine.macAddress ||
-        (Array.isArray(machine.macAddresses) ? machine.macAddresses[0] : '') ||
-        '';
       const technicianValue = machine.technician || '';
       const batteryValue = parseBatteryHealthValue(machine.batteryHealth);
       const isBatteryAlert = batteryValue != null && batteryValue < BATTERY_ALERT_THRESHOLD;
@@ -5850,65 +6671,27 @@ function renderList(isScrollUpdate = false) {
       const tagHtml = state.canRenameTags && tagIdValue
         ? `<button class="tag-pill is-editable" type="button" title="${tagValue}" data-tag="${tagValue}" data-tag-id="${tagIdValue}">${tagValue}</button>`
         : `<span class="tag-pill" title="${tagValue}">${tagValue}</span>`;
-      const lotClasses = ['lot-pill'];
-      if (!hasAssignedLot) {
-        lotClasses.push('is-empty');
-      }
-      if (lotData && lotData.isPaused) {
-        lotClasses.push('is-paused');
-      }
-      const lotHtml = `
-        <span class="${lotClasses.join(' ')}" title="${lotValue}">
-          <span class="lot-pill-label">Lot</span>
-          <span class="lot-pill-value">${lotValue}</span>
-        </span>
-      `;
-      const palletHtml = hasAssignedPallet
-        ? `
-          <span class="lot-pill pallet-pill" title="${palletValue}">
-            <span class="lot-pill-label">Palette</span>
-            <span class="lot-pill-value">${palletValue}</span>
-          </span>
-        `
-        : '';
       const batteryHtml = batteryValue != null
-        ? `
-          <span class="lot-pill battery-pill${isBatteryAlert ? ' is-alert' : ''}" title="Sante batterie ${escapeHtml(
+        ? `<span class="card-meta-pill card-meta-pill--battery${isBatteryAlert ? ' is-alert' : ''}">Sante ${escapeHtml(
             formatBatteryHealth(batteryValue)
-          )}">
-            <span class="lot-pill-label">Sante</span>
-            <span class="lot-pill-value">${escapeHtml(formatBatteryHealth(batteryValue))}</span>
-          </span>
-        `
+          )}</span>`
         : '';
       const biosAlertHtml = isClockAlert
-        ? `
-          <span class="lot-pill bios-clock-pill" title="${escapeHtml(formatClockAlertSummary(clockAlert))}">
-            <span class="lot-pill-label">Alerte</span>
-            <span class="lot-pill-value">Horloge BIOS</span>
-          </span>
-        `
+        ? `<span class="card-meta-pill card-meta-pill--alert" title="${escapeHtml(
+            formatClockAlertSummary(clockAlert)
+          )}">RTC</span>`
         : '';
-      const lotInlineHtml = `
-        <p class="machine-lot-line${hasAssignedLot ? '' : ' is-empty'}">
-          <span>Lot en cours</span>
-          <strong>${lotValue}</strong>
-        </p>
-      `;
-      const palletInlineHtml = hasAssignedPallet
-        ? `
-          <p class="machine-lot-line machine-pallet-line">
-            <span>Palette</span>
-            <strong>${palletValue}</strong>
-          </p>
-        `
+      const lotMetaHtml = hasAssignedLot
+        ? `<span class="card-meta-pill">Lot ${lotValue}</span>`
+        : '';
+      const palletMetaHtml = hasAssignedPallet
+        ? `<span class="card-meta-pill card-meta-pill--secondary">Palette ${palletValue}</span>`
         : '';
       const commentValue = typeof machine.comment === 'string' ? machine.comment.trim() : '';
-      const commentDisplay = commentValue || (state.canEditReports ? 'Ajouter un commentaire' : 'Aucun commentaire');
       const isEditingComment = state.quickCommentId === machine.id;
       const commentEditHtml = state.canEditReports
         ? `
-          <div class="comment-edit">
+          <div class="card-quick-comment${isEditingComment ? ' is-open' : ''}">
             <textarea
               class="comment-inline"
               data-comment-id="${machine.id}"
@@ -5918,29 +6701,21 @@ function renderList(isScrollUpdate = false) {
           </div>
         `
         : '';
-      const commentCardAttr = state.canEditReports ? ` data-comment-card="${machine.id}"` : '';
-      const commentHtml = `
-        <div
-          class="card-comment${commentValue ? '' : ' is-empty'}${isEditingComment ? ' is-editing' : ''}"
-          ${commentCardAttr}
-          title="${escapeHtml(commentValue)}"
-        >
-          <div class="comment-view">
-            <span class="comment-label">Commentaire</span>
-            <span class="comment-text">${escapeHtml(commentDisplay)}</span>
-          </div>
-          ${commentEditHtml}
-        </div>
-      `;
       const selected = state.expandedId === machine.id ? 'selected' : '';
       const absoluteIndex = startIndex + index;
       const delayClass = delayClasses[absoluteIndex % delayClasses.length];
       const summary = summarizeDetailForDrawer(machine);
+      const primaryStatus = getMachinePrimaryStatus(machine);
+      const primaryStatusLabel = getMachinePrimaryStatusLabel(machine);
+      const technicianLabel = escapeHtml(technicianValue || '--');
+      const commentPreviewHtml = commentValue
+        ? `<p class="card-comment-preview" title="${escapeHtml(commentValue)}">${escapeHtml(commentValue)}</p>`
+        : '';
       const summaryActive = state.quickFilter && state.quickFilter.type === 'summary';
       const summaryHtml =
         summary.total > 0
           ? `
-            <div class="machine-summary">
+            <div class="machine-summary machine-summary--compact">
               <button class="summary-chip ok${summaryActive && state.quickFilter.value === 'ok' ? ' is-active' : ''}" type="button" data-summary="ok">OK ${summary.ok}</button>
               <button class="summary-chip nok${summaryActive && state.quickFilter.value === 'nok' ? ' is-active' : ''}" type="button" data-summary="nok">NOK ${summary.nok}</button>
               <button class="summary-chip nt${summaryActive && state.quickFilter.value === 'nt' ? ' is-active' : ''}" type="button" data-summary="nt">NT ${summary.other}</button>
@@ -5954,40 +6729,50 @@ function renderList(isScrollUpdate = false) {
       const toggleLabel = 'Voir details';
 
       return `
-        <article class="machine-card ${delayClass} ${selected}${isBatteryAlert ? ' is-battery-alert' : ''}${isClockAlert ? ' is-clock-alert' : ''}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="false">
+        <article class="machine-card ${delayClass} ${selected} is-state-${primaryStatus}${isBatteryAlert ? ' is-battery-alert' : ''}${isClockAlert ? ' is-clock-alert' : ''}" data-id="${machine.id}" data-page="${machine._page || ''}" data-index="${entry.index}" aria-expanded="false">
           <div class="card-top">
-            ${categoryBadge}
-            <div class="card-top-right">
-              <div class="card-top-tags">
-                ${tagHtml}
-                ${lotHtml}
-                ${palletHtml}
-                ${batteryHtml}
+            <div class="card-heading">
+              <div class="card-heading-top">
+                ${categoryBadge}
+                <span class="machine-state machine-state--${primaryStatus}">
+                  <span class="machine-state-dot" aria-hidden="true"></span>
+                  ${primaryStatusLabel}
+                </span>
                 ${biosAlertHtml}
               </div>
-              <span class="machine-meta"><span>${lastSeen}</span></span>
-            </div>
-          </div>
-          <div class="card-main">
-            <div class="card-left">
               <h3 class="machine-title">${title}</h3>
               <p class="machine-sub">${subtitle}</p>
-              ${lotInlineHtml}
-              ${palletInlineHtml}
-              <div class="machine-meta-row">
-                ${buildMetaChip('SN', serialValue, serialValue, 'serial', state.activeToken, machine.id)}
-                ${buildMetaChip('Tech', technicianValue, technicianValue, 'tech', state.activeToken, machine.id)}
-              </div>
-              <div class="machine-meta-row mac-row">
-                ${buildMetaChip('MAC', macLabel || '', macValue, 'mac', state.activeToken, machine.id)}
-              </div>
-              ${summaryHtml}
             </div>
-            <div class="card-right">
-              ${commentHtml}
+            <div class="card-activity">
+              <span class="card-activity-label">Activite</span>
+              <strong>${lastSeen}</strong>
             </div>
           </div>
-          <button class="card-toggle" type="button" data-action="open-drawer" data-id="${machine.id}">${toggleLabel}</button>
+          <div class="card-signals">
+            ${summaryHtml}
+            <div class="card-signal-pills">
+              <span class="card-meta-pill card-meta-pill--tech">Tech ${technicianLabel}</span>
+              ${batteryHtml}
+              ${lotMetaHtml}
+              ${palletMetaHtml}
+              ${tagHtml}
+            </div>
+          </div>
+          ${commentPreviewHtml}
+          ${commentEditHtml}
+          <div class="card-actions-inline">
+            <button class="card-action-btn" type="button" data-action="open-drawer-tab" data-tab="composants" data-id="${machine.id}">
+              Modifier statut
+            </button>
+            ${
+              state.canEditReports
+                ? `<button class="card-action-btn" type="button" data-action="toggle-comment" data-id="${machine.id}">${
+                    commentValue ? 'Commentaire' : 'Commenter'
+                  }</button>`
+                : ''
+            }
+            <button class="card-action-btn is-primary" type="button" data-action="open-drawer" data-id="${machine.id}">${toggleLabel}</button>
+          </div>
         </article>
       `;
     })
@@ -6165,6 +6950,15 @@ function buildDetailHtml(detail) {
         .map((mac) => `<span class="mac-chip">${escapeHtml(mac)}</span>`)
         .join('')}</div>`
     : '<strong>--</strong>';
+  const remoteAccess = getRemoteAccessDebug(detail);
+  const remoteHostnames = formatDebugValueList(remoteAccess && remoteAccess.hostnames);
+  const remoteIpv4 = formatDebugValueList(remoteAccess && remoteAccess.ipv4);
+  const remoteIpv6 = formatDebugValueList(remoteAccess && remoteAccess.ipv6);
+  const remoteAdapters = formatRemoteAccessAdapters(remoteAccess);
+  const remoteWinRm = formatRemoteAccessWinRm(remoteAccess);
+  const remoteWinRmListeners = formatRemoteAccessWinRmListeners(remoteAccess);
+  const remoteCollectedAt =
+    remoteAccess && remoteAccess.collectedAt ? formatDateTime(remoteAccess.collectedAt) : '--';
   const clockAlert = normalizeClockAlert(detail.clockAlert);
 
   const componentEntries = Object.entries(components).filter(([key]) => !hiddenComponents.has(key));
@@ -6453,9 +7247,43 @@ function buildDetailHtml(detail) {
         <strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong>
       </div>
       <div class="detail-item">
-        <span>IP</span>
+        <span>IP serveur</span>
         <strong>${escapeHtml(detail.lastIp || '--')}</strong>
       </div>
+      ${
+        remoteAccess
+          ? `
+      <div class="detail-item detail-item--wide">
+        <span>Hostnames debug</span>
+        <strong class="detail-long-value">${escapeHtml(remoteHostnames)}</strong>
+      </div>
+      <div class="detail-item detail-item--wide">
+        <span>IPv4 locales</span>
+        <strong class="detail-long-value">${escapeHtml(remoteIpv4)}</strong>
+      </div>
+      <div class="detail-item detail-item--wide">
+        <span>IPv6 locales</span>
+        <strong class="detail-long-value">${escapeHtml(remoteIpv6)}</strong>
+      </div>
+      <div class="detail-item detail-item--wide">
+        <span>WinRM</span>
+        <strong class="detail-long-value">${escapeHtml(remoteWinRm)}</strong>
+      </div>
+      <div class="detail-item detail-item--wide">
+        <span>Listeners WinRM</span>
+        <strong class="detail-long-value">${escapeHtml(remoteWinRmListeners)}</strong>
+      </div>
+      <div class="detail-item detail-item--wide">
+        <span>Adaptateurs debug</span>
+        <strong class="detail-long-value">${escapeHtml(remoteAdapters)}</strong>
+      </div>
+      <div class="detail-item">
+        <span>Collecte debug</span>
+        <strong>${escapeHtml(remoteCollectedAt)}</strong>
+      </div>
+          `
+          : ''
+      }
       ${buildClockAlertFields(clockAlert, 'detail')}
     </div>
     ${historyHtml}
@@ -7141,6 +7969,7 @@ if (boardTabsEl) {
     state.boardView = nextView;
     savePreferences();
     renderBoardTabs();
+    updateSignalFilterButtons();
     reloadReports();
   });
 }
@@ -7251,6 +8080,69 @@ commentFilterButtons.forEach((button) => {
   });
 });
 
+summaryFilterButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const value = button.dataset.summary || '';
+    if (!summaryFilterValues.has(value)) {
+      return;
+    }
+    if (state.quickFilter && state.quickFilter.type === 'summary' && state.quickFilter.value === value) {
+      state.quickFilter = null;
+    } else {
+      state.quickFilter = { type: 'summary', value };
+    }
+    state.activeToken = null;
+    updateSummaryFilterButtons();
+    savePreferences();
+    renderList();
+  });
+});
+
+categoryFilterButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const next = button.dataset.category || 'all';
+    if (!categoryFilterOptions.has(next)) {
+      return;
+    }
+    state.filter = next;
+    updateCategoryFilterButtons();
+    updateStatFilterCards();
+    savePreferences();
+    reloadReports();
+  });
+});
+
+signalFilterButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const signal = button.dataset.signal || '';
+    if (signal === 'battery-alerts') {
+      state.boardView = isBatteryAlertsView() ? 'workspace' : 'battery-alerts';
+      savePreferences();
+      renderBoardTabs();
+      updateSignalFilterButtons();
+      reloadReports();
+      return;
+    }
+    if (signal === 'recent') {
+      state.dateFilter = state.dateFilter === 'today' ? 'all' : 'today';
+      state.dateFrom = '';
+      state.dateTo = '';
+      syncDateFilterControls();
+      updateSignalFilterButtons();
+      savePreferences();
+      reloadReports();
+      return;
+    }
+    if (signal === 'commented') {
+      state.commentFilter = state.commentFilter === 'with' ? 'all' : 'with';
+      updateCommentFilterButtons();
+      updateSignalFilterButtons();
+      savePreferences();
+      reloadReports();
+    }
+  });
+});
+
 dateFilterButtons.forEach((button) => {
   button.addEventListener('click', () => {
     const next = button.dataset.dateFilter || 'all';
@@ -7316,10 +8208,24 @@ if (applyDateRangeBtn) {
   });
 }
 
+if (sortSelect) {
+  sortSelect.addEventListener('change', (event) => {
+    const next = String(event.target.value || '').trim();
+    state.sort = sortOptions.has(next) ? next : 'activity';
+    updateSortSelect();
+    savePreferences();
+    renderList();
+  });
+}
+
 updateLayoutButtons();
 updateTestFilterButtons();
 updateCommentFilterButtons();
 updateTagFilterButtons();
+updateSummaryFilterButtons();
+updateCategoryFilterButtons();
+updateSignalFilterButtons();
+updateSortSelect();
 applyLayout();
 syncDateFilterControls();
 updateStatFilterCards();
@@ -7500,6 +8406,24 @@ listEl.addEventListener('click', (event) => {
     }
     return;
   }
+  const toggleCommentBtn = event.target.closest('[data-action="toggle-comment"]');
+  if (toggleCommentBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!state.canEditReports) {
+      return;
+    }
+    const id = toggleCommentBtn.dataset.id;
+    if (!id) {
+      return;
+    }
+    state.quickCommentId = state.quickCommentId === id ? null : id;
+    renderList();
+    if (state.quickCommentId === id) {
+      focusInlineComment(id);
+    }
+    return;
+  }
   const tagPill = event.target.closest('.tag-pill');
   if (tagPill && tagPill.dataset.tagId) {
     event.preventDefault();
@@ -7604,6 +8528,23 @@ listEl.addEventListener('click', (event) => {
     event.stopPropagation();
     const id = openDrawerBtn.dataset.id;
     if (!id) {
+      return;
+    }
+    openDetailsDrawer(id);
+    return;
+  }
+  const openDrawerTabBtn = event.target.closest('[data-action="open-drawer-tab"]');
+  if (openDrawerTabBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = openDrawerTabBtn.dataset.id;
+    const tab = openDrawerTabBtn.dataset.tab;
+    if (!id) {
+      return;
+    }
+    if (tab) {
+      state.drawerTab = tab;
+      openDetailsDrawer(id, { resetTab: false });
       return;
     }
     openDetailsDrawer(id);
@@ -7745,6 +8686,15 @@ if (detailsDrawerShell) {
       return;
     }
 
+    const focusNokBtn = event.target.closest('[data-action="focus-noks"], [data-action="focus-nok"]');
+    if (focusNokBtn) {
+      event.preventDefault();
+      const tab = focusNokBtn.dataset.tab || 'composants';
+      const key = focusNokBtn.dataset.key || '';
+      focusDrawerIssue(tab, key);
+      return;
+    }
+
     const reportLink = event.target.closest('[data-action="open-report"]');
     if (reportLink) {
       event.preventDefault();
@@ -7792,6 +8742,38 @@ if (detailsDrawerShell) {
         return;
       }
       openReportPdf(detail);
+      return;
+    }
+
+    const saveBatteryBtn = event.target.closest('[data-action="save-battery-health"]');
+    if (saveBatteryBtn) {
+      event.preventDefault();
+      const id = saveBatteryBtn.dataset.id;
+      if (!id || !detailsDrawerShell) {
+        return;
+      }
+      const safeId = String(id).replace(/"/g, '\\"');
+      const input = detailsDrawerShell.querySelector(`[data-battery-input-for="${safeId}"]`);
+      if (!input) {
+        return;
+      }
+      updateBatteryHealth(id, input.value);
+      return;
+    }
+
+    const saveTechnicianBtn = event.target.closest('[data-action="save-technician"]');
+    if (saveTechnicianBtn) {
+      event.preventDefault();
+      const id = saveTechnicianBtn.dataset.id;
+      if (!id || !detailsDrawerShell) {
+        return;
+      }
+      const safeId = String(id).replace(/"/g, '\\"');
+      const input = detailsDrawerShell.querySelector(`[data-technician-input-for="${safeId}"]`);
+      if (!input) {
+        return;
+      }
+      updateTechnician(id, input.value);
       return;
     }
 
@@ -7867,6 +8849,29 @@ if (detailsDrawerShell) {
       return;
     }
     scheduleCommentSave(id, input.value);
+  });
+
+  detailsDrawerShell.addEventListener('keydown', (event) => {
+    const input = event.target.closest('.drawer-battery-input');
+    if (!input || event.key !== 'Enter') {
+      const technicianInput = event.target.closest('.drawer-technician-input');
+      if (!technicianInput || event.key !== 'Enter') {
+        return;
+      }
+      event.preventDefault();
+      const id = technicianInput.dataset.technicianInputFor;
+      if (!id) {
+        return;
+      }
+      updateTechnician(id, technicianInput.value);
+      return;
+    }
+    event.preventDefault();
+    const id = input.dataset.batteryInputFor;
+    if (!id) {
+      return;
+    }
+    updateBatteryHealth(id, input.value);
   });
 
   detailsDrawerShell.addEventListener(

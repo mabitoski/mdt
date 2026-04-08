@@ -77,7 +77,7 @@ const WEEKLY_RECAP_MINUTE_RAW = Number.parseInt(process.env.WEEKLY_RECAP_MINUTE 
 const WEEKLY_RECAP_TIMEZONE = (process.env.WEEKLY_RECAP_TIMEZONE || 'Europe/Paris').trim() || 'Europe/Paris';
 const APP_TIMEZONE = (process.env.APP_TIMEZONE || WEEKLY_RECAP_TIMEZONE || 'Europe/Paris').trim() || 'Europe/Paris';
 const WEEKLY_RECAP_BATTERY_THRESHOLD_RAW = Number.parseInt(
-  process.env.WEEKLY_RECAP_BATTERY_THRESHOLD || '78',
+  process.env.WEEKLY_RECAP_BATTERY_THRESHOLD || '75',
   10
 );
 const WEEKLY_RECAP_CHECK_INTERVAL_MS = Number.parseInt(
@@ -195,9 +195,9 @@ const ALERT_BATTERY_THRESHOLD = Math.max(
   Math.min(
     100,
     Number.parseInt(
-      process.env.BATTERY_ALERT_THRESHOLD || process.env.WEEKLY_RECAP_BATTERY_THRESHOLD || '78',
+      process.env.BATTERY_ALERT_THRESHOLD || process.env.WEEKLY_RECAP_BATTERY_THRESHOLD || '75',
       10
-    ) || 78
+    ) || 75
   )
 );
 const BIOS_CLOCK_DRIFT_ALERT_THRESHOLD_SECONDS = Math.max(
@@ -330,6 +330,8 @@ function getConfiguredMicrosoftGroupIds() {
 function buildPermissionSet(overrides = {}) {
   const canCreateReportZero = overrides.canCreateReportZero === true;
   const canEditReports = overrides.canEditReports === true;
+  const canEditBatteryHealth = overrides.canEditBatteryHealth === true;
+  const canEditTechnician = overrides.canEditTechnician === true;
   const canImportManualCsv = overrides.canImportManualCsv === true;
   const canManageLots = overrides.canManageLots === true;
   const canManagePallets = overrides.canManagePallets === true;
@@ -342,6 +344,8 @@ function buildPermissionSet(overrides = {}) {
   return {
     canCreateReportZero,
     canEditReports,
+    canEditBatteryHealth,
+    canEditTechnician,
     canImportManualCsv,
     canManageLots,
     canManagePallets,
@@ -362,6 +366,8 @@ function buildPermissionsForAccessLevel(accessLevel) {
       return buildPermissionSet({
         canCreateReportZero: true,
         canEditReports: true,
+        canEditBatteryHealth: true,
+        canEditTechnician: true,
         canImportManualCsv: true,
         canManageLots: true,
         canManagePallets: true,
@@ -375,6 +381,8 @@ function buildPermissionsForAccessLevel(accessLevel) {
       return buildPermissionSet({
         canCreateReportZero: true,
         canEditReports: true,
+        canEditBatteryHealth: true,
+        canEditTechnician: true,
         canImportManualCsv: true,
         canManageLots: true,
         canManagePallets: true,
@@ -2519,6 +2527,156 @@ async function initDb() {
   await backfillClockSignals();
 }
 
+async function backfillUnknownTechniciansToLuka() {
+  const unknownValues = Array.from(UNKNOWN_TECHNICIAN_KEYS).filter(Boolean);
+  const reportsResult = await pool.query(
+    `
+      UPDATE reports
+      SET technician = $1
+      WHERE technician IS NOT NULL
+        AND btrim(technician) <> ''
+        AND lower(btrim(technician)) = ANY($2::text[])
+    `,
+    [DEFAULT_FALLBACK_TECHNICIAN, unknownValues]
+  );
+  const machinesResult = await pool.query(
+    `
+      UPDATE machines
+      SET technician = $1
+      WHERE technician IS NOT NULL
+        AND btrim(technician) <> ''
+        AND lower(btrim(technician)) = ANY($2::text[])
+    `,
+    [DEFAULT_FALLBACK_TECHNICIAN, unknownValues]
+  );
+  const lotProgressResult = await pool.query(
+    `
+      UPDATE lot_progress
+      SET technician = $1
+      WHERE technician IS NOT NULL
+        AND btrim(technician) <> ''
+        AND lower(btrim(technician)) = ANY($2::text[])
+    `,
+    [DEFAULT_FALLBACK_TECHNICIAN, unknownValues]
+  );
+  const changedCount =
+    Number(reportsResult.rowCount || 0) +
+    Number(machinesResult.rowCount || 0) +
+    Number(lotProgressResult.rowCount || 0);
+
+  if (changedCount > 0) {
+    console.log(
+      `Backfilled technician '${DEFAULT_FALLBACK_TECHNICIAN}' for unknown rows: ` +
+        `reports=${reportsResult.rowCount || 0}, machines=${machinesResult.rowCount || 0}, ` +
+        `lot_progress=${lotProgressResult.rowCount || 0}`
+    );
+  }
+}
+
+async function repairTechniciansFromPayload() {
+  const unknownValues = Array.from(UNKNOWN_TECHNICIAN_KEYS).filter(Boolean);
+  const reportsResult = await pool.query(
+    `
+      WITH candidates AS (
+        SELECT
+          reports.id,
+          NULLIF(btrim(safe_jsonb(reports.payload) ->> 'technician'), '') AS payload_technician
+        FROM reports
+        WHERE reports.payload IS NOT NULL
+          AND reports.payload <> ''
+      )
+      UPDATE reports
+      SET technician = candidates.payload_technician
+      FROM candidates
+      WHERE reports.id = candidates.id
+        AND candidates.payload_technician IS NOT NULL
+        AND lower(candidates.payload_technician) <> ALL($1::text[])
+        AND (
+          reports.technician IS NULL
+          OR btrim(reports.technician) = ''
+          OR lower(btrim(reports.technician)) = ANY($1::text[])
+          OR (
+            lower(btrim(reports.technician)) = lower($2)
+            AND lower(candidates.payload_technician) <> lower($2)
+          )
+        )
+        AND reports.technician IS DISTINCT FROM candidates.payload_technician
+    `,
+    [unknownValues, DEFAULT_FALLBACK_TECHNICIAN]
+  );
+  const machinesResult = await pool.query(
+    `
+      WITH candidates AS (
+        SELECT
+          machines.machine_key,
+          NULLIF(btrim(safe_jsonb(machines.payload) ->> 'technician'), '') AS payload_technician
+        FROM machines
+        WHERE machines.payload IS NOT NULL
+          AND machines.payload <> ''
+      )
+      UPDATE machines
+      SET technician = candidates.payload_technician
+      FROM candidates
+      WHERE machines.machine_key = candidates.machine_key
+        AND candidates.payload_technician IS NOT NULL
+        AND lower(candidates.payload_technician) <> ALL($1::text[])
+        AND (
+          machines.technician IS NULL
+          OR btrim(machines.technician) = ''
+          OR lower(btrim(machines.technician)) = ANY($1::text[])
+          OR (
+            lower(btrim(machines.technician)) = lower($2)
+            AND lower(candidates.payload_technician) <> lower($2)
+          )
+        )
+        AND machines.technician IS DISTINCT FROM candidates.payload_technician
+    `,
+    [unknownValues, DEFAULT_FALLBACK_TECHNICIAN]
+  );
+  const lotProgressResult = await pool.query(
+    `
+      WITH latest AS (
+        SELECT DISTINCT ON (reports.machine_key)
+          reports.machine_key,
+          reports.technician
+        FROM reports
+        WHERE reports.machine_key IS NOT NULL
+          AND reports.technician IS NOT NULL
+          AND btrim(reports.technician) <> ''
+        ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+      )
+      UPDATE lot_progress
+      SET technician = latest.technician
+      FROM latest
+      WHERE lot_progress.machine_key = latest.machine_key
+        AND latest.technician IS NOT NULL
+        AND (
+          lot_progress.technician IS NULL
+          OR btrim(lot_progress.technician) = ''
+          OR lower(btrim(lot_progress.technician)) = ANY($1::text[])
+          OR (
+            lower(btrim(lot_progress.technician)) = lower($2)
+            AND lower(latest.technician) <> lower($2)
+          )
+        )
+        AND lot_progress.technician IS DISTINCT FROM latest.technician
+    `,
+    [unknownValues, DEFAULT_FALLBACK_TECHNICIAN]
+  );
+  const changedCount =
+    Number(reportsResult.rowCount || 0) +
+    Number(machinesResult.rowCount || 0) +
+    Number(lotProgressResult.rowCount || 0);
+
+  if (changedCount > 0) {
+    console.log(
+      'Repaired technician labels from payload: ' +
+        `reports=${reportsResult.rowCount || 0}, machines=${machinesResult.rowCount || 0}, ` +
+        `lot_progress=${lotProgressResult.rowCount || 0}`
+    );
+  }
+}
+
 const upsertMachineQuery = `
   INSERT INTO machines (
     machine_key,
@@ -3506,6 +3664,14 @@ function requireOperator(req, res, next) {
   return requirePermission('canEditReports')(req, res, next);
 }
 
+function requireBatteryHealthEdit(req, res, next) {
+  return requirePermission('canEditBatteryHealth')(req, res, next);
+}
+
+function requireTechnicianEdit(req, res, next) {
+  return requirePermission('canEditTechnician')(req, res, next);
+}
+
 function requireLogistics(req, res, next) {
   return requirePermission('canManageLogistics')(req, res, next);
 }
@@ -3566,6 +3732,20 @@ const TECH_TRANSLATE_FROM =
   'àáâäãåçèéêëìíîïñòóôöõùúûüýÿÀÁÂÄÃÅÇÈÉÊËÌÍÎÏÑÒÓÔÖÕÙÚÛÜÝ';
 const TECH_TRANSLATE_TO =
   'aaaaaaceeeeiiiinooooouuuuyyAAAAAACEEEEIIIINOOOOOUUUUY';
+const DEFAULT_FALLBACK_TECHNICIAN = 'Luka';
+const UNKNOWN_TECHNICIAN_KEYS = new Set([
+  'unknown',
+  'inconnu',
+  '--',
+  'none',
+  'null',
+  'n/a',
+  'na',
+  'non renseigne',
+  'non-renseigne',
+  'non renseignee',
+  'non-renseignee'
+]);
 
 function normalizeTechKey(value) {
   if (!value) {
@@ -3576,6 +3756,21 @@ function normalizeTechKey(value) {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
+}
+
+function normalizeReportTechnician(value, { fallback = null } = {}) {
+  const cleaned = cleanString(value, 64);
+  if (!cleaned) {
+    return null;
+  }
+  const technicianKey = normalizeTechKey(cleaned);
+  if (!technicianKey) {
+    return null;
+  }
+  if (UNKNOWN_TECHNICIAN_KEYS.has(technicianKey)) {
+    return fallback;
+  }
+  return cleaned;
 }
 
 function normalizeMdtBetaSlug(value) {
@@ -4845,7 +5040,9 @@ function extractManualReportCsvRows(csvText) {
     let macAddresses = raw.macAddresses ? normalizeMacList(raw.macAddresses) : null;
     const serialNumber = raw.serialNumber ? normalizeSerial(raw.serialNumber) : null;
     const category = raw.category ? normalizeCategory(raw.category) : 'unknown';
-    const technician = cleanString(raw.technician, 64);
+    const technician = normalizeReportTechnician(raw.technician, {
+      fallback: DEFAULT_FALLBACK_TECHNICIAN
+    });
     const lotId = raw.lotId ? normalizeUuid(raw.lotId) : null;
     const tag = cleanString(raw.tag, 64);
     const tagId = raw.tagId ? normalizeUuid(raw.tagId) : null;
@@ -7782,7 +7979,7 @@ const WEEKLY_RECAP_RECIPIENTS = Object.freeze(parseEmailAddressList(WEEKLY_RECAP
 const WEEKLY_RECAP_DAY = normalizeWeekdayToken(WEEKLY_RECAP_DAY_RAW) ?? 1;
 const WEEKLY_RECAP_HOUR = clampInteger(WEEKLY_RECAP_HOUR_RAW, 7, 0, 23);
 const WEEKLY_RECAP_MINUTE = clampInteger(WEEKLY_RECAP_MINUTE_RAW, 30, 0, 59);
-const WEEKLY_RECAP_BATTERY_THRESHOLD = clampInteger(WEEKLY_RECAP_BATTERY_THRESHOLD_RAW, 78, 1, 100);
+const WEEKLY_RECAP_BATTERY_THRESHOLD = clampInteger(WEEKLY_RECAP_BATTERY_THRESHOLD_RAW, 75, 1, 100);
 
 function getTimeZoneParts(date, timeZone = WEEKLY_RECAP_TIMEZONE) {
   const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -12089,9 +12286,9 @@ app.post('/api/ingest', ingestLimiter, async (req, res) => {
   );
   const model = cleanString(pickFirst(body, ['model', 'computerModel', 'product', 'productName']), 64);
   const vendor = cleanString(pickFirst(body, ['vendor', 'manufacturer', 'make']), 64);
-  const technician = cleanString(
+  const technician = normalizeReportTechnician(
     pickFirst(body, ['technician', 'technicianName', 'tech', 'techName', 'operator']),
-    64
+    { fallback: DEFAULT_FALLBACK_TECHNICIAN }
   );
   const osVersion = cleanString(pickFirst(body, ['osVersion', 'os', 'os_version']), 64);
   const components = sanitizeComponents(
@@ -13766,6 +13963,121 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
   });
 });
 
+app.put('/api/machines/:id/battery-health', requireBatteryHealthEdit, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const batteryHealth = normalizeBatteryHealth(req.body?.batteryHealth);
+  if (batteryHealth == null) {
+    return res.status(400).json({ ok: false, error: 'invalid_battery_health' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const row = await getScopedReportRowById(client, id, req.session?.user, {
+      columns: 'id, machine_key, technician',
+      forUpdate: true
+    });
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    await client.query('UPDATE reports SET battery_health = $1 WHERE id = $2', [batteryHealth, id]);
+    if (row.machine_key) {
+      await client.query('UPDATE machines SET battery_health = $1 WHERE machine_key = $2', [
+        batteryHealth,
+        row.machine_key
+      ]);
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, batteryHealth });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback battery health update', rollbackError);
+      }
+    }
+    console.error('Failed to update battery health', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+app.put('/api/machines/:id/technician', requireTechnicianEdit, async (req, res) => {
+  const id = normalizeUuid(req.params.id);
+  if (!id) {
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  }
+
+  const technician = normalizeReportTechnician(req.body?.technician, {
+    fallback: DEFAULT_FALLBACK_TECHNICIAN
+  });
+  if (!technician) {
+    return res.status(400).json({ ok: false, error: 'invalid_technician' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    await setAuditContext(client, buildAuditContext(req));
+    const row = await getScopedReportRowById(client, id, req.session?.user, {
+      columns: 'id, machine_key, technician',
+      forUpdate: true
+    });
+    if (!row) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    if (row.machine_key) {
+      await client.query('UPDATE reports SET technician = $1 WHERE machine_key = $2', [
+        technician,
+        row.machine_key
+      ]);
+      await client.query('UPDATE machines SET technician = $1 WHERE machine_key = $2', [
+        technician,
+        row.machine_key
+      ]);
+      await client.query('UPDATE lot_progress SET technician = $1 WHERE machine_key = $2', [
+        technician,
+        row.machine_key
+      ]);
+    } else {
+      await client.query('UPDATE reports SET technician = $1 WHERE id = $2', [technician, id]);
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, technician });
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Failed to rollback technician update', rollbackError);
+      }
+    }
+    console.error('Failed to update technician', error);
+    return res.status(500).json({ ok: false, error: 'db_error' });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
 app.put('/api/machines/:id/pad', requireOperator, async (req, res) => {
   const id = normalizeUuid(req.params.id);
   if (!id) {
@@ -14438,7 +14750,9 @@ app.post('/api/reports/import-manual-csv', requireOperator, async (req, res) => 
       const row = operatorScope
         ? {
             ...rawRow,
-            technician: operatorScope.primaryLabel || rawRow.technician || null
+            technician: normalizeReportTechnician(operatorScope.primaryLabel || rawRow.technician, {
+              fallback: DEFAULT_FALLBACK_TECHNICIAN
+            })
           }
         : rawRow;
       const result = await insertManualCsvReportRow(client, req, row);
@@ -14484,9 +14798,14 @@ app.post('/api/reports/report-zero', requireOperator, async (req, res) => {
   const tag = cleanString(body.tag, 64);
   const model = cleanString(body.model, 64);
   const vendor = cleanString(body.vendor, 64);
-  const requestedTechnician = cleanString(body.technician, 64);
+  const requestedTechnician = normalizeReportTechnician(body.technician, {
+    fallback: DEFAULT_FALLBACK_TECHNICIAN
+  });
   const operatorScope = getUserTechnicianScope(req.session?.user);
-  const technician = operatorScope ? operatorScope.primaryLabel || requestedTechnician : requestedTechnician;
+  const technician = normalizeReportTechnician(
+    operatorScope ? operatorScope.primaryLabel || requestedTechnician : requestedTechnician,
+    { fallback: DEFAULT_FALLBACK_TECHNICIAN }
+  );
   const osVersion = cleanString(body.osVersion, 64);
   const isDoubleCheck = isDoubleCheckPayload(body);
   let macAddresses = normalizeMacList(body.macAddresses);
@@ -15350,6 +15669,8 @@ app.use((req, res) => {
 async function startServer() {
   try {
     await initDb();
+    await backfillUnknownTechniciansToLuka();
+    await repairTechniciansFromPayload();
     startWeeklyRecapScheduler();
     app.listen(PORT, () => {
       console.log(`MDT web listening on http://localhost:${PORT}`);
