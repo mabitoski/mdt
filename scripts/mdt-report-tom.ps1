@@ -61,6 +61,7 @@ param(
   [string]$ReportTag = $env:MDT_REPORT_TAG,
   [string]$ReportTagId = $env:MDT_REPORT_TAG_ID,
   [string]$ObjectStorageMcPath = $env:MDT_OBJECT_STORAGE_MC_PATH,
+  [string]$ArtifactUploadUrl = $env:MDT_ARTIFACT_UPLOAD_URL,
   [switch]$SkipRawUpload,
   [switch]$FailTaskSequenceOnError,
   [string]$OutboxRoot = $env:MDT_OUTBOX_ROOT,
@@ -68,7 +69,7 @@ param(
   [string]$PayloadOutputPath
 )
 
-$scriptVersion = '1.7.14'
+$scriptVersion = '1.7.15'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 if (-not $ApiUrl) {
@@ -171,6 +172,21 @@ $script:WinRmBootstrapStatus = 'not_started'
 $script:WinRmBootstrapReason = $null
 $script:BatterySnapshot = $null
 $script:BatterySnapshotReady = $false
+$script:CrashIngestAttempted = $false
+$script:CurrentPayload = $null
+$script:CurrentPayloadJson = $null
+$script:CurrentArtifactRunDir = $null
+$script:CurrentApiUrl = $ApiUrl
+$script:CurrentLogPath = $LogPath
+$script:CurrentOutboxRoot = $OutboxRoot
+$script:CurrentKeyboardLogPath = $KeyboardCaptureLogPath
+$script:CurrentArtifactUploadUrl = $ArtifactUploadUrl
+$script:CurrentHostname = $env:COMPUTERNAME
+$script:CurrentMacAddress = $null
+$script:CurrentSerialNumber = $null
+$script:CurrentCategory = $Category
+$script:CurrentTechnician = $Technician
+$script:PrimaryReportId = $null
 
 function Step-Progress {
   param([string]$Status)
@@ -217,6 +233,140 @@ function Join-DiagnosticValues {
   $items = @($items | Select-Object -Unique)
   if ($items.Count -eq 0) { return 'none' }
   return ($items -join ', ')
+}
+
+function Resolve-ReportBootstrapLogPath {
+  $candidates = @()
+  if ($env:WINDIR) {
+    $candidates += Join-Path (Join-Path $env:WINDIR 'Temp') 'mdt-report-bootstrap.log'
+  }
+  if ($env:SystemRoot) {
+    $candidates += Join-Path (Join-Path $env:SystemRoot 'Temp') 'mdt-report-bootstrap.log'
+  }
+
+  foreach ($candidate in @($candidates | Select-Object -Unique)) {
+    if ($candidate) { return $candidate }
+  }
+  return $null
+}
+
+function Get-TaskSequenceLogRoots {
+  $roots = @()
+  foreach ($candidate in @(
+      $env:_SMSTSLogPath,
+      $(if ($env:WINDIR) { Join-Path $env:WINDIR 'Temp\DeploymentLogs' } else { $null }),
+      $(if ($env:SystemRoot) { Join-Path $env:SystemRoot 'Temp\DeploymentLogs' } else { $null }),
+      $(if ($env:WINDIR) { Join-Path $env:WINDIR 'Temp\SMSTSLog' } else { $null }),
+      $(if ($env:SystemRoot) { Join-Path $env:SystemRoot 'Temp\SMSTSLog' } else { $null }),
+      $(if ($env:SystemDrive) { Join-Path $env:SystemDrive 'MININT\SMSOSD\OSDLOGS' } else { $null }),
+      $(if ($env:SystemDrive) { Join-Path $env:SystemDrive '_SMSTaskSequence\Logs\Smstslog' } else { $null }),
+      $(if ($env:SystemRoot) { Join-Path $env:SystemRoot 'CCM\Logs' } else { $null }),
+      $(if ($env:SystemRoot) { Join-Path $env:SystemRoot 'CCM\Logs\SMSTSLog' } else { $null })
+    )) {
+    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+    $roots += $candidate
+  }
+
+  return @($roots | Select-Object -Unique)
+}
+
+function Resolve-TaskSequenceLogPath {
+  param([string]$LeafName)
+
+  if (-not $LeafName) { return $null }
+  foreach ($root in @(Get-TaskSequenceLogRoots)) {
+    try {
+      $candidate = Join-Path $root $LeafName
+      if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+      }
+    } catch { }
+  }
+  return $null
+}
+
+function Get-TextFileTailInfo {
+  param(
+    [string]$Path,
+    [int]$TailLines = 80,
+    [int]$MaxChars = 3000
+  )
+
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+  try {
+    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $lines = @(Get-Content -LiteralPath $Path -Tail $TailLines -ErrorAction Stop)
+    $text = $lines -join "`n"
+    $truncated = $false
+    if ($text.Length -gt $MaxChars) {
+      $text = $text.Substring($text.Length - $MaxChars)
+      $truncated = $true
+    }
+    return [ordered]@{
+      path = $item.FullName
+      fileName = $item.Name
+      sizeBytes = $item.Length
+      lastWriteTimeUtc = $item.LastWriteTimeUtc.ToString('o')
+      tailLines = $TailLines
+      truncated = $truncated
+      excerpt = $text
+    }
+  } catch {
+    $fallbackFileName = $Path
+    try { $fallbackFileName = Split-Path $Path -Leaf } catch { }
+    return [ordered]@{
+      path = $Path
+      fileName = $fallbackFileName
+      readError = $_.Exception.Message
+    }
+  }
+}
+
+function Get-EmbeddedReportLogs {
+  param(
+    [string]$PrimaryLogPath,
+    [string]$KeyboardLogPath,
+    [int]$MaxFiles = 8
+  )
+
+  $definitions = @()
+  if ($PrimaryLogPath) {
+    $definitions += @{ kind = 'report'; label = 'MDT report'; path = $PrimaryLogPath; tailLines = 160; maxChars = 6000 }
+  }
+
+  $definitions += @(
+    @{ kind = 'bootstrap'; label = 'Bootstrap'; path = (Resolve-ReportBootstrapLogPath); tailLines = 120; maxChars = 2500 },
+    @{ kind = 'litetouch'; label = 'LiteTouch'; path = (Resolve-TaskSequenceLogPath -LeafName 'LiteTouch.log'); tailLines = 120; maxChars = 3500 },
+    @{ kind = 'smsts'; label = 'SMSTS'; path = (Resolve-TaskSequenceLogPath -LeafName 'SMSTS.log'); tailLines = 120; maxChars = 3500 },
+    @{ kind = 'bdd'; label = 'BDD'; path = (Resolve-TaskSequenceLogPath -LeafName 'BDD.log'); tailLines = 80; maxChars = 2000 }
+  )
+
+  if ($KeyboardLogPath) {
+    $definitions += @{ kind = 'keyboard'; label = 'Keyboard'; path = $KeyboardLogPath; tailLines = 80; maxChars = 2000 }
+  }
+
+  $seen = @{}
+  $files = @()
+  foreach ($definition in $definitions) {
+    if ($files.Count -ge $MaxFiles) { break }
+    $candidatePath = $definition.path
+    if (-not $candidatePath) { continue }
+    $fullPath = $candidatePath
+    try { $fullPath = [System.IO.Path]::GetFullPath($candidatePath) } catch { }
+    if ($seen.ContainsKey($fullPath)) { continue }
+    $seen[$fullPath] = $true
+    $entry = Get-TextFileTailInfo -Path $candidatePath -TailLines $definition.tailLines -MaxChars $definition.maxChars
+    if (-not $entry) { continue }
+    $entry.kind = $definition.kind
+    $entry.label = $definition.label
+    $files += $entry
+  }
+
+  if ($files.Count -eq 0) { return $null }
+  return [ordered]@{
+    capturedAt = (Get-Date).ToUniversalTime().ToString('o')
+    files = $files
+  }
 }
 
 function Convert-BatteryDiagnosticValue {
@@ -966,6 +1116,7 @@ function Write-DiagnosticContext {
 
 trap {
   try { Write-ErrorRecordDetails -ErrorRecord $_ -Prefix 'Unhandled terminating error' } catch { }
+  try { Publish-CrashPayload -ErrorRecord $_ } catch { }
   try { Complete-Progress } catch { }
   throw
 }
@@ -2267,6 +2418,248 @@ function Save-OutboxEntry {
   return $entryDir
 }
 
+function Resolve-ArtifactUploadUrl {
+  param(
+    [string]$ApiUrl,
+    [string]$Value
+  )
+
+  if ($Value) { return $Value }
+  if (-not $ApiUrl) { return $null }
+
+  try {
+    $uri = [System.Uri]$ApiUrl
+    $builder = New-Object System.UriBuilder $uri
+    $path = if ($builder.Path) { $builder.Path.TrimEnd('/') } else { '' }
+    if ($path -match '/api/ingest$') {
+      $builder.Path = ($path -replace '/api/ingest$', '/api/ingest/artifacts')
+    } else {
+      $builder.Path = "$path/artifacts"
+    }
+    return $builder.Uri.AbsoluteUri
+  } catch {
+    return $null
+  }
+}
+
+function Build-ArtifactUploadUrl {
+  param(
+    [string]$BaseUrl,
+    [hashtable]$Parameters
+  )
+
+  if (-not $BaseUrl) { return $null }
+  if (-not $Parameters -or $Parameters.Count -eq 0) { return $BaseUrl }
+
+  $pairs = @()
+  foreach ($key in $Parameters.Keys) {
+    $value = $Parameters[$key]
+    if ($null -eq $value) { continue }
+    $text = [string]$value
+    if ([string]::IsNullOrWhiteSpace($text)) { continue }
+    $pairs += ("{0}={1}" -f [System.Uri]::EscapeDataString([string]$key), [System.Uri]::EscapeDataString($text))
+  }
+  if ($pairs.Count -eq 0) { return $BaseUrl }
+  $separator = if ($BaseUrl.Contains('?')) { '&' } else { '?' }
+  return ($BaseUrl + $separator + ($pairs -join '&'))
+}
+
+function Compress-RunArtifacts {
+  param(
+    [string]$RunDir,
+    [string]$ClientRunId
+  )
+
+  if (-not $RunDir -or -not (Test-Path -LiteralPath $RunDir)) { return $null }
+
+  $archiveRoot = if ($env:TEMP) {
+    Join-Path $env:TEMP 'mdt-fusion\archives'
+  } else {
+    Join-Path $PSScriptRoot 'archives'
+  }
+  $resolvedRoot = Ensure-Directory -Path $archiveRoot
+  if (-not $resolvedRoot) { return $null }
+
+  $archiveName = if ($ClientRunId) { "$ClientRunId.zip" } else { ([guid]::NewGuid().ToString('D') + '.zip') }
+  $archivePath = Join-Path $resolvedRoot $archiveName
+  try {
+    if (Test-Path -LiteralPath $archivePath) {
+      Remove-Item -LiteralPath $archivePath -Force -ErrorAction Stop
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue | Out-Null
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($RunDir, $archivePath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+    return $archivePath
+  } catch {
+    Write-Log "Artifact archive creation failed: $($_.Exception.Message)" 'WARN'
+    return $null
+  }
+}
+
+function Upload-RunArtifactsViaApi {
+  param(
+    [string]$RunDir,
+    [string]$ApiUrl,
+    [string]$ArtifactUploadUrl,
+    [string]$Prefix,
+    [string]$Tag,
+    [string]$MacSerialKey,
+    [string]$ClientRunId,
+    [string]$ReportId,
+    [int]$TimeoutSec = 120
+  )
+
+  $result = [ordered]@{
+    attempted = $false
+    success = $false
+    method = 'api_relay'
+  }
+
+  $resolvedUploadUrl = Resolve-ArtifactUploadUrl -ApiUrl $ApiUrl -Value $ArtifactUploadUrl
+  if (-not $resolvedUploadUrl) {
+    $result.error = 'artifact_upload_url_missing'
+    return $result
+  }
+
+  $archivePath = Compress-RunArtifacts -RunDir $RunDir -ClientRunId $ClientRunId
+  if (-not $archivePath -or -not (Test-Path -LiteralPath $archivePath)) {
+    $result.error = 'artifact_archive_failed'
+    return $result
+  }
+
+  $query = @{
+    reportId = if ($ReportId) { $ReportId } else { $ClientRunId }
+    clientRunId = $ClientRunId
+    macSerialKey = $MacSerialKey
+    prefix = $Prefix
+    tag = $Tag
+    archiveName = 'run-artifacts.zip'
+  }
+  $uploadUrl = Build-ArtifactUploadUrl -BaseUrl $resolvedUploadUrl -Parameters $query
+  if (-not $uploadUrl) {
+    $result.error = 'artifact_upload_url_invalid'
+    return $result
+  }
+
+  $result.attempted = $true
+  $result.uploadUrl = $uploadUrl
+  try {
+    $response = Invoke-RestMethod -Uri $uploadUrl -Method Post -InFile $archivePath -ContentType 'application/zip' -TimeoutSec $TimeoutSec
+    $result.success = [bool]($response -and $response.ok)
+    if ($response -and $response.destination) { $result.destination = $response.destination }
+    if ($response -and $response.storage) { $result.storage = $response.storage }
+    if ($response -and $response.archiveName) { $result.archiveName = $response.archiveName }
+    if ($response -and $response.warning) { $result.warning = $response.warning }
+    if (-not $result.success) {
+      $result.error = if ($response -and $response.error) { [string]$response.error } else { 'artifact_upload_failed' }
+    }
+    return $result
+  } catch {
+    $result.error = $_.Exception.Message
+    return $result
+  } finally {
+    try {
+      if (Test-Path -LiteralPath $archivePath) {
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+      }
+    } catch { }
+  }
+}
+
+function Publish-CrashPayload {
+  param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+
+  if ($script:CrashIngestAttempted) { return $false }
+  $script:CrashIngestAttempted = $true
+
+  $reportId = if ($script:PrimaryReportId) { $script:PrimaryReportId } else { [guid]::NewGuid().ToString('D') }
+  $hostname = if ($script:CurrentHostname) { $script:CurrentHostname } else { $env:COMPUTERNAME }
+  $category = if ($script:CurrentCategory) { $script:CurrentCategory } else { 'unknown' }
+  $technician = if ($script:CurrentTechnician) { $script:CurrentTechnician } else { $Technician }
+  $message = if ($ErrorRecord -and $ErrorRecord.Exception) { $ErrorRecord.Exception.Message } else { 'Unhandled terminating error' }
+  $reportLogs = Get-EmbeddedReportLogs -PrimaryLogPath $script:CurrentLogPath -KeyboardLogPath $script:CurrentKeyboardLogPath
+
+  $payload = [ordered]@{
+    reportId = $reportId
+    hostname = $hostname
+    category = $category
+    technician = $technician
+    scriptVersion = $scriptVersion
+    diag = [ordered]@{
+      clientRunId = $reportId
+      appVersion = $scriptVersion
+      completedAt = (Get-Date).ToUniversalTime().ToString('o')
+      status = 'crash'
+      unhandledException = $true
+      message = $message
+      taskSequenceAction = $env:_SMSTSCurrentActionName
+    }
+  }
+  if ($script:CurrentMacAddress) { $payload.macAddress = $script:CurrentMacAddress }
+  if ($script:CurrentSerialNumber) { $payload.serialNumber = $script:CurrentSerialNumber }
+  if ($ReportTag) { $payload.tag = $ReportTag }
+  if ($ReportTagId) { $payload.tagId = $ReportTagId }
+  if ($reportLogs) { $payload.reportLogs = $reportLogs }
+  if ($script:CurrentPayload -and $script:CurrentPayload.rawArtifacts) {
+    $payload.rawArtifacts = $script:CurrentPayload.rawArtifacts
+  }
+
+  $json = $payload | ConvertTo-Json -Depth 10
+  if (-not $script:CurrentApiUrl) {
+    Write-Log 'Crash payload upload skipped: ApiUrl missing.' 'WARN'
+    if ($QueueOnUploadFailure) {
+      try {
+        $resolvedOutboxRoot = Resolve-OutboxRoot -Value $script:CurrentOutboxRoot
+        $queued = Save-OutboxEntry `
+          -Root $resolvedOutboxRoot `
+          -PayloadJson $json `
+          -PayloadObject $payload `
+          -ApiUrl $script:CurrentApiUrl `
+          -ReportId $reportId `
+          -Reason 'crash_payload_no_api_url' `
+          -ErrorMessage 'ApiUrl missing' `
+          -RunDir $script:CurrentArtifactRunDir `
+          -LogPath $script:CurrentLogPath
+        if ($queued) {
+          Write-Log "Crash payload deferred to outbox: $queued" 'WARN'
+          return $true
+        }
+      } catch {
+        Write-Log "Crash payload outbox failed: $($_.Exception.Message)" 'WARN'
+      }
+    }
+    return $false
+  }
+  try {
+    Invoke-JsonPost -Url $script:CurrentApiUrl -Json $json -TimeoutSec ([Math]::Max($TimeoutSec, 20)) | Out-Null
+    Write-Log 'Crash payload sent to ingest endpoint.' 'WARN'
+    return $true
+  } catch {
+    Write-Log "Crash payload upload failed: $($_.Exception.Message)" 'WARN'
+    if ($QueueOnUploadFailure) {
+      try {
+        $resolvedOutboxRoot = Resolve-OutboxRoot -Value $script:CurrentOutboxRoot
+        $queued = Save-OutboxEntry `
+          -Root $resolvedOutboxRoot `
+          -PayloadJson $json `
+          -PayloadObject $payload `
+          -ApiUrl $script:CurrentApiUrl `
+          -ReportId $reportId `
+          -Reason 'crash_payload_failed' `
+          -ErrorMessage $_.Exception.Message `
+          -RunDir $script:CurrentArtifactRunDir `
+          -LogPath $script:CurrentLogPath
+        if ($queued) {
+          Write-Log "Crash payload deferred to outbox: $queued" 'WARN'
+          return $true
+        }
+      } catch {
+        Write-Log "Crash payload outbox failed: $($_.Exception.Message)" 'WARN'
+      }
+    }
+    return $false
+  }
+}
+
 function Resolve-McPath {
   param([string]$Value)
 
@@ -2294,6 +2687,7 @@ function Stage-RunArtifacts {
     [string]$PayloadJson,
     [string]$CameraOutputDir,
     [string]$KeyboardLogPath,
+    [object]$ReportLogs,
     [hashtable]$WinsatStore,
     [hashtable]$Manifest
   )
@@ -2322,6 +2716,23 @@ function Stage-RunArtifacts {
     $dest = Join-Path $RunDir 'keyboard'
     $destFile = Join-Path $dest (Split-Path $KeyboardLogPath -Leaf)
     Copy-FileSafe -Source $KeyboardLogPath -Destination $destFile | Out-Null
+  }
+  if ($ReportLogs -and $ReportLogs.files) {
+    $logsDir = Join-Path $RunDir 'logs'
+    Ensure-Directory -Path $logsDir | Out-Null
+    foreach ($entry in @($ReportLogs.files)) {
+      if (-not $entry -or -not $entry.path) { continue }
+      $label = if ($entry.kind) { $entry.kind } else { 'log' }
+      $leaf = $entry.fileName
+      try {
+        if ($entry.path) {
+          $leaf = Split-Path $entry.path -Leaf
+        }
+      } catch { }
+      if (-not $leaf) { $leaf = 'log.txt' }
+      $destName = "{0}-{1}" -f (Get-SafeKey -Value $label), (Get-SafeKey -Value $leaf)
+      Copy-FileSafe -Source $entry.path -Destination (Join-Path $logsDir $destName) | Out-Null
+    }
   }
   if ($WinsatStore -and $WinsatStore.files) {
     $winsatDir = Join-Path $RunDir 'winsat'
@@ -2355,7 +2766,10 @@ function Upload-RunArtifacts {
     [string]$Tag,
     [string]$MacSerialKey,
     [string]$ClientRunId,
-    [string]$McPath
+    [string]$McPath,
+    [string]$ApiUrl,
+    [string]$ArtifactUploadUrl,
+    [int]$RelayTimeoutSec = 120
   )
 
   $result = [ordered]@{
@@ -2387,23 +2801,52 @@ function Upload-RunArtifacts {
   if (-not $resolvedMcPath) {
     Write-Log 'mc.exe unavailable for raw artifact upload.' 'WARN'
     $result.error = 'mc_missing'
-    return $result
-  }
-  Write-Log "Resolved mc path: $resolvedMcPath"
+  } else {
+    Write-Log "Resolved mc path: $resolvedMcPath"
 
-  try {
-    & $resolvedMcPath alias set diagobj $Endpoint $AccessKey $SecretKey *> $null
-    if ($LASTEXITCODE -ne 0) { throw ("mc alias set failed (" + $LASTEXITCODE + ")") }
-    & $resolvedMcPath mirror --overwrite "$RunDir" "$destPath" *> $null
-    if ($LASTEXITCODE -ne 0) { throw ("mc mirror failed (" + $LASTEXITCODE + ")") }
-    Write-Log "Raw artifacts mirrored to $destPath"
-    $result.success = $true
-    return $result
-  } catch {
-    $result.error = $_.Exception.Message
-    Write-Log "Raw artifact upload failed: $($result.error)" 'WARN'
-    return $result
+    try {
+      & $resolvedMcPath alias set diagobj $Endpoint $AccessKey $SecretKey *> $null
+      if ($LASTEXITCODE -ne 0) { throw ("mc alias set failed (" + $LASTEXITCODE + ")") }
+      & $resolvedMcPath mirror --overwrite "$RunDir" "$destPath" *> $null
+      if ($LASTEXITCODE -ne 0) { throw ("mc mirror failed (" + $LASTEXITCODE + ")") }
+      Write-Log "Raw artifacts mirrored to $destPath"
+      $result.success = $true
+      $result.method = 'direct_mc'
+      return $result
+    } catch {
+      $result.error = $_.Exception.Message
+      $result.directError = $result.error
+      Write-Log "Raw artifact upload failed: $($result.error)" 'WARN'
+    }
   }
+
+  $relayResult = Upload-RunArtifactsViaApi `
+    -RunDir $RunDir `
+    -ApiUrl $ApiUrl `
+    -ArtifactUploadUrl $ArtifactUploadUrl `
+    -Prefix $Prefix `
+    -Tag $Tag `
+    -MacSerialKey $MacSerialKey `
+    -ClientRunId $ClientRunId `
+    -ReportId $ClientRunId `
+    -TimeoutSec $RelayTimeoutSec
+  if ($relayResult -and $relayResult.attempted) {
+    if ($relayResult.destination) { $result.destination = $relayResult.destination }
+    if ($relayResult.storage) { $result.storage = $relayResult.storage }
+    if ($relayResult.archiveName) { $result.archiveName = $relayResult.archiveName }
+    if ($relayResult.warning) { $result.warning = $relayResult.warning }
+    if ($relayResult.success) {
+      if ($result.error) { $result.directError = $result.error }
+      $result.error = $null
+      $result.success = $true
+      $result.method = 'api_relay'
+      Write-Log "Raw artifacts relayed via API to $($relayResult.destination)"
+      return $result
+    }
+    if ($relayResult.error) { $result.relayError = $relayResult.error }
+  }
+
+  return $result
 }
 
 function Get-CameraStatusFromOutput {
@@ -2925,6 +3368,7 @@ $artifactRootResolved = Resolve-ArtifactRoot -Value $ArtifactRoot
 $artifactRunDir = $null
 $macSerialKey = $null
 $rawUploadResult = $null
+$script:PrimaryReportId = $clientRunId
 
 Set-ConsoleFullscreen
 Write-Log "Start script version $scriptVersion"
@@ -2999,6 +3443,7 @@ if ($TestMode -eq 'stress' -and -not $SkipStressScript) {
       ObjectStorageSecretKey = $ObjectStorageSecretKey
       ObjectStoragePrefix = $ObjectStoragePrefix
       ObjectStorageMcPath = $ObjectStorageMcPath
+      ArtifactUploadUrl = $ArtifactUploadUrl
       OutboxRoot = $OutboxRoot
     }
     if ($SkipTlsValidation) { $delegateParams.SkipTlsValidation = $true }
@@ -5581,6 +6026,7 @@ if ($forceStress) {
 }
 
 $categoryValue = if ($Category -eq 'auto') { Get-ChassisCategory } else { $Category }
+$script:CurrentCategory = $categoryValue
 $keyboardCaptureState = $null
 if (-not $SkipKeyboardCapture -and $categoryValue -eq 'laptop') {
   $keyboardScript = Resolve-KeyboardCapturePath -Value $KeyboardCapturePath
@@ -5632,7 +6078,11 @@ if ($macAddressesLog) { Write-Log ("MAC list (primary+secondary): {0}" -f $macAd
 $serialNumber = Get-SerialNumber
 $macSerialKey = Get-MacSerialKey -MacAddress $macAddress -SerialNumber $serialNumber -Hostname $hostname
 $artifactRunDir = New-ArtifactRunDir -ArtifactRoot $artifactRootResolved -MacSerialKey $macSerialKey -ClientRunId $clientRunId
+$script:CurrentHostname = $hostname
+$script:CurrentMacAddress = $macAddress
+$script:CurrentSerialNumber = $serialNumber
 if ($artifactRunDir) {
+  $script:CurrentArtifactRunDir = $artifactRunDir
   Write-Log "Artifact run dir: $artifactRunDir"
   $script:WinSatLogDir = Join-Path $artifactRunDir 'winsat'
   Ensure-Directory -Path $script:WinSatLogDir | Out-Null
@@ -6288,6 +6738,7 @@ $diag.durationSec = [int]$stopwatch.Elapsed.TotalSeconds
 $payload = [ordered]@{}
 if ($clientRunId) { $payload.reportId = $clientRunId }
 $technicianValue = if ($Technician) { $Technician.Trim() } else { $null }
+$script:CurrentTechnician = $technicianValue
 if ($hostname) { $payload.hostname = $hostname }
 if ($macAddress) { $payload.macAddress = $macAddress }
 if ($macAddresses -and $macAddresses.Count -gt 0) { $payload.macAddresses = $macAddresses }
@@ -6485,6 +6936,13 @@ $keyboardLogPathValue = $null
 if ($keyboardCaptureState -and $keyboardCaptureState.logPath) {
   $keyboardLogPathValue = $keyboardCaptureState.logPath
 }
+$script:CurrentKeyboardLogPath = $keyboardLogPathValue
+$reportLogs = Get-EmbeddedReportLogs -PrimaryLogPath $LogPath -KeyboardLogPath $keyboardLogPathValue
+if ($reportLogs) {
+  $payload.reportLogs = $reportLogs
+} elseif ($payload.Contains('reportLogs')) {
+  $payload.Remove('reportLogs') | Out-Null
+}
 
 if ($artifactRunDir) {
   $manifest = @{
@@ -6514,6 +6972,7 @@ if ($artifactRunDir) {
     -PayloadJson $payloadJson `
     -CameraOutputDir $cameraTestOutputDir `
     -KeyboardLogPath $keyboardLogPathValue `
+    -ReportLogs $reportLogs `
     -WinsatStore $winsatStore `
     -Manifest $manifest | Out-Null
 
@@ -6528,11 +6987,19 @@ if ($artifactRunDir) {
       -Tag $ReportTag `
       -MacSerialKey $macSerialKey `
       -ClientRunId $clientRunId `
-      -McPath $ObjectStorageMcPath
+      -McPath $ObjectStorageMcPath `
+      -ApiUrl $ApiUrl `
+      -ArtifactUploadUrl $ArtifactUploadUrl
     if ($rawUploadResult) {
       $payload.rawArtifacts.uploaded = $rawUploadResult.success
+      if ($rawUploadResult.method) { $payload.rawArtifacts.method = $rawUploadResult.method }
+      if ($rawUploadResult.storage) { $payload.rawArtifacts.storage = $rawUploadResult.storage }
+      if ($rawUploadResult.archiveName) { $payload.rawArtifacts.archiveName = $rawUploadResult.archiveName }
       if ($rawUploadResult.destination) { $payload.rawArtifacts.destination = $rawUploadResult.destination }
       if ($rawUploadResult.error) { $payload.rawArtifacts.error = $rawUploadResult.error }
+      if ($rawUploadResult.directError) { $payload.rawArtifacts.directError = $rawUploadResult.directError }
+      if ($rawUploadResult.relayError) { $payload.rawArtifacts.relayError = $rawUploadResult.relayError }
+      if ($rawUploadResult.warning) { $payload.rawArtifacts.warning = $rawUploadResult.warning }
     }
   } else {
     $payload.rawArtifacts.uploaded = $false
@@ -6541,7 +7008,16 @@ if ($artifactRunDir) {
   Write-JsonFile -Path (Join-Path $artifactRunDir 'payload.json') -Object $payload | Out-Null
 }
 
+$payload.reportLogs = Get-EmbeddedReportLogs -PrimaryLogPath $LogPath -KeyboardLogPath $keyboardLogPathValue
+if (-not $payload.reportLogs) {
+  $payload.Remove('reportLogs') | Out-Null
+}
 $json = $payload | ConvertTo-Json -Depth 10
+$script:CurrentPayload = $payload
+$script:CurrentPayloadJson = $json
+if ($artifactRunDir) {
+  Write-JsonFile -Path (Join-Path $artifactRunDir 'payload.json') -Object $payload | Out-Null
+}
 Step-Progress -Status 'Assemblage payload'
 
 Write-Log "Payload size=$($json.Length)"
@@ -6675,7 +7151,9 @@ if ($artifactRunDir) {
   if (-not $kbLogPath -and $keyboardCaptureState -and $keyboardCaptureState.logPath) {
     $kbLogPath = $keyboardCaptureState.logPath
   }
-  Stage-RunArtifacts -RunDir $artifactRunDir -LogPath $LogPath -KeyboardLogPath $kbLogPath | Out-Null
+  $script:CurrentKeyboardLogPath = $kbLogPath
+  $finalReportLogs = Get-EmbeddedReportLogs -PrimaryLogPath $LogPath -KeyboardLogPath $kbLogPath
+  Stage-RunArtifacts -RunDir $artifactRunDir -LogPath $LogPath -KeyboardLogPath $kbLogPath -ReportLogs $finalReportLogs | Out-Null
   if (-not $SkipRawUpload) {
     $postUpload = Upload-RunArtifacts `
       -RunDir $artifactRunDir `
@@ -6687,7 +7165,9 @@ if ($artifactRunDir) {
       -Tag $ReportTag `
       -MacSerialKey $macSerialKey `
       -ClientRunId $clientRunId `
-      -McPath $ObjectStorageMcPath
+      -McPath $ObjectStorageMcPath `
+      -ApiUrl $ApiUrl `
+      -ArtifactUploadUrl $ArtifactUploadUrl
     if ($postUpload -and -not $postUpload.success) {
       Write-Log "Raw artifact mirror after keyboard failed: $($postUpload.error)" 'WARN'
     }

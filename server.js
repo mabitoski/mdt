@@ -99,6 +99,9 @@ const OBJECT_STORAGE_PREFIX =
 const OBJECT_STORAGE_ALIAS = process.env.OBJECT_STORAGE_ALIAS || 'alcyone';
 const OBJECT_STORAGE_RENAME_ON_TAG =
   ['1', 'true', 'yes', 'on'].includes((process.env.OBJECT_STORAGE_RENAME_ON_TAG || '').toLowerCase());
+const ARTIFACT_UPLOAD_LIMIT = process.env.ARTIFACT_UPLOAD_LIMIT || '64mb';
+const ARTIFACT_RELAY_ROOT =
+  process.env.ARTIFACT_RELAY_ROOT || path.join(os.tmpdir(), 'mdt-web-artifact-relay');
 const DEFAULT_LDAP_SEARCH_FILTER = '(sAMAccountName={{username}})';
 const DEFAULT_LDAP_SEARCH_ATTRIBUTES = 'dn,cn,mail';
 const LDAP_URL = process.env.LDAP_URL || '';
@@ -574,6 +577,23 @@ function normalizeObjectStorageSegment(value) {
     .replace(/^-+|-+$/g, '');
 }
 
+function normalizeObjectStoragePrefix(value) {
+  const segments = String(value || '')
+    .split(/[\\/]+/)
+    .map((segment) => normalizeObjectStorageSegment(segment))
+    .filter(Boolean);
+  return segments.length ? segments.join('/') : 'run';
+}
+
+function normalizeArtifactArchiveName(value) {
+  const raw = String(value || 'run-artifacts.zip').trim();
+  const basename = path.posix.basename(raw.replace(/\\/g, '/'));
+  const normalized = basename
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'run-artifacts.zip';
+}
+
 function hasObjectStorageConfig() {
   return Boolean(
     OBJECT_STORAGE_ENDPOINT &&
@@ -606,6 +626,91 @@ function runMcCommand(args, configDir) {
       reject(new Error(`mc ${args.join(' ')} failed (${code}): ${stderr || stdout}`));
     });
   });
+}
+
+async function writeRelayedArtifactToLocal({ buffer, rootPrefix, safeKey, clientRunId, archiveName }) {
+  const prefixSegments = String(rootPrefix || 'run')
+    .split('/')
+    .filter(Boolean);
+  const targetDir = path.join(
+    ARTIFACT_RELAY_ROOT,
+    ...prefixSegments,
+    safeKey || 'unknown',
+    clientRunId || 'unknown'
+  );
+  await fs.promises.mkdir(targetDir, { recursive: true });
+  const destination = path.join(targetDir, archiveName);
+  await fs.promises.writeFile(destination, buffer);
+  return {
+    ok: true,
+    storage: 'local_spool',
+    destination,
+    archiveName
+  };
+}
+
+async function storeRelayedArtifactArchive({
+  buffer,
+  rootPrefix,
+  safeKey,
+  clientRunId,
+  archiveName
+}) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) {
+    return { ok: false, error: 'empty_body' };
+  }
+
+  if (!hasObjectStorageConfig()) {
+    return writeRelayedArtifactToLocal({
+      buffer,
+      rootPrefix,
+      safeKey,
+      clientRunId,
+      archiveName
+    });
+  }
+
+  const configDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mc-'));
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'artifact-relay-'));
+  try {
+    const tempArchivePath = path.join(tempDir, archiveName);
+    await fs.promises.writeFile(tempArchivePath, buffer);
+    await runMcCommand(
+      ['alias', 'set', OBJECT_STORAGE_ALIAS, OBJECT_STORAGE_ENDPOINT, OBJECT_STORAGE_ACCESS_KEY, OBJECT_STORAGE_SECRET_KEY],
+      configDir
+    );
+    const destination = `${OBJECT_STORAGE_ALIAS}/${OBJECT_STORAGE_BUCKET}/${rootPrefix}/${safeKey}/${clientRunId}/${archiveName}`;
+    await runMcCommand(['cp', tempArchivePath, destination], configDir);
+    return {
+      ok: true,
+      storage: 'object_storage',
+      destination,
+      archiveName
+    };
+  } catch (error) {
+    const localFallback = await writeRelayedArtifactToLocal({
+      buffer,
+      rootPrefix,
+      safeKey,
+      clientRunId,
+      archiveName
+    });
+    return {
+      ...localFallback,
+      warning: `object_storage_upload_failed: ${error.message || String(error)}`
+    };
+  } finally {
+    try {
+      await fs.promises.rm(configDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.warn('Failed to cleanup mc config dir', cleanupError);
+    }
+    try {
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.warn('Failed to cleanup artifact relay temp dir', cleanupError);
+    }
+  }
 }
 
 async function renameObjectStoragePrefix(oldPrefix, newPrefix) {
@@ -3341,7 +3446,7 @@ app.use((req, res, next) => {
   if (!FORCE_HTTPS) {
     return next();
   }
-  if (FORCE_HTTPS_ALLOW_HTTP_INGEST && req.path === '/api/ingest') {
+  if (FORCE_HTTPS_ALLOW_HTTP_INGEST && req.path.startsWith('/api/ingest')) {
     return next();
   }
   if (
@@ -12249,6 +12354,64 @@ app.post('/api/admin/weekly-recap/send', requireAuth, requireAdmin, async (req, 
     return res.status(500).json({ ok: false, error: 'send_failed' });
   }
 });
+
+app.post(
+  '/api/ingest/artifacts',
+  ingestLimiter,
+  express.raw({ limit: ARTIFACT_UPLOAD_LIMIT, type: () => true }),
+  async (req, res) => {
+    const buffer = Buffer.isBuffer(req.body) ? req.body : null;
+    if (!buffer || !buffer.length) {
+      return res.status(400).json({ ok: false, error: 'empty_body' });
+    }
+
+    const reportId = normalizeUuid(req.query.reportId || req.get('x-report-id')) || generateUuid();
+    const clientRunId =
+      normalizeUuid(req.query.clientRunId || req.get('x-client-run-id')) || reportId;
+    const macSerialKey =
+      cleanString(req.query.macSerialKey || req.get('x-mac-serial-key'), 256) || 'unknown';
+    const archiveName = normalizeArtifactArchiveName(
+      req.query.archiveName || req.get('x-archive-name') || 'run-artifacts.zip'
+    );
+    const prefix = normalizeObjectStoragePrefix(
+      req.query.prefix || req.get('x-object-prefix') || OBJECT_STORAGE_PREFIX || 'run'
+    );
+    const tagSegment = normalizeObjectStorageSegment(
+      cleanString(req.query.tag || req.get('x-report-tag'), 64)
+    );
+    const rootPrefix = tagSegment ? `${prefix}/${tagSegment}` : prefix;
+    const safeKey = normalizeObjectStorageSegment(macSerialKey) || 'unknown';
+
+    try {
+      const stored = await storeRelayedArtifactArchive({
+        buffer,
+        rootPrefix,
+        safeKey,
+        clientRunId,
+        archiveName
+      });
+      if (!stored || !stored.ok) {
+        return res.status(500).json({
+          ok: false,
+          error: stored && stored.error ? stored.error : 'artifact_store_failed'
+        });
+      }
+      return res.status(200).json({
+        ok: true,
+        reportId,
+        clientRunId,
+        storage: stored.storage,
+        destination: stored.destination,
+        archiveName: stored.archiveName,
+        warning: stored.warning || null,
+        sizeBytes: buffer.length
+      });
+    } catch (error) {
+      console.error('Failed to relay artifact archive', error);
+      return res.status(500).json({ ok: false, error: 'artifact_store_failed' });
+    }
+  }
+);
 
 app.post('/api/ingest', ingestLimiter, async (req, res) => {
   const body = req.body;
