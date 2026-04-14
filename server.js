@@ -25,7 +25,7 @@ app.disable('x-powered-by');
 const PORT = Number.parseInt(process.env.PORT || '3000', 10);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const BRAND_LOGO_PATH = path.join(PUBLIC_DIR, 'logo.png');
-const JSON_LIMIT = process.env.JSON_LIMIT || '256kb';
+const JSON_LIMIT = process.env.JSON_LIMIT || '2mb';
 const INGEST_RATE_LIMIT = Number.parseInt(process.env.INGEST_RATE_LIMIT || '180', 10);
 const SESSION_SECRET =
   process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -9080,13 +9080,21 @@ function buildDerivedComponents(body, sources) {
 function safeJsonStringify(value, maxBytes) {
   try {
     const json = JSON.stringify(value);
-    if (Buffer.byteLength(json, 'utf8') <= maxBytes) {
+    if (typeof maxBytes === 'number' && Number.isFinite(maxBytes) && maxBytes > 0) {
       return json;
     }
+    return json;
   } catch (error) {
     return null;
   }
-  return JSON.stringify({ truncated: true });
+}
+
+function isStoredTruncatedPayload(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  return value.truncated === true && keys.length === 1;
 }
 
 function sanitizeAuditData(data, includePayload) {
@@ -9638,9 +9646,19 @@ function formatDateOnly(value) {
 
 function mergeHardwarePayload(primary, fallback) {
   const base =
-    primary && typeof primary === 'object' && !Array.isArray(primary) ? { ...primary } : null;
+    primary &&
+    typeof primary === 'object' &&
+    !Array.isArray(primary) &&
+    !isStoredTruncatedPayload(primary)
+      ? { ...primary }
+      : null;
   const fallbackObj =
-    fallback && typeof fallback === 'object' && !Array.isArray(fallback) ? fallback : null;
+    fallback &&
+    typeof fallback === 'object' &&
+    !Array.isArray(fallback) &&
+    !isStoredTruncatedPayload(fallback)
+      ? fallback
+      : null;
 
   if (!base && fallbackObj) {
     return fallbackObj;
