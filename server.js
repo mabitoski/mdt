@@ -2782,6 +2782,113 @@ async function repairTechniciansFromPayload() {
   }
 }
 
+async function repairStoredTruncatedPayloads() {
+  const truncatedPayloadJson = '{"truncated": true}';
+  const reportsResult = await pool.query(
+    `
+      WITH fallback_payloads AS (
+        SELECT
+          reports.id,
+          COALESCE(
+            (
+              SELECT candidate.payload
+              FROM reports AS candidate
+              WHERE candidate.machine_key = reports.machine_key
+                AND candidate.id <> reports.id
+                AND candidate.payload IS NOT NULL
+                AND btrim(candidate.payload) <> ''
+                AND safe_jsonb(candidate.payload) <> $1::jsonb
+              ORDER BY candidate.last_seen DESC, candidate.id DESC
+              LIMIT 1
+            ),
+            (
+              SELECT machines.payload
+              FROM machines
+              WHERE machines.machine_key = reports.machine_key
+                AND machines.payload IS NOT NULL
+                AND btrim(machines.payload) <> ''
+                AND safe_jsonb(machines.payload) <> $1::jsonb
+              LIMIT 1
+            )
+          ) AS fallback_payload
+        FROM reports
+        WHERE reports.payload IS NOT NULL
+          AND btrim(reports.payload) <> ''
+          AND safe_jsonb(reports.payload) = $1::jsonb
+      )
+      UPDATE reports
+      SET payload = fallback_payloads.fallback_payload
+      FROM fallback_payloads
+      WHERE reports.id = fallback_payloads.id
+        AND fallback_payloads.fallback_payload IS NOT NULL
+    `,
+    [truncatedPayloadJson]
+  );
+  const machinesResult = await pool.query(
+    `
+      WITH fallback_payloads AS (
+        SELECT
+          machines.machine_key,
+          (
+            SELECT candidate.payload
+            FROM reports AS candidate
+            WHERE candidate.machine_key = machines.machine_key
+              AND candidate.payload IS NOT NULL
+              AND btrim(candidate.payload) <> ''
+              AND safe_jsonb(candidate.payload) <> $1::jsonb
+            ORDER BY candidate.last_seen DESC, candidate.id DESC
+            LIMIT 1
+          ) AS fallback_payload
+        FROM machines
+        WHERE machines.payload IS NOT NULL
+          AND btrim(machines.payload) <> ''
+          AND safe_jsonb(machines.payload) = $1::jsonb
+      )
+      UPDATE machines
+      SET payload = fallback_payloads.fallback_payload
+      FROM fallback_payloads
+      WHERE machines.machine_key = fallback_payloads.machine_key
+        AND fallback_payloads.fallback_payload IS NOT NULL
+    `,
+    [truncatedPayloadJson]
+  );
+  const remainingResult = await pool.query(
+    `
+      SELECT
+        (SELECT count(*)
+         FROM reports
+         WHERE payload IS NOT NULL
+           AND btrim(payload) <> ''
+           AND safe_jsonb(payload) = $1::jsonb) AS report_count,
+        (SELECT count(*)
+         FROM machines
+         WHERE payload IS NOT NULL
+           AND btrim(payload) <> ''
+           AND safe_jsonb(payload) = $1::jsonb) AS machine_count
+    `,
+    [truncatedPayloadJson]
+  );
+  const remainingRow =
+    remainingResult.rows && remainingResult.rows[0] ? remainingResult.rows[0] : null;
+  const remainingReports = Number.parseInt(remainingRow?.report_count || '0', 10) || 0;
+  const remainingMachines = Number.parseInt(remainingRow?.machine_count || '0', 10) || 0;
+  const repairedReports = Number(reportsResult.rowCount || 0);
+  const repairedMachines = Number(machinesResult.rowCount || 0);
+
+  if (repairedReports > 0 || repairedMachines > 0) {
+    console.log(
+      'Repaired truncated payloads: ' +
+        `reports=${repairedReports}, machines=${repairedMachines}, ` +
+        `remaining_reports=${remainingReports}, remaining_machines=${remainingMachines}`
+    );
+  } else if (remainingReports > 0 || remainingMachines > 0) {
+    console.warn(
+      'Truncated payloads remain after repair attempt: ' +
+        `reports=${remainingReports}, machines=${remainingMachines}`
+    );
+  }
+}
+
 const upsertMachineQuery = `
   INSERT INTO machines (
     machine_key,
@@ -2909,7 +3016,11 @@ const upsertMachineQuery = `
         COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
       )::text
     END,
-    payload = COALESCE(excluded.payload, machines.payload),
+    payload = CASE
+      WHEN excluded.payload IS NULL OR btrim(excluded.payload) = '' THEN machines.payload
+      WHEN safe_jsonb(excluded.payload) = '{"truncated": true}'::jsonb THEN machines.payload
+      ELSE excluded.payload
+    END,
     last_ip = excluded.last_ip
   RETURNING id
 `;
@@ -3040,7 +3151,11 @@ const upsertReportQuery = `
         COALESCE(NULLIF(excluded.components, ''), '{}')::jsonb
       )::text
     END,
-    payload = COALESCE(excluded.payload, reports.payload),
+    payload = CASE
+      WHEN excluded.payload IS NULL OR btrim(excluded.payload) = '' THEN reports.payload
+      WHEN safe_jsonb(excluded.payload) = '{"truncated": true}'::jsonb THEN reports.payload
+      ELSE excluded.payload
+    END,
     last_ip = excluded.last_ip
   RETURNING id, machine_key
 `;
@@ -9078,12 +9193,9 @@ function buildDerivedComponents(body, sources) {
 }
 
 function safeJsonStringify(value, maxBytes) {
+  void maxBytes;
   try {
-    const json = JSON.stringify(value);
-    if (typeof maxBytes === 'number' && Number.isFinite(maxBytes) && maxBytes > 0) {
-      return json;
-    }
-    return json;
+    return JSON.stringify(value);
   } catch (error) {
     return null;
   }
@@ -15997,6 +16109,7 @@ async function startServer() {
   try {
     await initDb();
     await backfillUnknownTechniciansToLuka();
+    await repairStoredTruncatedPayloads();
     await repairTechniciansFromPayload();
     startWeeklyRecapScheduler();
     app.listen(PORT, () => {
