@@ -5659,6 +5659,7 @@ function resetAllFilters() {
     return;
   }
   state.filter = 'all';
+  state.boardView = 'workspace';
   state.techFilter = isTechnicianFilterLocked() ? getOperatorScopePrimaryKey() || 'all' : 'all';
   state.tagFilter = [];
   state.tagFilterNames = [];
@@ -5683,10 +5684,14 @@ function resetAllFilters() {
     tagFiltersEl.classList.remove('is-open');
   }
   updateSearchCollapse();
+  renderBoardTabs();
   updateStatFilterCards();
   updateTechFilterButtons();
   updateTestFilterButtons();
   updateCommentFilterButtons();
+  updateSummaryFilterButtons();
+  updateCategoryFilterButtons();
+  updateSignalFilterButtons();
   renderTagFilters();
   renderTechFilters();
   syncDateFilterControls();
