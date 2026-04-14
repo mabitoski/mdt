@@ -3045,27 +3045,27 @@ function summarizeDetailForDrawer(detail) {
   const diagnosticCandidates = [];
   if (tests) {
     diagnosticCandidates.push(
-      components.diskReadTest || tests.diskRead || 'not_tested',
-      components.diskWriteTest || tests.diskWrite || 'not_tested',
-      tests.ram || components.ramTest || 'not_tested',
-      tests.cpu || components.cpuTest || 'not_tested',
-      tests.gpu || components.gpuTest || 'not_tested',
-      tests.networkPing || components.networkPing || 'not_tested'
+      resolveUnifiedComponentStatus('diskReadTest', components, tests),
+      resolveUnifiedComponentStatus('diskWriteTest', components, tests),
+      resolveUnifiedComponentStatus('ramTest', components, tests),
+      resolveUnifiedComponentStatus('cpuTest', components, tests),
+      resolveUnifiedComponentStatus('gpuTest', components, tests),
+      resolveUnifiedComponentStatus('networkPing', components, tests)
     );
     if (tests.fsCheck || components.fsCheck) {
-      diagnosticCandidates.push(tests.fsCheck || components.fsCheck || 'not_tested');
+      diagnosticCandidates.push(resolveUnifiedComponentStatus('fsCheck', components, tests));
     }
   } else {
     diagnosticCandidates.push(
-      components.diskReadTest || 'not_tested',
-      components.diskWriteTest || 'not_tested',
-      components.ramTest || 'not_tested',
-      components.cpuTest || 'not_tested',
-      components.gpuTest || 'not_tested',
-      components.networkPing || 'not_tested'
+      resolveUnifiedComponentStatus('diskReadTest', components),
+      resolveUnifiedComponentStatus('diskWriteTest', components),
+      resolveUnifiedComponentStatus('ramTest', components),
+      resolveUnifiedComponentStatus('cpuTest', components),
+      resolveUnifiedComponentStatus('gpuTest', components),
+      resolveUnifiedComponentStatus('networkPing', components)
     );
     if (components.fsCheck) {
-      diagnosticCandidates.push(components.fsCheck);
+      diagnosticCandidates.push(resolveUnifiedComponentStatus('fsCheck', components));
     }
   }
   diagnosticCandidates.forEach((value) => {
@@ -3115,24 +3115,29 @@ function collectDetailNokEntries(detail) {
     entries.push({ label, key, tab });
   }
 
-  addEntry('Lecture disque', 'diskReadTest', 'diagnostics', components.diskReadTest || (tests && tests.diskRead) || 'not_tested');
+  addEntry(
+    'Lecture disque',
+    'diskReadTest',
+    'diagnostics',
+    resolveUnifiedComponentStatus('diskReadTest', components, tests)
+  );
   addEntry(
     'Ecriture disque',
     'diskWriteTest',
     'diagnostics',
-    components.diskWriteTest || (tests && tests.diskWrite) || 'not_tested'
+    resolveUnifiedComponentStatus('diskWriteTest', components, tests)
   );
-  addEntry('RAM (WinSAT)', 'ramTest', 'diagnostics', (tests && tests.ram) || components.ramTest || 'not_tested');
-  addEntry('CPU (WinSAT)', 'cpuTest', 'diagnostics', (tests && tests.cpu) || components.cpuTest || 'not_tested');
-  addEntry('GPU (WinSAT)', 'gpuTest', 'diagnostics', (tests && tests.gpu) || components.gpuTest || 'not_tested');
+  addEntry('RAM (WinSAT)', 'ramTest', 'diagnostics', resolveUnifiedComponentStatus('ramTest', components, tests));
+  addEntry('CPU (WinSAT)', 'cpuTest', 'diagnostics', resolveUnifiedComponentStatus('cpuTest', components, tests));
+  addEntry('GPU (WinSAT)', 'gpuTest', 'diagnostics', resolveUnifiedComponentStatus('gpuTest', components, tests));
   addEntry(
     'Ping',
     'networkPing',
     'diagnostics',
-    (tests && tests.networkPing) || components.networkPing || 'not_tested'
+    resolveUnifiedComponentStatus('networkPing', components, tests)
   );
   if ((tests && tests.fsCheck) || components.fsCheck) {
-    addEntry('Check disque', 'fsCheck', 'diagnostics', (tests && tests.fsCheck) || components.fsCheck || 'not_tested');
+    addEntry('Check disque', 'fsCheck', 'diagnostics', resolveUnifiedComponentStatus('fsCheck', components, tests));
   }
 
   addEntry('Ports USB', 'usb', 'composants', resolveUnifiedComponentStatus('usb', components, tests));
@@ -5738,11 +5743,22 @@ function buildDiagnosticsHtml(detail) {
     const cpuNote = tests.cpuNote || formatWinSatNote(winSatCpuScore);
     const gpuNote =
       tests.gpuNote || formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : tests.gpuScore);
-    addRow('Lecture disque', components.diskReadTest || tests.diskRead || 'not_tested', formatMbps(tests.diskReadMBps), 'diskReadTest');
-    addRow('Ecriture disque', components.diskWriteTest || tests.diskWrite || 'not_tested', formatMbps(tests.diskWriteMBps), 'diskWriteTest');
-    addRow('RAM (WinSAT)', tests.ramTest || components.ramTest || 'not_tested', ramNote || formatMbps(tests.ramMBps), 'ramTest');
-    addRow('CPU (WinSAT)', tests.cpuTest || components.cpuTest || 'not_tested', cpuNote || formatMbps(tests.cpuMBps), 'cpuTest');
-    const gpuStatus = tests.gpuTest || components.gpuTest || (winSatGraphicsScore != null ? 'ok' : 'not_tested');
+    addRow(
+      'Lecture disque',
+      resolveUnifiedComponentStatus('diskReadTest', components, tests),
+      formatMbps(tests.diskReadMBps),
+      'diskReadTest'
+    );
+    addRow(
+      'Ecriture disque',
+      resolveUnifiedComponentStatus('diskWriteTest', components, tests),
+      formatMbps(tests.diskWriteMBps),
+      'diskWriteTest'
+    );
+    addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components, tests), ramNote || formatMbps(tests.ramMBps), 'ramTest');
+    addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components, tests), cpuNote || formatMbps(tests.cpuMBps), 'cpuTest');
+    const gpuStatusBase = resolveUnifiedComponentStatus('gpuTest', components, tests);
+    const gpuStatus = gpuStatusBase !== 'not_tested' ? gpuStatusBase : (winSatGraphicsScore != null ? 'ok' : 'not_tested');
     const gpuExtra = gpuNote || (tests.gpuScore != null ? formatScore(tests.gpuScore) : null);
     addRow('GPU (WinSAT)', gpuStatus, gpuExtra, 'gpuTest');
     if (tests.cpuStress) {
@@ -5751,21 +5767,21 @@ function buildDiagnosticsHtml(detail) {
     if (tests.gpuStress) {
       addRow('GPU (stress)', tests.gpuStress, null, 'gpuStress');
     }
-    addRow('Ping', tests.networkPing || components.networkPing || 'not_tested', tests.networkPingTarget || null, 'networkPing');
+    addRow('Ping', resolveUnifiedComponentStatus('networkPing', components, tests), tests.networkPingTarget || null, 'networkPing');
     if (tests.fsCheck) {
-      addRow('Check disque', tests.fsCheck, null, 'fsCheck');
+      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
     } else if (components.fsCheck) {
-      addRow('Check disque', components.fsCheck, null, 'fsCheck');
+      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
     }
   } else {
-    addRow('Lecture disque', components.diskReadTest || 'not_tested', null, 'diskReadTest');
-    addRow('Ecriture disque', components.diskWriteTest || 'not_tested', null, 'diskWriteTest');
-    addRow('RAM (WinSAT)', components.ramTest || 'not_tested', null, 'ramTest');
-    addRow('CPU (WinSAT)', components.cpuTest || 'not_tested', null, 'cpuTest');
-    addRow('GPU (WinSAT)', components.gpuTest || 'not_tested', null, 'gpuTest');
-    addRow('Ping', components.networkPing || 'not_tested', null, 'networkPing');
+    addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components), null, 'diskReadTest');
+    addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components), null, 'diskWriteTest');
+    addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components), null, 'ramTest');
+    addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components), null, 'cpuTest');
+    addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components), null, 'gpuTest');
+    addRow('Ping', resolveUnifiedComponentStatus('networkPing', components), null, 'networkPing');
     if (components.fsCheck) {
-      addRow('Check disque', components.fsCheck, null, 'fsCheck');
+      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components), null, 'fsCheck');
     }
   }
 
@@ -5907,6 +5923,27 @@ function resolveDetailComponents(detail) {
 function resolveUnifiedComponentStatus(key, components, tests = null) {
   const source =
     components && typeof components === 'object' && !Array.isArray(components) ? components : {};
+  if (key === 'diskReadTest') {
+    return source.diskReadTest || (tests && tests.diskRead) || 'not_tested';
+  }
+  if (key === 'diskWriteTest') {
+    return source.diskWriteTest || (tests && tests.diskWrite) || 'not_tested';
+  }
+  if (key === 'ramTest') {
+    return source.ramTest || (tests && (tests.ramTest || tests.ram)) || 'not_tested';
+  }
+  if (key === 'cpuTest') {
+    return source.cpuTest || (tests && (tests.cpuTest || tests.cpu)) || 'not_tested';
+  }
+  if (key === 'gpuTest') {
+    return source.gpuTest || (tests && (tests.gpuTest || tests.gpu)) || 'not_tested';
+  }
+  if (key === 'networkPing') {
+    return source.networkPing || (tests && tests.networkPing) || 'not_tested';
+  }
+  if (key === 'fsCheck') {
+    return source.fsCheck || (tests && tests.fsCheck) || 'not_tested';
+  }
   if (key === 'cpu') {
     return source.cpu || (tests && (tests.cpu || tests.cpuTest)) || source.cpuTest || 'not_tested';
   }
@@ -6034,24 +6071,24 @@ function buildDrawerDiagnosticsRows(detail) {
           : null
       : null;
 
-    addRow('Lecture disque', components.diskReadTest || tests.diskRead || 'not_tested', formatMbps(tests.diskReadMBps), 'diskReadTest');
-    addRow('Ecriture disque', components.diskWriteTest || tests.diskWrite || 'not_tested', formatMbps(tests.diskWriteMBps), 'diskWriteTest');
-    addRow('RAM (WinSAT)', tests.ram || components.ramTest || 'not_tested', tests.ramNote || formatWinSatNote(memScore), 'ramTest');
-    addRow('CPU (WinSAT)', tests.cpu || components.cpuTest || 'not_tested', tests.cpuNote || formatWinSatNote(cpuScore), 'cpuTest');
-    addRow('GPU (WinSAT)', tests.gpu || components.gpuTest || 'not_tested', tests.gpuNote || formatWinSatNote(gfxScore), 'gpuTest');
-    addRow('Ping', tests.networkPing || components.networkPing || 'not_tested', tests.networkPingTarget || null, 'networkPing');
+    addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components, tests), formatMbps(tests.diskReadMBps), 'diskReadTest');
+    addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components, tests), formatMbps(tests.diskWriteMBps), 'diskWriteTest');
+    addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components, tests), tests.ramNote || formatWinSatNote(memScore), 'ramTest');
+    addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components, tests), tests.cpuNote || formatWinSatNote(cpuScore), 'cpuTest');
+    addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components, tests), tests.gpuNote || formatWinSatNote(gfxScore), 'gpuTest');
+    addRow('Ping', resolveUnifiedComponentStatus('networkPing', components, tests), tests.networkPingTarget || null, 'networkPing');
     if (tests.fsCheck || components.fsCheck) {
-      addRow('Check disque', tests.fsCheck || components.fsCheck || 'not_tested', null, 'fsCheck');
+      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
     }
   } else {
-    addRow('Lecture disque', components.diskReadTest || 'not_tested', null, 'diskReadTest');
-    addRow('Ecriture disque', components.diskWriteTest || 'not_tested', null, 'diskWriteTest');
-    addRow('RAM (WinSAT)', components.ramTest || 'not_tested', null, 'ramTest');
-    addRow('CPU (WinSAT)', components.cpuTest || 'not_tested', null, 'cpuTest');
-    addRow('GPU (WinSAT)', components.gpuTest || 'not_tested', null, 'gpuTest');
-    addRow('Ping', components.networkPing || 'not_tested', null, 'networkPing');
+    addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components), null, 'diskReadTest');
+    addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components), null, 'diskWriteTest');
+    addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components), null, 'ramTest');
+    addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components), null, 'cpuTest');
+    addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components), null, 'gpuTest');
+    addRow('Ping', resolveUnifiedComponentStatus('networkPing', components), null, 'networkPing');
     if (components.fsCheck) {
-      addRow('Check disque', components.fsCheck, null, 'fsCheck');
+      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components), null, 'fsCheck');
     }
   }
 
