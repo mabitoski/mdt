@@ -1,6 +1,0 @@
-{
-  "baseUrl": "http://10.1.130.8/fog",
-  "apiToken": "REPLACE_WITH_FOG_GLOBAL_API_TOKEN",
-  "userToken": "REPLACE_WITH_FOG_USER_TOKEN",
-  "timeoutMs": 10000
-}

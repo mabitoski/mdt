@@ -175,137 +175,6 @@ function New-RunCommandStepNode {
   return $stepNode
 }
 
-function Convert-ToPowerShellEncodedCommand {
-  param([string]$Script)
-
-  $bytes = [Text.Encoding]::Unicode.GetBytes($Script)
-  return [Convert]::ToBase64String($bytes)
-}
-
-function Get-ReportScriptPathFromCopyStep {
-  param([xml]$SequenceXml)
-
-  $copyActionNode = $SequenceXml.SelectSingleNode("//step[@name='copy report']/action")
-  if (-not $copyActionNode -or [string]::IsNullOrWhiteSpace($copyActionNode.InnerText)) {
-    return $null
-  }
-
-  $match = [regex]::Match($copyActionNode.InnerText, 'xcopy\s+"[^"]*\\([^\\"]+\.ps1)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-  if (-not $match.Success) {
-    return $null
-  }
-
-  return ('C:\Users\Administrateur\Desktop\{0}' -f $match.Groups[1].Value)
-}
-
-function Get-ReportScriptPathFromExecuteStep {
-  param([xml]$SequenceXml)
-
-  $executeActionNode = $SequenceXml.SelectSingleNode("//step[@name='execute report script']/action")
-  if (-not $executeActionNode -or [string]::IsNullOrWhiteSpace($executeActionNode.InnerText)) {
-    return $null
-  }
-
-  $match = [regex]::Match($executeActionNode.InnerText, '-File\s+"([^"]+)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-  if ($match.Success) {
-    return $match.Groups[1].Value
-  }
-
-  $fallbackMatch = [regex]::Match($executeActionNode.InnerText, '-File\s+([^\s]+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-  if ($fallbackMatch.Success) {
-    return $fallbackMatch.Groups[1].Value.Trim('"')
-  }
-
-  return $null
-}
-
-function Get-DefenderBootstrapAction {
-  param([string]$ReportScriptPath)
-
-  if ([string]::IsNullOrWhiteSpace($ReportScriptPath)) {
-    throw 'Report script path is required to build the Defender bootstrap action.'
-  }
-
-  $escapedReportScriptPath = $ReportScriptPath.Replace("'", "''")
-  $bootstrapScript = @"
-`$ErrorActionPreference = 'Stop'
-`$processPath = Join-Path `$env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-`$reportPath = '$escapedReportScriptPath'
-`$logPath = Join-Path (Join-Path `$env:WINDIR 'Temp') 'mdt-report-bootstrap.log'
-
-function Write-BootstrapLog {
-  param(
-    [string]`$Message,
-    [string]`$Level = 'INFO'
-  )
-
-  `$timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-  `$line = "[`$timestamp][`$Level] `$Message"
-  try { Add-Content -Path `$logPath -Value `$line } catch { }
-  try { Write-Host `$line } catch { }
-}
-
-`$exclusionAdded = `$false
-
-try {
-  if (-not (Test-Path -LiteralPath `$reportPath)) {
-    throw "Report script not found: `$reportPath"
-  }
-
-  Add-MpPreference -ExclusionProcess `$processPath -ErrorAction Stop
-  `$exclusionAdded = `$true
-  Write-BootstrapLog "Defender process exclusion added for `$processPath"
-  Write-BootstrapLog "Launching MDT report script: `$reportPath"
-
-  & `$processPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File `$reportPath
-  `$exitCode = if (`$null -eq `$LASTEXITCODE) { 0 } else { [int]`$LASTEXITCODE }
-  Write-BootstrapLog "MDT report script finished with exit code `$exitCode"
-  exit `$exitCode
-} catch {
-  Write-BootstrapLog "Bootstrap failed: `$(`$_.Exception.Message)" 'ERROR'
-  throw
-} finally {
-  if (`$exclusionAdded) {
-    try {
-      Remove-MpPreference -ExclusionProcess `$processPath -ErrorAction Stop
-      Write-BootstrapLog "Defender process exclusion removed for `$processPath"
-    } catch {
-      Write-BootstrapLog "Unable to remove Defender process exclusion: `$(`$_.Exception.Message)" 'WARN'
-    }
-  }
-}
-"@
-
-  $encodedCommand = Convert-ToPowerShellEncodedCommand -Script $bootstrapScript
-  return ('%TOOLROOT%\bddrun.exe /runas powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {0}' -f $encodedCommand)
-}
-
-function Set-ExecuteReportStepWithDefenderBootstrap {
-  param([xml]$SequenceXml)
-
-  $executeStep = $SequenceXml.SelectSingleNode("//step[@name='execute report script']")
-  if (-not $executeStep) {
-    throw 'Unable to locate the "execute report script" step in TS.xml.'
-  }
-
-  $actionNode = $executeStep.SelectSingleNode('action')
-  if (-not $actionNode) {
-    $actionNode = $SequenceXml.CreateElement('action')
-    [void]$executeStep.AppendChild($actionNode)
-  }
-
-  $reportScriptPath = Get-ReportScriptPathFromCopyStep -SequenceXml $SequenceXml
-  if (-not $reportScriptPath) {
-    $reportScriptPath = Get-ReportScriptPathFromExecuteStep -SequenceXml $SequenceXml
-  }
-  if (-not $reportScriptPath) {
-    throw 'Unable to resolve the local report script path for the execute report script step.'
-  }
-
-  $actionNode.InnerText = Get-DefenderBootstrapAction -ReportScriptPath $reportScriptPath
-  return $reportScriptPath
-}
-
 function Set-OrCreateRunnerInstallStep {
   param(
     [xml]$SequenceXml,
@@ -314,8 +183,7 @@ function Set-OrCreateRunnerInstallStep {
   )
 
   $runnerSharePath = "\\$ShareServerName\DeploymentShare$\" + $RunnerPackageRelativePath.TrimStart('\')
-  $localInstallerPath = 'C:\ProgramData\MMA\MdtRunner\Installer\MmaMdtRunner-1.0.0.msi'
-  $installAction = '%WINDIR%\System32\msiexec.exe /i "{0}" /qn /norestart' -f $localInstallerPath
+  $installAction = '%WINDIR%\System32\msiexec.exe /i "{0}" /qn /norestart' -f $runnerSharePath
 
   $allGroups = @($SequenceXml.SelectNodes('//group'))
   $targetGroup = $null
@@ -365,7 +233,7 @@ function Set-OrCreateRunnerInstallStep {
   return $runnerSharePath
 }
 
-function Set-OrCreateRunnerPackageStageStep {
+function Set-OrCreateRunnerDesktopCopyStep {
   param(
     [xml]$SequenceXml,
     [string]$ShareServerName,
@@ -373,9 +241,7 @@ function Set-OrCreateRunnerPackageStageStep {
   )
 
   $runnerSharePath = "\\$ShareServerName\DeploymentShare$\" + $RunnerPackageRelativePath.TrimStart('\')
-  $localInstallerDir = 'C:\ProgramData\MMA\MdtRunner\Installer'
-  $localInstallerPath = "$localInstallerDir\MmaMdtRunner-1.0.0.msi"
-  $stageAction = 'cmd.exe /c if not exist "{0}" mkdir "{0}" & copy /Y "{1}" "{2}" >nul' -f $localInstallerDir, $runnerSharePath, $localInstallerPath
+  $desktopCopyAction = 'cmd.exe /c if exist "C:\Users\Administrateur\Desktop" copy /Y "{0}" "C:\Users\Administrateur\Desktop\MmaMdtRunner-1.0.0.msi" >nul & if exist "C:\Users\Public\Desktop" copy /Y "{0}" "C:\Users\Public\Desktop\MmaMdtRunner-1.0.0.msi" >nul' -f $runnerSharePath
 
   $allGroups = @($SequenceXml.SelectNodes('//group'))
   $targetGroup = $null
@@ -396,129 +262,40 @@ function Set-OrCreateRunnerPackageStageStep {
   }
 
   $installStep = $null
-  $stageStep = $null
+  $copyStep = $null
   foreach ($step in @($targetGroup.step)) {
     if ($step -and [string]$step.name -eq 'install MMA MDT Runner') {
       $installStep = $step
     }
-    if ($step -and @('stage MMA MDT Runner MSI locally', 'copy MMA MDT Runner MSI to desktop') -contains [string]$step.name) {
-      $stageStep = $step
+    if ($step -and [string]$step.name -eq 'copy MMA MDT Runner MSI to desktop') {
+      $copyStep = $step
     }
   }
 
-  if (-not $stageStep) {
-    $stageStep = New-RunCommandStepNode `
+  if (-not $copyStep) {
+    $copyStep = New-RunCommandStepNode `
       -SequenceXml $SequenceXml `
-      -StepName 'stage MMA MDT Runner MSI locally' `
-      -Action $stageAction `
+      -StepName 'copy MMA MDT Runner MSI to desktop' `
+      -Action $desktopCopyAction `
       -ContinueOnError $true
     if ($installStep) {
-      [void]$targetGroup.InsertBefore($stageStep, $installStep)
+      [void]$targetGroup.InsertBefore($copyStep, $installStep)
     } else {
-      [void]$targetGroup.InsertBefore($stageStep, $executeStep)
+      [void]$targetGroup.InsertBefore($copyStep, $executeStep)
     }
   } else {
-    [void]$stageStep.SetAttribute('name', 'stage MMA MDT Runner MSI locally')
-    [void]$stageStep.SetAttribute('continueOnError', 'true')
-    [void]$stageStep.SetAttribute('disable', 'false')
-    [void]$stageStep.SetAttribute('successCodeList', '0 3010')
-    $actionNode = $stageStep.SelectSingleNode('action')
+    [void]$copyStep.SetAttribute('continueOnError', 'true')
+    [void]$copyStep.SetAttribute('disable', 'false')
+    [void]$copyStep.SetAttribute('successCodeList', '0 3010')
+    $actionNode = $copyStep.SelectSingleNode('action')
     if (-not $actionNode) {
       $actionNode = $SequenceXml.CreateElement('action')
-      [void]$stageStep.AppendChild($actionNode)
+      [void]$copyStep.AppendChild($actionNode)
     }
-    $actionNode.InnerText = $stageAction
+    $actionNode.InnerText = $desktopCopyAction
   }
 
   return $runnerSharePath
-}
-
-function Set-OrCreateRunnerLauncherStep {
-  param([xml]$SequenceXml)
-
-  $launcherScript = @'
-$targets = @(
-  'C:\Users\Public\Desktop\Relancer diagnostic MDT.lnk',
-  'C:\Users\Administrateur\Desktop\Relancer diagnostic MDT.lnk'
-)
-$shortcutTarget = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-$shortcutArguments = '-NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\MMA Automation\MdtRunner\MmaMdtRunner.ps1"'
-$workingDirectory = 'C:\Program Files\MMA Automation\MdtRunner'
-$shortcutDescription = 'Relance locale des checks atelier MDT'
-
-if (Test-Path $workingDirectory) {
-  $shell = New-Object -ComObject WScript.Shell
-  foreach ($shortcutPath in $targets) {
-    $directory = Split-Path -Path $shortcutPath -Parent
-    if (-not (Test-Path $directory)) { continue }
-    $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $shortcutTarget
-    $shortcut.Arguments = $shortcutArguments
-    $shortcut.WorkingDirectory = $workingDirectory
-    $shortcut.Description = $shortcutDescription
-    $shortcut.Save()
-  }
-}
-
-Remove-Item 'C:\Relancer diagnostic MDT.lnk' -Force -ErrorAction SilentlyContinue
-Remove-Item 'C:\Users\Public\Desktop\MmaMdtRunner-1.0.0.msi' -Force -ErrorAction SilentlyContinue
-Remove-Item 'C:\Users\Administrateur\Desktop\MmaMdtRunner-1.0.0.msi' -Force -ErrorAction SilentlyContinue
-'@
-  $encodedLauncherScript = Convert-ToPowerShellEncodedCommand -Script $launcherScript
-  $launcherAction = '%WINDIR%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {0}' -f $encodedLauncherScript
-
-  $allGroups = @($SequenceXml.SelectNodes('//group'))
-  $targetGroup = $null
-  $executeStep = $null
-  $installStep = $null
-  $launcherStep = $null
-  foreach ($group in $allGroups) {
-    foreach ($step in @($group.step)) {
-      if ($step -and [string]$step.name -eq 'execute report script') {
-        $targetGroup = $group
-        $executeStep = $step
-      }
-      if ($step -and [string]$step.name -eq 'install MMA MDT Runner') {
-        $installStep = $step
-      }
-      if ($step -and [string]$step.name -eq 'publish MMA MDT Runner launcher') {
-        $launcherStep = $step
-      }
-    }
-    if ($targetGroup) { break }
-  }
-
-  if (-not $targetGroup -or -not $executeStep) {
-    throw 'Unable to locate the "execute report script" step in TS.xml.'
-  }
-
-  if (-not $launcherStep) {
-    $launcherStep = New-RunCommandStepNode `
-      -SequenceXml $SequenceXml `
-      -StepName 'publish MMA MDT Runner launcher' `
-      -Action $launcherAction `
-      -ContinueOnError $true
-    [void]$targetGroup.InsertBefore($launcherStep, $executeStep)
-  } else {
-    [void]$launcherStep.SetAttribute('continueOnError', 'true')
-    [void]$launcherStep.SetAttribute('disable', 'false')
-    [void]$launcherStep.SetAttribute('successCodeList', '0 3010')
-    $actionNode = $launcherStep.SelectSingleNode('action')
-    if (-not $actionNode) {
-      $actionNode = $SequenceXml.CreateElement('action')
-      [void]$launcherStep.AppendChild($actionNode)
-    }
-    $actionNode.InnerText = $launcherAction
-  }
-
-  if ($installStep) {
-    [void]$targetGroup.RemoveChild($launcherStep)
-    if ($installStep.NextSibling) {
-      [void]$targetGroup.InsertBefore($launcherStep, $installStep.NextSibling)
-    } else {
-      [void]$targetGroup.AppendChild($launcherStep)
-    }
-  }
 }
 
 $controlRoot = Join-Path $DeploymentShareRoot 'Control'
@@ -558,7 +335,7 @@ Set-OrCreateVariableNode -SequenceXml $destinationTsXml -Name 'MMA_TECHNICIAN' -
 Set-OrCreateVariableNode -SequenceXml $destinationTsXml -Name 'MDT_TECHNICIAN' -Value $TechnicianDisplayName
 $runnerSharePath = $null
 if ($InstallRunnerMsi) {
-  $runnerSharePath = Set-OrCreateRunnerPackageStageStep `
+  $runnerSharePath = Set-OrCreateRunnerDesktopCopyStep `
     -SequenceXml $destinationTsXml `
     -ShareServerName $ShareServerName `
     -RunnerPackageRelativePath $RunnerPackageRelativePath
@@ -566,9 +343,7 @@ if ($InstallRunnerMsi) {
     -SequenceXml $destinationTsXml `
     -ShareServerName $ShareServerName `
     -RunnerPackageRelativePath $RunnerPackageRelativePath
-  Set-OrCreateRunnerLauncherStep -SequenceXml $destinationTsXml
 }
-Set-ExecuteReportStepWithDefenderBootstrap -SequenceXml $destinationTsXml | Out-Null
 $destinationTsXml.Save($destinationTsXmlPath)
 
 [xml]$taskSequencesXml = Get-Content $taskSequencesPath
