@@ -6060,6 +6060,10 @@ function resolveDetailComponents(detail) {
       merged[key] = value;
     }
   });
+  const clockAlert = normalizeClockAlert(detail && detail.clockAlert);
+  if (clockAlert && clockAlert.active) {
+    merged.biosBattery = 'nok';
+  }
   return merged;
 }
 

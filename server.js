@@ -4759,6 +4759,18 @@ function normalizeClockAlertFromRow(row) {
   };
 }
 
+function applyClockAlertToComponents(components, row) {
+  const merged =
+    components && typeof components === 'object' && !Array.isArray(components)
+      ? { ...components }
+      : {};
+  const clockAlert = normalizeClockAlertFromRow(row);
+  if (clockAlert && clockAlert.active) {
+    merged.biosBattery = 'nok';
+  }
+  return merged;
+}
+
 function normalizePalletFromRow(row) {
   if (!row) {
     return null;
@@ -6413,7 +6425,15 @@ function buildReportFilters(
 
   const component = cleanString(query.component, 64);
   if (component && component !== 'all') {
-    clauses.push(`lower(safe_jsonb(${col('components')}) ->> $${idx}) = 'nok'`);
+    if (component === 'biosBattery') {
+      clauses.push(
+        `(lower(safe_jsonb(${col('components')}) ->> $${idx}) = 'nok' OR COALESCE(${col(
+          'bios_clock_alert'
+        )}, false))`
+      );
+    } else {
+      clauses.push(`lower(safe_jsonb(${col('components')}) ->> $${idx}) = 'nok'`);
+    }
     values.push(component);
     idx += 1;
   }
@@ -9426,7 +9446,7 @@ function buildDashboardSummaryComponents(row) {
       merged[key] = value;
     }
   });
-  return merged;
+  return applyClockAlertToComponents(merged, row);
 }
 
 function summarizeDashboardMachine(row) {
@@ -15788,6 +15808,7 @@ function buildReportPdfPayload(row) {
   if (!components && machineComponents) {
     components = machineComponents;
   }
+  components = applyClockAlertToComponents(components, row);
 
   try {
     payload = row.payload ? JSON.parse(row.payload) : null;
