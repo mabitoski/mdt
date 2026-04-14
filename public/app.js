@@ -60,6 +60,7 @@ const state = {
   maxPages: 4,
   loadedOffsets: new Set(),
   totalCount: null,
+  filteredStatusCounts: null,
   lastScrollY: 0,
   scrollDirection: 'down',
   lastLoadScrollY: 0,
@@ -689,6 +690,7 @@ function resetPagination() {
   state.quickCommentId = null;
   state.loadedOffsets = new Set();
   state.totalCount = null;
+  state.filteredStatusCounts = null;
   state.lastLoadScrollY = 0;
   state.listCacheKey = '';
   state.listCache = [];
@@ -1068,12 +1070,11 @@ function trimPagesAround(centerOffset) {
 }
 
 async function loadStats() {
-  try {
-    const params = buildQueryParams({ includeCategory: false, includeTech: true });
+  async function fetchStatsSnapshot(params) {
     const response = await fetch(`/api/stats?${params.toString()}`);
     if (response.status === 401) {
       window.location.href = '/login';
-      return;
+      return null;
     }
     if (!response.ok) {
       throw new Error('stats_failed');
@@ -1082,13 +1083,25 @@ async function loadStats() {
     if (!data.ok) {
       throw new Error('stats_failed');
     }
+    return data;
+  }
+
+  try {
+    const [baseData, filteredData] = await Promise.all([
+      fetchStatsSnapshot(buildQueryParams({ includeCategory: false, includeTech: true })),
+      fetchStatsSnapshot(buildQueryParams({ includeCategory: true, includeTech: true }))
+    ]);
+    if (!baseData || !filteredData) {
+      return;
+    }
     state.stats = {
-      total: data.total || 0,
-      laptop: data.laptop || 0,
-      desktop: data.desktop || 0,
-      unknown: data.unknown || 0
+      total: baseData.total || 0,
+      laptop: baseData.laptop || 0,
+      desktop: baseData.desktop || 0,
+      unknown: baseData.unknown || 0
     };
-    state.techOptions = Array.isArray(data.techs) ? data.techs : [];
+    state.filteredStatusCounts = normalizeStatusCountPayload(filteredData.statusCounts);
+    state.techOptions = Array.isArray(baseData.techs) ? baseData.techs : [];
     renderTechFilters();
   } catch (error) {
     state.stats = null;
@@ -1232,6 +1245,9 @@ async function loadReportsPage(offset) {
       if (Number.isFinite(totalValue)) {
         state.totalCount = totalValue;
       }
+    }
+    if (data.statusCounts) {
+      state.filteredStatusCounts = normalizeStatusCountPayload(data.statusCounts);
     }
     const items = Array.isArray(data.machines) ? data.machines : [];
     items.forEach((item) => {
@@ -3218,6 +3234,46 @@ function getMachinePrimaryStatusLabel(machine) {
   return 'NT';
 }
 
+function normalizeStatusCountPayload(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const total = Number.parseInt(String(value.total || 0), 10);
+  const ok = Number.parseInt(String(value.ok || 0), 10);
+  const nok = Number.parseInt(String(value.nok || 0), 10);
+  const nt = Number.parseInt(String(value.nt || value.other || 0), 10);
+  return {
+    total: Number.isFinite(total) ? total : 0,
+    ok: Number.isFinite(ok) ? ok : 0,
+    nok: Number.isFinite(nok) ? nok : 0,
+    nt: Number.isFinite(nt) ? nt : 0
+  };
+}
+
+function adjustFilteredStatusCounts(previousMachine, nextMachine) {
+  if (!state.filteredStatusCounts) {
+    return;
+  }
+  const previousStatus = previousMachine ? getMachinePrimaryStatus(previousMachine) : null;
+  const nextStatus = nextMachine ? getMachinePrimaryStatus(nextMachine) : null;
+  if (!previousStatus || !nextStatus || previousStatus === nextStatus) {
+    return;
+  }
+  const nextCounts = { ...state.filteredStatusCounts };
+  if (Object.prototype.hasOwnProperty.call(nextCounts, previousStatus)) {
+    nextCounts[previousStatus] = Math.max(0, (Number(nextCounts[previousStatus]) || 0) - 1);
+  }
+  if (Object.prototype.hasOwnProperty.call(nextCounts, nextStatus)) {
+    nextCounts[nextStatus] = (Number(nextCounts[nextStatus]) || 0) + 1;
+  }
+  state.filteredStatusCounts = nextCounts;
+}
+
+function refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id) {
+  adjustFilteredStatusCounts(previousMachine, getMachineById(id));
+  updateStats();
+}
+
 function normalizeCategory(value) {
   if (value === 'laptop' || value === 'desktop' || value === 'unknown') {
     return value;
@@ -3254,6 +3310,21 @@ function formatPrimary(machine) {
 function formatSubtitle(machine) {
   const chunks = [machine.vendor, machine.model].filter(Boolean);
   return chunks.length ? chunks.join(' ') : 'Modele non renseigne';
+}
+
+function formatMachineSerialPreview(machine) {
+  if (!machine || typeof machine !== 'object' || !machine.serialNumber) {
+    return '';
+  }
+  const serial = String(machine.serialNumber).trim();
+  if (!serial) {
+    return '';
+  }
+  const primary = formatPrimary(machine);
+  if (primary && String(primary).trim() === serial) {
+    return '';
+  }
+  return `Serial ${serial}`;
 }
 
 function buildMachineIdentityLabel(machine, { includeSerial = true, fallback = '--' } = {}) {
@@ -4220,20 +4291,25 @@ function getUsbStatus(detail) {
 }
 
 function applyPadStatusUpdate(id, status) {
+  let previousMachine = null;
+  let nextMachine = null;
   state.machines = state.machines.map((machine) => {
     if (machine.id !== id) {
       return machine;
     }
+    previousMachine = machine;
     const components = machine.components && typeof machine.components === 'object'
       ? { ...machine.components }
       : {};
     components.pad = status;
-    return {
+    nextMachine = {
       ...machine,
       padStatus: status,
       components
     };
+    return nextMachine;
   });
+  adjustFilteredStatusCounts(previousMachine, nextMachine);
 
   if (state.details[id]) {
     const detail = state.details[id];
@@ -4251,20 +4327,25 @@ function applyPadStatusUpdate(id, status) {
 }
 
 function applyUsbStatusUpdate(id, status) {
+  let previousMachine = null;
+  let nextMachine = null;
   state.machines = state.machines.map((machine) => {
     if (machine.id !== id) {
       return machine;
     }
+    previousMachine = machine;
     const components = machine.components && typeof machine.components === 'object'
       ? { ...machine.components }
       : {};
     components.usb = status;
-    return {
+    nextMachine = {
       ...machine,
       usbStatus: status,
       components
     };
+    return nextMachine;
   });
+  adjustFilteredStatusCounts(previousMachine, nextMachine);
 
   if (state.details[id]) {
     const detail = state.details[id];
@@ -4304,6 +4385,7 @@ async function updatePadStatus(id, status) {
   }
   setPadButtonsLoading(id, true);
   try {
+    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/pad`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -4321,8 +4403,10 @@ async function updatePadStatus(id, status) {
       throw new Error('pad_update_failed');
     }
     applyPadStatusUpdate(id, data.status);
+    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     refreshActiveDrawerIfNeeded(id);
+    void loadStats();
   } catch (error) {
     window.alert("Impossible d'enregistrer le pavé tactile.");
   } finally {
@@ -4337,6 +4421,7 @@ async function updateUsbStatus(id, status) {
   }
   setUsbButtonsLoading(id, true);
   try {
+    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/usb`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -4354,8 +4439,10 @@ async function updateUsbStatus(id, status) {
       throw new Error('usb_update_failed');
     }
     applyUsbStatusUpdate(id, data.status);
+    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     refreshActiveDrawerIfNeeded(id);
+    void loadStats();
   } catch (error) {
     window.alert("Impossible d'enregistrer l'etat USB.");
   } finally {
@@ -4553,20 +4640,25 @@ function applyComponentStatusUpdate(id, key, status) {
   };
   const statusField = statusFields[key] || null;
 
+  let previousMachine = null;
+  let nextMachine = null;
   state.machines = state.machines.map((machine) => {
     if (machine.id !== id) {
       return machine;
     }
+    previousMachine = machine;
     const components = machine.components && typeof machine.components === 'object'
       ? { ...machine.components }
       : {};
     components[key] = status;
-    return {
+    nextMachine = {
       ...machine,
       ...(statusField ? { [statusField]: status } : {}),
       components
     };
+    return nextMachine;
   });
+  adjustFilteredStatusCounts(previousMachine, nextMachine);
 
   if (state.details[id]) {
     const detail = state.details[id];
@@ -4593,6 +4685,7 @@ async function updateComponentStatus(id, key, status, button) {
     button.classList.add('is-loading');
   }
   try {
+    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/reports/${encodeURIComponent(id)}/component`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -4610,8 +4703,10 @@ async function updateComponentStatus(id, key, status, button) {
       throw new Error('component_update_failed');
     }
     applyComponentStatusUpdate(id, key, data.status);
+    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     refreshActiveDrawerIfNeeded(id);
+    void loadStats();
   } catch (error) {
     window.alert("Impossible d'enregistrer le statut.");
   } finally {
@@ -5077,16 +5172,21 @@ async function deleteReport(id) {
 }
 
 function applyCommentUpdate(id, comment, commentedAt) {
+  let previousMachine = null;
+  let nextMachine = null;
   state.machines = state.machines.map((machine) => {
     if (machine.id !== id) {
       return machine;
     }
-    return {
+    previousMachine = machine;
+    nextMachine = {
       ...machine,
       comment,
       commentedAt
     };
+    return nextMachine;
   });
+  adjustFilteredStatusCounts(previousMachine, nextMachine);
 
   if (state.details[id]) {
     state.details[id] = {
@@ -5100,15 +5200,20 @@ function applyCommentUpdate(id, comment, commentedAt) {
 
 function applyBatteryHealthUpdate(id, batteryHealth) {
   const normalizedValue = parseBatteryHealthValue(batteryHealth);
+  let previousMachine = null;
+  let nextMachine = null;
   state.machines = state.machines.map((machine) => {
     if (machine.id !== id) {
       return machine;
     }
-    return {
+    previousMachine = machine;
+    nextMachine = {
       ...machine,
       batteryHealth: normalizedValue
     };
+    return nextMachine;
   });
+  adjustFilteredStatusCounts(previousMachine, nextMachine);
 
   if (state.details[id]) {
     state.details[id] = {
@@ -5202,6 +5307,7 @@ async function updateComment(id, comment) {
   }
   setCommentButtonsLoading(id, true);
   try {
+    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/comment`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -5219,10 +5325,12 @@ async function updateComment(id, comment) {
       throw new Error('comment_update_failed');
     }
     applyCommentUpdate(id, data.comment, data.commentedAt);
+    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     if (isDrawerOpen() && String(state.expandedId || '') === String(id)) {
       renderDetailsDrawerContent(String(id));
     }
+    void loadStats();
   } catch (error) {
     window.alert("Impossible d'enregistrer le commentaire.");
   } finally {
@@ -5251,6 +5359,7 @@ async function updateBatteryHealth(id, rawValue) {
 
   setBatteryHealthButtonsLoading(id, true);
   try {
+    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/battery-health`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -5272,8 +5381,10 @@ async function updateBatteryHealth(id, rawValue) {
       throw new Error('battery_health_update_failed');
     }
     applyBatteryHealthUpdate(id, data.batteryHealth);
+    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     refreshActiveDrawerIfNeeded(id);
+    void loadStats();
   } catch (error) {
     window.alert("Impossible d'enregistrer la batterie.");
   } finally {
@@ -5485,17 +5596,33 @@ function updateWorkspaceKpis(uniqueMachines = []) {
   let okCount = 0;
   let nokCount = 0;
   let ntCount = 0;
+  const usesLocalScope = Boolean(state.quickFilter && state.quickFilter.value);
 
-  uniqueMachines.forEach((machine) => {
-    const summary = summarizeDetailForDrawer(machine);
-    okCount += summary.ok;
-    nokCount += summary.nok;
-    ntCount += summary.other;
-  });
+  if (!usesLocalScope && state.filteredStatusCounts) {
+    okCount = Number.parseInt(String(state.filteredStatusCounts.ok || 0), 10) || 0;
+    nokCount = Number.parseInt(String(state.filteredStatusCounts.nok || 0), 10) || 0;
+    ntCount = Number.parseInt(String(state.filteredStatusCounts.nt || 0), 10) || 0;
+  } else {
+    uniqueMachines.forEach((machine) => {
+      const primaryStatus = getMachinePrimaryStatus(machine);
+      if (primaryStatus === 'nok') {
+        nokCount += 1;
+      } else if (primaryStatus === 'ok') {
+        okCount += 1;
+      } else {
+        ntCount += 1;
+      }
+    });
+  }
 
   const machineCount =
-    (state.stats && Number.isFinite(Number(state.stats.total)) && Number(state.stats.total)) ||
-    (Number.isFinite(state.totalCount) ? state.totalCount : uniqueMachines.length);
+    usesLocalScope
+      ? uniqueMachines.length
+      : state.filteredStatusCounts
+        ? Number.parseInt(String(state.filteredStatusCounts.total || 0), 10) || 0
+        : Number.isFinite(state.totalCount)
+        ? state.totalCount
+        : uniqueMachines.length;
   setTextContent(kpiTotalEl, machineCount);
   setTextContent(kpiActiveEl, machineCount);
   setTextContent(kpiOkEl, okCount);
@@ -6686,6 +6813,7 @@ function renderList(isScrollUpdate = false) {
       const categoryBadge = buildCategoryBadge(category, machine.id);
       const title = escapeHtml(formatPrimary(machine));
       const subtitle = escapeHtml(formatSubtitle(machine));
+      const serialPreview = escapeHtml(formatMachineSerialPreview(machine));
       const technicianValue = machine.technician || '';
       const batteryValue = parseBatteryHealthValue(machine.batteryHealth);
       const isBatteryAlert = batteryValue != null && batteryValue < BATTERY_ALERT_THRESHOLD;
@@ -6779,6 +6907,7 @@ function renderList(isScrollUpdate = false) {
               </div>
               <h3 class="machine-title">${title}</h3>
               <p class="machine-sub">${subtitle}</p>
+              ${serialPreview ? `<p class="machine-serial">${serialPreview}</p>` : ''}
             </div>
             <div class="card-activity">
               <span class="card-activity-label">Activite</span>

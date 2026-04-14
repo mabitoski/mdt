@@ -9260,6 +9260,127 @@ function summarizeComponents(components) {
   return summary;
 }
 
+const DASHBOARD_PRIMARY_COMPONENT_KEYS = Object.freeze([
+  'usb',
+  'keyboard',
+  'camera',
+  'pad',
+  'badgeReader',
+  'cpu',
+  'gpu',
+  'biosBattery',
+  'biosLanguage',
+  'biosPassword',
+  'wifiStandard'
+]);
+
+const DASHBOARD_PRIMARY_DIAGNOSTIC_KEYS = Object.freeze([
+  'diskReadTest',
+  'diskWriteTest',
+  'ramTest',
+  'cpuTest',
+  'gpuTest',
+  'networkPing'
+]);
+
+function buildDashboardSummaryComponents(row) {
+  let rawComponents = {};
+  if (row && row.components && typeof row.components === 'object' && !Array.isArray(row.components)) {
+    rawComponents = row.components;
+  } else if (row && typeof row.components === 'string') {
+    try {
+      const parsed = JSON.parse(row.components);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        rawComponents = parsed;
+      }
+    } catch (error) {
+      rawComponents = {};
+    }
+  }
+  const merged = withManualComponentDefaults(rawComponents);
+  const topLevelFallbacks = {
+    camera: row ? row.camera_status || row.cameraStatus : null,
+    usb: row ? row.usb_status || row.usbStatus : null,
+    keyboard: row ? row.keyboard_status || row.keyboardStatus : null,
+    pad: row ? row.pad_status || row.padStatus : null,
+    badgeReader: row ? row.badge_reader_status || row.badgeReaderStatus : null
+  };
+  Object.entries(topLevelFallbacks).forEach(([key, value]) => {
+    if (!Object.prototype.hasOwnProperty.call(merged, key) && value != null && value !== '') {
+      merged[key] = value;
+    }
+  });
+  return merged;
+}
+
+function summarizeDashboardMachine(row) {
+  const summary = { ok: 0, nok: 0, other: 0, total: 0 };
+  const components = buildDashboardSummaryComponents(row);
+
+  DASHBOARD_PRIMARY_COMPONENT_KEYS.forEach((key) => {
+    const normalized = normalizeSummaryStatusForKey(key, components[key] || 'not_tested');
+    if (normalized) {
+      addSummaryStatus(summary, normalized);
+    }
+  });
+
+  DASHBOARD_PRIMARY_DIAGNOSTIC_KEYS.forEach((key) => {
+    const normalized = normalizeSummaryStatusForKey(key, components[key] || 'not_tested');
+    if (normalized) {
+      addSummaryStatus(summary, normalized);
+    }
+  });
+
+  if (Object.prototype.hasOwnProperty.call(components, 'fsCheck')) {
+    const normalized = normalizeSummaryStatusForKey('fsCheck', components.fsCheck || 'not_tested');
+    if (normalized) {
+      addSummaryStatus(summary, normalized);
+    }
+  }
+
+  const batteryHealth = normalizeBatteryHealth(row ? row.battery_health || row.batteryHealth : null);
+  if (batteryHealth != null) {
+    addSummaryStatus(summary, batteryHealth < ALERT_BATTERY_THRESHOLD ? 'nok' : 'ok');
+  }
+
+  const commentValue = row && typeof row.comment === 'string' ? row.comment.trim() : '';
+  if (commentValue) {
+    addSummaryStatus(summary, 'nok');
+  }
+
+  return summary;
+}
+
+function getDashboardMachinePrimaryStatus(row) {
+  const summary = summarizeDashboardMachine(row);
+  if (summary.nok > 0) {
+    return 'nok';
+  }
+  if (summary.other > 0) {
+    return 'nt';
+  }
+  if (summary.ok > 0) {
+    return 'ok';
+  }
+  return 'nt';
+}
+
+function buildDashboardPrimaryStatusCounts(rows) {
+  const counts = { ok: 0, nok: 0, nt: 0, total: 0 };
+  (rows || []).forEach((row) => {
+    const status = getDashboardMachinePrimaryStatus(row);
+    counts.total += 1;
+    if (status === 'ok') {
+      counts.ok += 1;
+    } else if (status === 'nok') {
+      counts.nok += 1;
+    } else {
+      counts.nt += 1;
+    }
+  });
+  return counts;
+}
+
 function addSummaryStatus(summary, statusKey) {
   if (!summary || !statusKey) {
     return;
@@ -12822,9 +12943,10 @@ app.get('/api/reports', requireAuth, async (req, res) => {
 
   try {
     let total = null;
+    let statusCounts = null;
     if (includeTotal) {
-      if (useLatest) {
-        const countResult = await pool.query(
+      const totalsResult = useLatest
+        ? await pool.query(
           `
             WITH latest AS (
               SELECT DISTINCT ON (reports.machine_key)
@@ -12839,37 +12961,57 @@ app.get('/api/reports', requireAuth, async (req, res) => {
                 reports.technician,
                 reports.vendor,
                 reports.model,
-                reports.comment,
                 reports.shipment_date,
                 reports.shipment_client,
                 reports.shipment_order_number,
                 reports.shipment_pallet_code,
-                reports.battery_health,
-                reports.bios_clock_alert,
                 reports.components,
+                reports.comment,
+                reports.battery_health,
+                reports.camera_status,
+                reports.usb_status,
+                reports.keyboard_status,
+                reports.pad_status,
+                reports.badge_reader_status,
+                reports.bios_clock_alert,
                 reports.payload,
-                reports.last_seen
+                reports.last_seen,
+                reports.id
               FROM reports
               ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
             )
-            SELECT COUNT(*) AS total
+            SELECT
+              latest.components,
+              latest.comment,
+              latest.battery_health,
+              latest.camera_status,
+              latest.usb_status,
+              latest.keyboard_status,
+              latest.pad_status,
+              latest.badge_reader_status
             FROM latest
             ${where}
           `,
           values
-        );
-        total = Number.parseInt(countResult.rows?.[0]?.total || '0', 10);
-      } else {
-        const countResult = await pool.query(
+        )
+        : await pool.query(
           `
-            SELECT COUNT(*) AS total
+            SELECT
+              reports.components,
+              reports.comment,
+              reports.battery_health,
+              reports.camera_status,
+              reports.usb_status,
+              reports.keyboard_status,
+              reports.pad_status,
+              reports.badge_reader_status
             FROM reports
             ${where}
           `,
           values
         );
-        total = Number.parseInt(countResult.rows?.[0]?.total || '0', 10);
-      }
+      total = totalsResult.rows.length;
+      statusCounts = buildDashboardPrimaryStatusCounts(totalsResult.rows);
     }
     const result = useLatest
       ? await pool.query(
@@ -13084,7 +13226,8 @@ app.get('/api/reports', requireAuth, async (req, res) => {
       limit,
       offset,
       hasMore: machines.length === limit,
-      total
+      total,
+      statusCounts
     });
   } catch (error) {
     console.error('Failed to list reports', error);
@@ -13106,7 +13249,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
   const forcedTechKeys = getForcedReportTechKeys(req.session?.user);
   const useLatest = shouldUseLatest(req.query);
   const { clauses, values } = buildReportFilters(req.query, {
-    includeCategory: false,
+    includeCategory: true,
     activeTagId,
     forcedTechKeys,
     tableAlias: useLatest ? 'latest' : 'reports'
@@ -13114,7 +13257,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
   const queryWithoutTech = { ...req.query };
   delete queryWithoutTech.tech;
   const { clauses: techClauses, values: techValues } = buildReportFilters(queryWithoutTech, {
-    includeCategory: false,
+    includeCategory: true,
     activeTagId,
     forcedTechKeys,
     tableAlias: useLatest ? 'latest' : 'reports'
@@ -13181,6 +13324,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
           WITH latest AS (
             SELECT DISTINCT ON (reports.machine_key)
               reports.machine_key,
+              reports.category,
               reports.technician,
               reports.hostname,
               reports.serial_number,
@@ -13226,12 +13370,88 @@ app.get('/api/stats', requireAuth, async (req, res) => {
     const techs = (techResult.rows || [])
       .map((item) => item.technician)
       .filter(Boolean);
+    const statusResult = useLatest
+      ? await pool.query(
+        `
+          WITH latest AS (
+            SELECT DISTINCT ON (reports.machine_key)
+              reports.machine_key,
+              reports.category,
+              reports.technician,
+              reports.hostname,
+              reports.serial_number,
+              reports.mac_address,
+              reports.mac_addresses,
+              reports.tag,
+              reports.tag_id,
+              reports.vendor,
+              reports.model,
+              reports.comment,
+              reports.shipment_date,
+              reports.shipment_client,
+              reports.shipment_order_number,
+              reports.shipment_pallet_code,
+              reports.battery_health,
+              reports.camera_status,
+              reports.usb_status,
+              reports.keyboard_status,
+              reports.pad_status,
+              reports.badge_reader_status,
+              reports.bios_clock_alert,
+              reports.components,
+              reports.payload,
+              reports.last_seen
+            FROM reports
+            ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
+          )
+          SELECT *
+          FROM latest
+          ${where}
+        `,
+        values
+      )
+      : await pool.query(
+        `
+          SELECT
+            reports.machine_key,
+            reports.category,
+            reports.technician,
+            reports.hostname,
+            reports.serial_number,
+            reports.mac_address,
+            reports.mac_addresses,
+            reports.tag,
+            reports.tag_id,
+            reports.vendor,
+            reports.model,
+            reports.comment,
+            reports.shipment_date,
+            reports.shipment_client,
+            reports.shipment_order_number,
+            reports.shipment_pallet_code,
+            reports.battery_health,
+            reports.camera_status,
+            reports.usb_status,
+            reports.keyboard_status,
+            reports.pad_status,
+            reports.badge_reader_status,
+            reports.bios_clock_alert,
+            reports.components,
+            reports.payload,
+            reports.last_seen
+          FROM reports
+          ${where}
+        `,
+        values
+      );
+    const statusCounts = buildDashboardPrimaryStatusCounts(statusResult.rows || []);
     return res.json({
       ok: true,
       total: Number.parseInt(row?.total || '0', 10),
       laptop: Number.parseInt(row?.laptop || '0', 10),
       desktop: Number.parseInt(row?.desktop || '0', 10),
       unknown: Number.parseInt(row?.unknown || '0', 10),
+      statusCounts,
       techs
     });
   } catch (error) {

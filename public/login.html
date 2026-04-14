@@ -11,7 +11,7 @@
       rel="stylesheet"
     />
     <script src="/env.js?v=20250108a"></script>
-    <link rel="stylesheet" href="/login.css?v=20260225b" />
+    <link rel="stylesheet" href="/login.css?v=20260414b" />
   </head>
   <body class="login-body">
     <div class="login-bg-orb orb-a" aria-hidden="true"></div>
@@ -51,9 +51,32 @@
             un groupe MDT autorise pour ouvrir une session.
           </p>
         </div>
+        <p class="login-warning-note">
+          Cet outil est la propriete exclusive de Marl Digital Services. Toute utilisation non autorisee
+          ou divulgation de son fonctionnement est strictement interdite.
+        </p>
         <p class="login-footnote">Acces reserve aux comptes Microsoft affectes aux groupes MDT.</p>
       </section>
     </main>
-    <script src="/login.js?v=20260326e" defer></script>
+    <div class="login-modal-backdrop" id="login-confidentiality-modal" hidden>
+      <div
+        class="login-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="login-confidentiality-title"
+        aria-describedby="login-confidentiality-message"
+      >
+        <p class="login-modal-kicker">Avertissement</p>
+        <h2 id="login-confidentiality-title">Avertissement de confidentialite</h2>
+        <p class="login-modal-copy" id="login-confidentiality-message">
+          Cet outil est la propriete exclusive de Marl Digital Services. Toute utilisation non autorisee
+          ou divulgation de son fonctionnement est strictement interdite.
+        </p>
+        <button class="login-modal-btn" id="login-confidentiality-close" type="button">
+          J'ai compris
+        </button>
+      </div>
+    </div>
+    <script src="/login.js?v=20260414b" defer></script>
   </body>
 </html>
