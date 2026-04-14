@@ -6237,11 +6237,9 @@ function buildReportFilters(
 
   const legacyFlag = String(query.legacy || '').toLowerCase();
   if (legacyFlag === '1' || legacyFlag === 'true') {
-    clauses.push(`${col('payload')} IS NOT NULL AND ${col('payload')} <> '' AND ${col('payload')}::jsonb ? 'legacy'`);
+    clauses.push(`safe_jsonb(${col('payload')}) ? 'legacy'`);
   } else if (legacyFlag === '0' || legacyFlag === 'false') {
-    clauses.push(
-      `(${col('payload')} IS NULL OR ${col('payload')} = '' OR NOT (${col('payload')}::jsonb ? 'legacy'))`
-    );
+    clauses.push(`NOT (safe_jsonb(${col('payload')}) ? 'legacy')`);
   }
 
   if (includeCategory) {
@@ -6300,9 +6298,7 @@ function buildReportFilters(
 
   const component = cleanString(query.component, 64);
   if (component && component !== 'all') {
-    clauses.push(
-      `lower(COALESCE(NULLIF(${col('components')}, ''), '{}')::jsonb ->> $${idx}) = 'nok'`
-    );
+    clauses.push(`lower(safe_jsonb(${col('components')}) ->> $${idx}) = 'nok'`);
     values.push(component);
     idx += 1;
   }
@@ -11348,8 +11344,14 @@ app.get('/metrics.html', requireAuth, (req, res) => {
 
 app.use(express.static(PUBLIC_DIR, { extensions: ['html'], index: false }));
 
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true });
+app.get('/api/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    return res.json({ ok: true, db: { ok: true } });
+  } catch (error) {
+    console.error('Healthcheck failed', error);
+    return res.status(503).json({ ok: false, db: { ok: false, error: 'db_unavailable' } });
+  }
 });
 
 app.get('/api/auth/providers', (req, res) => {

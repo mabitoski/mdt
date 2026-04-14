@@ -9,6 +9,12 @@ services:
       POSTGRES_PASSWORD: mdt
     volumes:
       - mdt-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mdt -d mdt"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   mdt-web:
@@ -98,6 +104,12 @@ services:
       - ./certs:/app/certs:ro
     depends_on:
       - postgres
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(async (r) => { const data = await r.json().catch(() => ({})); process.exit(r.ok && data && data.ok && data.db && data.db.ok ? 0 : 1); }).catch(() => process.exit(1));"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   grafana:

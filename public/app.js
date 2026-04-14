@@ -201,6 +201,7 @@ let topObserver = null;
 let searchTimer = null;
 let virtualRenderRaf = null;
 let suggestionCache = [];
+let reportLoadRecoveryTriggered = false;
 
 const categoryLabels = {
   laptop: 'Portable',
@@ -1214,6 +1215,7 @@ async function loadReportsPage(offset) {
     return;
   }
   state.isLoadingPage = true;
+  let requestQuery = '';
   try {
     const params = buildQueryParams({ includeCategory: true });
     params.set('limit', String(state.pageSize));
@@ -1221,7 +1223,8 @@ async function loadReportsPage(offset) {
     if (!Number.isFinite(state.totalCount)) {
       params.set('includeTotal', '1');
     }
-    const response = await fetch(`/api/reports?${params.toString()}`);
+    requestQuery = params.toString();
+    const response = await fetch(`/api/reports?${requestQuery}`);
     if (response.status === 401) {
       window.location.href = '/login';
       return;
@@ -1260,6 +1263,7 @@ async function loadReportsPage(offset) {
     if (state.loadedOffsets) {
       state.loadedOffsets.add(offset);
     }
+    reportLoadRecoveryTriggered = false;
     trimPagesAround(offset);
     state.pageStart = state.pages.length ? state.pages[0].offset : 0;
     syncMachinesFromPages();
@@ -1268,7 +1272,33 @@ async function loadReportsPage(offset) {
     state.lastLoadScrollY = getScrollTop();
   } catch (error) {
     if (epoch === state.reportsEpoch) {
-      listEl.innerHTML = '<div class="empty">Erreur lors du chargement.</div>';
+      console.error('Failed to load reports page', { offset, query: requestQuery, error });
+      if (offset === 0 && !reportLoadRecoveryTriggered) {
+        reportLoadRecoveryTriggered = true;
+        if (listEl) {
+          listEl.innerHTML = '<div class="loading">Recuperation de l affichage...</div>';
+        }
+        window.setTimeout(() => {
+          if (getActiveFilterCount() > 0) {
+            resetAllFilters();
+            return;
+          }
+          reloadReports();
+        }, 0);
+        return;
+      }
+      const resetAction = getActiveFilterCount() > 0
+        ? '<button class="card-action-btn" type="button" data-action="reset-filters-and-retry">Reinitialiser les filtres</button>'
+        : '';
+      listEl.innerHTML = `
+        <div class="empty">
+          Erreur lors du chargement.
+          <div class="empty-actions">
+            <button class="card-action-btn is-primary" type="button" data-action="retry-reports">Reessayer</button>
+            ${resetAction}
+          </div>
+        </div>
+      `;
     }
   } finally {
     if (epoch === state.reportsEpoch) {
@@ -8536,6 +8566,22 @@ if (suggestionModal) {
 }
 
 listEl.addEventListener('click', (event) => {
+  const retryReportsBtn = event.target.closest('[data-action="retry-reports"]');
+  if (retryReportsBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    reportLoadRecoveryTriggered = false;
+    reloadReports();
+    return;
+  }
+  const resetAndRetryBtn = event.target.closest('[data-action="reset-filters-and-retry"]');
+  if (resetAndRetryBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    reportLoadRecoveryTriggered = false;
+    resetAllFilters();
+    return;
+  }
   const commentInput = event.target.closest('.comment-inline');
   if (commentInput) {
     return;
