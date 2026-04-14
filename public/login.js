@@ -12,8 +12,6 @@ const errorMessages = {
     "Impossible de verifier vos groupes Microsoft. Il faut probablement activer l'acces Graph pour l'application.",
   sso_only: 'Le login par mot de passe est desactive. Utilise Se connecter avec Microsoft.'
 };
-const confidentialityNotice =
-  "Cet outil est la propriete exclusive de Marl Digital Services. Toute utilisation non autorisee ou divulgation de son fonctionnement est strictement interdite.";
 let confidentialityModalOpen = false;
 
 function focusMicrosoftButton() {

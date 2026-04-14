@@ -1087,21 +1087,17 @@ async function loadStats() {
   }
 
   try {
-    const [baseData, filteredData] = await Promise.all([
-      fetchStatsSnapshot(buildQueryParams({ includeCategory: false, includeTech: true })),
-      fetchStatsSnapshot(buildQueryParams({ includeCategory: true, includeTech: true }))
-    ]);
-    if (!baseData || !filteredData) {
+    const data = await fetchStatsSnapshot(buildQueryParams({ includeCategory: false, includeTech: true }));
+    if (!data) {
       return;
     }
     state.stats = {
-      total: baseData.total || 0,
-      laptop: baseData.laptop || 0,
-      desktop: baseData.desktop || 0,
-      unknown: baseData.unknown || 0
+      total: data.total || 0,
+      laptop: data.laptop || 0,
+      desktop: data.desktop || 0,
+      unknown: data.unknown || 0
     };
-    state.filteredStatusCounts = normalizeStatusCountPayload(filteredData.statusCounts);
-    state.techOptions = Array.isArray(baseData.techs) ? baseData.techs : [];
+    state.techOptions = Array.isArray(data.techs) ? data.techs : [];
     renderTechFilters();
   } catch (error) {
     state.stats = null;
@@ -3269,11 +3265,6 @@ function adjustFilteredStatusCounts(previousMachine, nextMachine) {
   state.filteredStatusCounts = nextCounts;
 }
 
-function refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id) {
-  adjustFilteredStatusCounts(previousMachine, getMachineById(id));
-  updateStats();
-}
-
 function normalizeCategory(value) {
   if (value === 'laptop' || value === 'desktop' || value === 'unknown') {
     return value;
@@ -4385,7 +4376,6 @@ async function updatePadStatus(id, status) {
   }
   setPadButtonsLoading(id, true);
   try {
-    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/pad`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -4403,7 +4393,6 @@ async function updatePadStatus(id, status) {
       throw new Error('pad_update_failed');
     }
     applyPadStatusUpdate(id, data.status);
-    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     refreshActiveDrawerIfNeeded(id);
     void loadStats();
@@ -4421,7 +4410,6 @@ async function updateUsbStatus(id, status) {
   }
   setUsbButtonsLoading(id, true);
   try {
-    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/usb`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -4439,7 +4427,6 @@ async function updateUsbStatus(id, status) {
       throw new Error('usb_update_failed');
     }
     applyUsbStatusUpdate(id, data.status);
-    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     refreshActiveDrawerIfNeeded(id);
     void loadStats();
@@ -4685,7 +4672,6 @@ async function updateComponentStatus(id, key, status, button) {
     button.classList.add('is-loading');
   }
   try {
-    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/reports/${encodeURIComponent(id)}/component`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -4703,7 +4689,6 @@ async function updateComponentStatus(id, key, status, button) {
       throw new Error('component_update_failed');
     }
     applyComponentStatusUpdate(id, key, data.status);
-    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     refreshActiveDrawerIfNeeded(id);
     void loadStats();
@@ -5307,7 +5292,6 @@ async function updateComment(id, comment) {
   }
   setCommentButtonsLoading(id, true);
   try {
-    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/comment`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -5325,7 +5309,6 @@ async function updateComment(id, comment) {
       throw new Error('comment_update_failed');
     }
     applyCommentUpdate(id, data.comment, data.commentedAt);
-    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     if (isDrawerOpen() && String(state.expandedId || '') === String(id)) {
       renderDetailsDrawerContent(String(id));
@@ -5359,7 +5342,6 @@ async function updateBatteryHealth(id, rawValue) {
 
   setBatteryHealthButtonsLoading(id, true);
   try {
-    const previousMachine = getMachineById(id);
     const response = await fetch(`/api/machines/${encodeURIComponent(id)}/battery-health`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -5381,7 +5363,6 @@ async function updateBatteryHealth(id, rawValue) {
       throw new Error('battery_health_update_failed');
     }
     applyBatteryHealthUpdate(id, data.batteryHealth);
-    refreshWorkspaceCountsAfterMachineUpdate(previousMachine, id);
     renderList();
     refreshActiveDrawerIfNeeded(id);
     void loadStats();

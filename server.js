@@ -13249,7 +13249,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
   const forcedTechKeys = getForcedReportTechKeys(req.session?.user);
   const useLatest = shouldUseLatest(req.query);
   const { clauses, values } = buildReportFilters(req.query, {
-    includeCategory: true,
+    includeCategory: false,
     activeTagId,
     forcedTechKeys,
     tableAlias: useLatest ? 'latest' : 'reports'
@@ -13257,7 +13257,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
   const queryWithoutTech = { ...req.query };
   delete queryWithoutTech.tech;
   const { clauses: techClauses, values: techValues } = buildReportFilters(queryWithoutTech, {
-    includeCategory: true,
+    includeCategory: false,
     activeTagId,
     forcedTechKeys,
     tableAlias: useLatest ? 'latest' : 'reports'
@@ -13370,88 +13370,12 @@ app.get('/api/stats', requireAuth, async (req, res) => {
     const techs = (techResult.rows || [])
       .map((item) => item.technician)
       .filter(Boolean);
-    const statusResult = useLatest
-      ? await pool.query(
-        `
-          WITH latest AS (
-            SELECT DISTINCT ON (reports.machine_key)
-              reports.machine_key,
-              reports.category,
-              reports.technician,
-              reports.hostname,
-              reports.serial_number,
-              reports.mac_address,
-              reports.mac_addresses,
-              reports.tag,
-              reports.tag_id,
-              reports.vendor,
-              reports.model,
-              reports.comment,
-              reports.shipment_date,
-              reports.shipment_client,
-              reports.shipment_order_number,
-              reports.shipment_pallet_code,
-              reports.battery_health,
-              reports.camera_status,
-              reports.usb_status,
-              reports.keyboard_status,
-              reports.pad_status,
-              reports.badge_reader_status,
-              reports.bios_clock_alert,
-              reports.components,
-              reports.payload,
-              reports.last_seen
-            FROM reports
-            ORDER BY reports.machine_key, reports.last_seen DESC, reports.id DESC
-          )
-          SELECT *
-          FROM latest
-          ${where}
-        `,
-        values
-      )
-      : await pool.query(
-        `
-          SELECT
-            reports.machine_key,
-            reports.category,
-            reports.technician,
-            reports.hostname,
-            reports.serial_number,
-            reports.mac_address,
-            reports.mac_addresses,
-            reports.tag,
-            reports.tag_id,
-            reports.vendor,
-            reports.model,
-            reports.comment,
-            reports.shipment_date,
-            reports.shipment_client,
-            reports.shipment_order_number,
-            reports.shipment_pallet_code,
-            reports.battery_health,
-            reports.camera_status,
-            reports.usb_status,
-            reports.keyboard_status,
-            reports.pad_status,
-            reports.badge_reader_status,
-            reports.bios_clock_alert,
-            reports.components,
-            reports.payload,
-            reports.last_seen
-          FROM reports
-          ${where}
-        `,
-        values
-      );
-    const statusCounts = buildDashboardPrimaryStatusCounts(statusResult.rows || []);
     return res.json({
       ok: true,
       total: Number.parseInt(row?.total || '0', 10),
       laptop: Number.parseInt(row?.laptop || '0', 10),
       desktop: Number.parseInt(row?.desktop || '0', 10),
       unknown: Number.parseInt(row?.unknown || '0', 10),
-      statusCounts,
       techs
     });
   } catch (error) {
