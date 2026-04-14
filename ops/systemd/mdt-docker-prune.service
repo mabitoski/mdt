@@ -1,0 +1,9 @@
+[Unit]
+Description=Prune unused Docker cache for MDT production
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker builder prune -af --filter until=168h
+ExecStart=/usr/bin/docker image prune -af --filter until=168h
