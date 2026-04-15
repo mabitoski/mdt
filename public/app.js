@@ -1,12 +1,16 @@
+const bodyView =
+  typeof document !== 'undefined' && document.body && document.body.dataset
+    ? String(document.body.dataset.view || '')
+        .trim()
+        .toLowerCase()
+    : '';
 const isLegacyView = Boolean(
+  bodyView === 'legacy' ||
   (typeof window !== 'undefined' && window.__LEGACY_VIEW__) ||
-  (typeof document !== 'undefined' &&
-    document.body &&
-    document.body.dataset &&
-    document.body.dataset.view === 'legacy') ||
   (typeof window !== 'undefined' && window.location && window.location.pathname.includes('legacy'))
 );
-const storageSuffix = isLegacyView ? '-legacy' : '';
+const isServerView = bodyView === 'servers';
+const storageSuffix = isLegacyView ? '-legacy' : isServerView ? '-servers' : '';
 
 const legacyMode = isLegacyView ? 'legacy' : 'current';
 
@@ -317,7 +321,13 @@ const prefsStorageKey = `mdt-ui-preferences${storageSuffix}`;
 const tagFilterStorageKey = `mdt-tag-filter${storageSuffix}`;
 const tagFilterNameStorageKey = `mdt-tag-filter-names${storageSuffix}`;
 const filterCollapseStorageKey = `mdt-filter-collapse${storageSuffix}`;
-const categoryFilterOptions = new Set(['all', 'laptop', 'desktop', 'server', 'unknown']);
+const categoryFilterOptions = new Set(
+  isServerView
+    ? ['all']
+    : isLegacyView
+      ? ['all', 'laptop', 'desktop', 'server', 'unknown']
+      : ['all', 'laptop', 'desktop', 'unknown']
+);
 const commentFilterOptions = new Set(['all', 'with', 'without']);
 const quickFilterTypes = new Set(['serial', 'mac', 'tech', 'summary']);
 const summaryFilterValues = new Set(['ok', 'nok', 'nt']);
@@ -505,8 +515,27 @@ function applyCurrentUser(user) {
   applyOperatorScope(state.currentUser && state.currentUser.operatorScope ? state.currentUser.operatorScope : null);
 }
 
+function getReportScope() {
+  if (isLegacyView) {
+    return 'all';
+  }
+  return isServerView ? 'servers' : 'machines';
+}
+
+function getInventoryEntityLabel(count = 2) {
+  if (isServerView) {
+    return count === 1 ? 'serveur' : 'serveurs';
+  }
+  return count === 1 ? 'poste' : 'postes';
+}
+
+function getInventoryLoadLabel() {
+  return isServerView ? 'serveurs' : 'postes';
+}
+
 function buildQueryParams({ includeCategory = true, includeTech = true } = {}) {
   const params = new URLSearchParams();
+  params.set('scope', getReportScope());
   if (isBatteryAlertsView()) {
     params.set('alertMode', '1');
   }
@@ -613,7 +642,7 @@ function renderTimeline() {
     return;
   }
   if (!hasActiveDateFilter()) {
-    timelineSummaryEl.textContent = 'Active un filtre de periode pour compter les postes par jour, semaine ou mois.';
+    timelineSummaryEl.textContent = `Active un filtre de periode pour compter les ${getInventoryEntityLabel(2)} par jour, semaine ou mois.`;
     timelineListEl.innerHTML = '<div class="timeline-empty">Aucune periode selectionnee.</div>';
     return;
   }
@@ -626,7 +655,7 @@ function renderTimeline() {
         : 'jours';
   timelineSummaryEl.textContent = `${buildDateFilterSummary()} · aggregation par ${granularityLabel}.`;
   if (!buckets.length) {
-    timelineListEl.innerHTML = '<div class="timeline-empty">Aucun poste sur cette periode.</div>';
+    timelineListEl.innerHTML = `<div class="timeline-empty">Aucun ${getInventoryEntityLabel(1)} sur cette periode.</div>`;
     return;
   }
   const maxCount = buckets.reduce((max, item) => Math.max(max, item.machineCount || 0), 0) || 1;
@@ -639,7 +668,7 @@ function renderTimeline() {
         <article class="timeline-bucket">
           <div class="timeline-bucket-head">
             <strong>${escapeHtml(formatTimelineBucketLabel(item.bucketStart, state.timelineGranularity))}</strong>
-            <span>${escapeHtml(`${machineCount} poste${machineCount > 1 ? 's' : ''}`)}</span>
+            <span>${escapeHtml(`${machineCount} ${getInventoryEntityLabel(machineCount)}`)}</span>
           </div>
           <div class="timeline-bucket-bar" aria-hidden="true"><span style="width:${width}%"></span></div>
           <p class="timeline-bucket-meta">${escapeHtml(`${reportCount} passage${reportCount > 1 ? 's' : ''}`)}</p>
@@ -1203,6 +1232,43 @@ function ensurePagesForRange(startIndex, endIndex) {
   pumpOffsetQueue();
 }
 
+function wait(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function fetchReportsPagePayload(requestQuery, { retryCount = 0 } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    try {
+      const response = await fetch(`/api/reports?${requestQuery}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-store'
+        }
+      });
+      if (response.status === 401) {
+        return { unauthorized: true };
+      }
+      if (!response.ok) {
+        throw new Error(`fetch_failed_${response.status}`);
+      }
+      const data = await response.json();
+      if (!data || !data.ok) {
+        throw new Error('fetch_failed');
+      }
+      return { data };
+    } catch (error) {
+      lastError = error;
+      if (attempt < retryCount) {
+        await wait(200 * (attempt + 1));
+      }
+    }
+  }
+  throw lastError || new Error('fetch_failed');
+}
+
 async function loadReportsPage(offset) {
   const epoch = state.reportsEpoch;
   if (epoch !== state.reportsEpoch) {
@@ -1227,20 +1293,15 @@ async function loadReportsPage(offset) {
       params.set('includeTotal', '1');
     }
     requestQuery = params.toString();
-    const response = await fetch(`/api/reports?${requestQuery}`);
-    if (response.status === 401) {
+    const { data, unauthorized } = await fetchReportsPagePayload(requestQuery, {
+      retryCount: offset === 0 ? 2 : 1
+    });
+    if (unauthorized) {
       window.location.href = '/login';
       return;
     }
-    if (!response.ok) {
-      throw new Error('fetch_failed');
-    }
-    const data = await response.json();
     if (epoch !== state.reportsEpoch) {
       return;
-    }
-    if (!data.ok) {
-      throw new Error('fetch_failed');
     }
     if (data.total != null) {
       const totalValue = Number.parseInt(data.total, 10);
@@ -1276,6 +1337,10 @@ async function loadReportsPage(offset) {
   } catch (error) {
     if (epoch === state.reportsEpoch) {
       console.error('Failed to load reports page', { offset, query: requestQuery, error });
+      if (offset === 0 && state.machines.length > 0) {
+        updateLastUpdated();
+        return;
+      }
       if (offset === 0 && !reportLoadRecoveryTriggered) {
         reportLoadRecoveryTriggered = true;
         if (listEl) {
@@ -1312,8 +1377,9 @@ async function loadReportsPage(offset) {
 }
 
 async function reloadReports() {
-  listEl.innerHTML = '<div class="loading">Chargement des postes...</div>';
+  listEl.innerHTML = `<div class="loading">Chargement des ${getInventoryLoadLabel()}...</div>`;
   resetPagination();
+  reportLoadRecoveryTriggered = false;
   state.skipAnchorRestore = true;
   if (listScroll) {
     listScroll.scrollTop = 0;
@@ -2140,7 +2206,7 @@ function updateTimeFilterLabel() {
 
 function getActiveFilterCount() {
   let count = 0;
-  if (state.filter && state.filter !== 'all') {
+  if (state.filter && state.filter !== 'all' && !(isServerView && state.filter === 'server')) {
     count += 1;
   }
   if (isBatteryAlertsView()) {
@@ -2176,7 +2242,7 @@ function buildActiveFilterLabels() {
     const summaryMap = { ok: 'OK', nok: 'NOK', nt: 'NT' };
     labels.push(summaryMap[state.quickFilter.value] || state.quickFilter.value);
   }
-  if (state.filter && state.filter !== 'all') {
+  if (state.filter && state.filter !== 'all' && !(isServerView && state.filter === 'server')) {
     labels.push(categoryLabels[normalizeCategory(state.filter)] || state.filter);
   }
   if (isBatteryAlertsView()) {
@@ -2223,13 +2289,13 @@ function buildActiveFilterLabels() {
 
 function formatResultCountLabel(count) {
   const numeric = Number.isFinite(count) ? count : 0;
-  return `${numeric} poste${numeric > 1 ? 's' : ''}`;
+  return `${numeric} ${getInventoryEntityLabel(numeric)}`;
 }
 
 function updateResultsSummary(count = null) {
   const labels = buildActiveFilterLabels();
   const filtersText = labels.length ? `Filtres : ${labels.join(' + ')}` : 'Filtres : aucun';
-  const countText = count == null ? 'Resultats : -- poste' : `Resultats : ${formatResultCountLabel(count)}`;
+  const countText = count == null ? `Resultats : -- ${getInventoryEntityLabel(1)}` : `Resultats : ${formatResultCountLabel(count)}`;
   if (resultsCountLabelEl) {
     resultsCountLabelEl.textContent = countText;
   }
@@ -2237,7 +2303,7 @@ function updateResultsSummary(count = null) {
     resultsFiltersSummaryEl.textContent = filtersText;
   }
   if (resultsCountInlineEl) {
-    resultsCountInlineEl.textContent = count == null ? '-- poste' : formatResultCountLabel(count);
+    resultsCountInlineEl.textContent = count == null ? `-- ${getInventoryEntityLabel(1)}` : formatResultCountLabel(count);
   }
   if (resultsFiltersInlineEl) {
     resultsFiltersInlineEl.textContent = filtersText;
@@ -2681,13 +2747,21 @@ function renderBoardTabs() {
   }
   if (boardTitleEl) {
     boardTitleEl.textContent = isBatteryAlertsView()
-      ? 'Alertes'
-      : 'Liste des postes en cours';
+      ? isServerView
+        ? 'Alertes serveurs'
+        : 'Alertes'
+      : isServerView
+        ? 'Liste des serveurs suivis'
+        : 'Liste des postes en cours';
   }
   if (boardSubEl) {
     boardSubEl.textContent = isBatteryAlertsView()
-      ? 'Vue dediee aux postes a traiter en priorite: batterie faible ou derive d horloge BIOS / RTC.'
-      : 'Vue operationnelle en temps reel avec suivi clair des machines et du lot prioritaire.';
+      ? isServerView
+        ? 'Vue dediee aux serveurs a traiter en priorite: services critiques, thermique ou alertes RTC.'
+        : 'Vue dediee aux postes a traiter en priorite: batterie faible ou derive d horloge BIOS / RTC.'
+      : isServerView
+        ? 'Vue operationnelle en temps reel avec suivi clair de l infrastructure et des diagnostics serveurs.'
+        : 'Vue operationnelle en temps reel avec suivi clair des machines et du lot prioritaire.';
   }
   if (boardScopeBannerEl) {
     const label = getOperatorScopePrimaryLabel();
@@ -5822,7 +5896,8 @@ function updateStatFilterCards() {
 }
 
 function setCategoryFilter(filter) {
-  state.filter = filter || 'all';
+  const nextFilter = categoryFilterOptions.has(filter) ? filter : 'all';
+  state.filter = isServerView && nextFilter === 'server' ? 'all' : nextFilter || 'all';
   updateStatFilterCards();
   savePreferences();
   reloadReports();
@@ -7066,7 +7141,7 @@ function renderList(isScrollUpdate = false) {
     }
     listEl.innerHTML = isBatteryAlertsView()
       ? `<div class="empty">Aucune machine avec batterie inferieure a ${BATTERY_ALERT_THRESHOLD}% ou derive RTC detectee.</div>`
-      : '<div class="empty">Aucun poste ne correspond a ce filtre.</div>';
+      : `<div class="empty">Aucun ${getInventoryEntityLabel(1)} ne correspond a ce filtre.</div>`;
     return;
   }
 
@@ -8285,8 +8360,9 @@ function openReportPdf(detail) {
 }
 
 async function loadMachines() {
-  listEl.innerHTML = '<div class="loading">Chargement des postes...</div>';
+  listEl.innerHTML = `<div class="loading">Chargement des ${getInventoryLoadLabel()}...</div>`;
   resetPagination();
+  reportLoadRecoveryTriggered = false;
   if (Array.isArray(state.tagFilter)) {
     state.tagFilter = state.tagFilter.map((value) => normalizeTagId(value)).filter(Boolean);
   }

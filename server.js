@@ -6371,6 +6371,13 @@ function buildReportFilters(
     clauses.push(`NOT (safe_jsonb(${col('payload')}) ? 'legacy')`);
   }
 
+  const scope = normalizeReportScope(query.scope || query.reportScope || query.viewScope);
+  if (scope === 'servers') {
+    clauses.push(`${col('category')} = 'server'`);
+  } else if (scope === 'machines') {
+    clauses.push(`COALESCE(${col('category')}, 'unknown') <> 'server'`);
+  }
+
   if (includeCategory) {
     const categoryRaw = cleanString(query.category, 32);
     if (categoryRaw && categoryRaw !== 'all') {
@@ -6505,6 +6512,21 @@ function buildReportFilters(
 function shouldUseLatest(query) {
   const raw = String(query.latest || '').toLowerCase();
   return raw === '1' || raw === 'true';
+}
+
+function normalizeReportScope(value) {
+  const normalized = cleanString(value, 24);
+  if (!normalized) {
+    return 'all';
+  }
+  const lower = normalized.toLowerCase();
+  if (['server', 'servers', 'serveur', 'serveurs'].includes(lower)) {
+    return 'servers';
+  }
+  if (['machine', 'machines', 'atelier', 'workstation', 'workstations'].includes(lower)) {
+    return 'machines';
+  }
+  return 'all';
 }
 
 function normalizeMac(value) {
@@ -11305,6 +11327,14 @@ app.get('/', requireAuth, (req, res) => {
 
 app.get('/index.html', requireAuth, (req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
+
+app.get('/servers', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'servers.html'));
+});
+
+app.get('/servers.html', requireAuth, (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'servers.html'));
 });
 
 app.get('/admin', requireAuth, requireAdminPage, (req, res) => {

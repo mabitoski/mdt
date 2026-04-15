@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MMA</title>
+    <title>MMA - Serveurs</title>
     <meta
       name="description"
-      content="Inventaire MDT en temps reel : visualiser l'etat des machines, filtrer par categorie et acceder aux details."
+      content="Inventaire serveurs en temps reel : visualiser l'etat des serveurs, filtrer les diagnostics et acceder aux details."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -17,7 +17,7 @@
     <script src="/env.js?v=20250108a"></script>
     <link rel="stylesheet" href="/styles.css?v=20260414b" />
   </head>
-  <body class="dashboard-page" data-view="machines">
+  <body class="dashboard-page servers-page" data-view="servers">
     <div class="aura" aria-hidden="true"></div>
     <main class="app app-shell">
       <aside class="left-sidebar" aria-label="Navigation principale">
@@ -29,9 +29,9 @@
               <span class="sidebar-brand-tag">Ops Platform</span>
             </div>
           </div>
-          <h1 class="sidebar-title">Console atelier</h1>
+          <h1 class="sidebar-title">Console serveurs</h1>
           <p class="sidebar-sub">
-            Vue operationnelle pour piloter les postes, les statuts et la production par lots.
+            Vue operationnelle dediee aux diagnostics serveurs, a l'inventaire infra et au suivi des alertes.
           </p>
         </div>
         <nav class="sidebar-nav" aria-label="Navigation rapide">
@@ -42,10 +42,10 @@
             Filtres
           </button>
           <button class="sidebar-nav-btn" type="button" data-scroll-target="section-board">
-            Production
+            Serveurs
           </button>
-          <button class="sidebar-nav-btn" type="button" data-scroll-target="lot-overview-card">
-            Lot actif
+          <button class="sidebar-nav-btn" type="button" data-scroll-target="timeline-panel">
+            Chronologie
           </button>
         </nav>
         <div class="sidebar-links" aria-label="Pages externes">
@@ -54,7 +54,7 @@
             <a class="admin-link" id="admin-link" href="/admin" target="_self" hidden>Admin</a>
             <a class="admin-link" id="lots-link" href="/lots" target="_self" hidden>Lots</a>
             <a class="admin-link" id="pallets-link" href="/pallets" target="_self" hidden>Palettes</a>
-            <a class="admin-link" href="/servers" target="_self">Serveurs</a>
+            <a class="admin-link" href="/" target="_self">Atelier</a>
           </div>
           <div class="sidebar-link-group">
             <p class="sidebar-link-title">Analyse</p>
@@ -86,31 +86,18 @@
             aria-pressed="true"
           >
             <span class="stat-label">
-              Total postes
+              Total serveurs
               <span class="stat-time" id="stat-time-label">Tous</span>
             </span>
             <span class="stat-value" id="stat-total">0</span>
           </div>
-          <div class="stat-card is-clickable" data-filter="laptop" role="button" tabindex="0" aria-pressed="false">
-            <span class="stat-label">Portables</span>
-            <span class="stat-value" id="stat-laptop">0</span>
-          </div>
-          <div class="stat-card is-clickable" data-filter="desktop" role="button" tabindex="0" aria-pressed="false">
-            <span class="stat-label">Tours</span>
-            <span class="stat-value" id="stat-desktop">0</span>
-          </div>
-          <div class="stat-card is-clickable" data-filter="unknown" role="button" tabindex="0" aria-pressed="false">
-            <span class="stat-label">Inconnus</span>
-            <span class="stat-value" id="stat-unknown">0</span>
-          </div>
-          <div class="stat-card lot-stat" id="stat-lot-card">
-            <span class="stat-label">Lot prioritaire</span>
-            <span class="stat-value" id="stat-lot-progress">--</span>
-            <span class="stat-sub" id="stat-lot-name">Aucun lot actif</span>
+          <div class="stat-card">
+            <span class="stat-label">Serveurs suivis</span>
+            <span class="stat-value" id="stat-server">0</span>
           </div>
         </section>
         <p class="sidebar-note">
-          Astuce: clique une carte statistique pour filtrer immediatement la liste.
+          Cette page separe les diagnostics serveurs du parc atelier classique.
         </p>
       </aside>
 
@@ -118,10 +105,9 @@
         <header class="hero" id="section-dashboard">
           <div class="hero-copy">
             <p class="hero-kicker">MMA Automation</p>
-            <h2>Suivi instantane du parc atelier</h2>
+            <h2>Suivi instantane du parc serveurs</h2>
             <p class="hero-sub">
-              Interface unifiee pour piloter les postes, prioriser la production et suivre la progression
-              du lot actif.
+              Interface dediee a l'inventaire serveurs, aux services critiques et aux diagnostics infrastructure.
             </p>
           </div>
           <div class="hero-actions">
@@ -195,9 +181,9 @@
             <div class="filter-hub-head">
               <div>
                 <p class="filter-hub-kicker">Filtres atelier</p>
-                <h3 class="filter-hub-title" id="results-count-label">Resultats : -- poste</h3>
+                <h3 class="filter-hub-title" id="results-count-label">Resultats : -- serveur</h3>
                 <p class="filter-hub-sub" id="results-filters-summary">
-                  Combine technicien, tags, defauts et periode sans quitter la liste.
+                  Combine technicien, tags, alertes et periode sans quitter la vue serveurs.
                 </p>
               </div>
             </div>
@@ -273,7 +259,7 @@
                   <div class="timeline-filter-head">
                     <div>
                       <span class="controls-label">Periode</span>
-                      <p class="timeline-filter-sub">Filtre les postes et active le comptage par jour, semaine ou mois.</p>
+                      <p class="timeline-filter-sub">Filtre les serveurs et active le comptage par jour, semaine ou mois.</p>
                     </div>
                     <div class="pill-group timeline-granularity-group" id="timeline-granularity" role="group" aria-label="Granularite de la chronologie">
                       <button class="filter-btn timeline-granularity-btn" data-granularity="day" type="button" aria-pressed="true">
@@ -329,27 +315,11 @@
           <div class="board-toolbar">
             <div class="board-copy">
               <p class="board-kicker">Production</p>
-              <h2 id="board-title">Liste des postes en cours</h2>
+              <h2 id="board-title">Liste des serveurs suivis</h2>
               <p class="board-sub" id="board-sub">
-                Vue operationnelle en temps reel avec suivi clair des machines et du lot prioritaire.
+                Vue operationnelle en temps reel avec suivi clair des services, de la charge et des alertes infra.
               </p>
             </div>
-            <aside class="lot-overview-card" id="lot-overview-card" aria-live="polite">
-              <p class="lot-overview-kicker">Lot en cours</p>
-              <h3 id="lot-overview-name">Aucun lot actif</h3>
-              <div class="lot-overview-progress">
-                <div class="lot-overview-track" aria-hidden="true">
-                  <span id="lot-overview-fill"></span>
-                </div>
-                <div class="lot-overview-meta">
-                  <strong id="lot-overview-count">-- / --</strong>
-                  <span id="lot-overview-status">Attente d'un lot actif</span>
-                </div>
-              </div>
-              <ul class="lot-overview-list" id="lot-overview-list">
-                <li class="lot-overview-empty">Aucun lot configure.</li>
-              </ul>
-            </aside>
           </div>
           <div class="board-tabs" id="board-tabs" role="tablist" aria-label="Vues production">
             <button class="board-tab-btn" type="button" data-board-view="workspace" role="tab" aria-selected="true">
@@ -360,7 +330,7 @@
             </button>
           </div>
           <div class="board-results-bar" aria-live="polite">
-            <strong class="board-results-count" id="results-count-inline">-- poste</strong>
+            <strong class="board-results-count" id="results-count-inline">-- serveur</strong>
             <span class="board-results-separator" aria-hidden="true">•</span>
             <span class="board-results-filters" id="results-filters-inline">Filtres : aucun</span>
           </div>
@@ -374,9 +344,9 @@
             <div class="timeline-panel-head">
               <div>
                 <p class="timeline-panel-kicker">Chronologie</p>
-                <h3>Volumes de postes sur la periode</h3>
+                <h3>Volumes de serveurs sur la periode</h3>
                 <p class="timeline-panel-sub" id="timeline-summary">
-                  Active un filtre de periode pour compter les postes par jour, semaine ou mois.
+                  Active un filtre de periode pour compter les serveurs par jour, semaine ou mois.
                 </p>
               </div>
             </div>
@@ -399,7 +369,7 @@
       >
         <header class="details-drawer-header">
           <div class="details-drawer-title-wrap">
-            <p class="details-drawer-kicker">Details poste</p>
+            <p class="details-drawer-kicker">Details serveur</p>
             <h2 id="details-drawer-title">Chargement...</h2>
             <p class="details-drawer-sub" id="details-drawer-sub">Preparation des informations...</p>
           </div>
@@ -465,7 +435,7 @@
         <form id="report-zero-form">
           <p class="modal-hint">Renseigne au moins un identifiant (nom, serie ou MAC).</p>
           <label class="modal-field">
-            <span>Nom du poste</span>
+            <span>Nom du serveur</span>
             <input type="text" name="hostname" autocomplete="off" />
           </label>
           <label class="modal-field">
