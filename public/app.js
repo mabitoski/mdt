@@ -245,6 +245,10 @@ const componentLabels = {
   gpuStress: 'GPU (stress)',
   networkPing: 'Ping',
   fsCheck: 'Check disque',
+  diskSmart: 'SMART disques',
+  serverRaid: 'RAID',
+  serverServices: 'Services critiques',
+  thermal: 'Thermique',
   gpu: 'GPU',
   usb: 'Ports USB',
   keyboard: 'Clavier',
@@ -267,6 +271,10 @@ const componentOrder = [
   'gpuStress',
   'networkPing',
   'fsCheck',
+  'diskSmart',
+  'serverRaid',
+  'serverServices',
+  'thermal',
   'gpu',
   'usb',
   'keyboard',
@@ -283,7 +291,36 @@ const componentStatusCycles = {
   biosPassword: ['not_tested', 'ok', 'nok']
 };
 
-const hiddenComponents = new Set(['diskSmart', 'networkTest', 'memDiag', 'thermal']);
+const hiddenComponents = new Set(['networkTest', 'memDiag']);
+const machineSummaryComponentKeys = Object.freeze([
+  'usb',
+  'keyboard',
+  'camera',
+  'pad',
+  'badgeReader',
+  'cpu',
+  'gpu',
+  'biosBattery',
+  'biosLanguage',
+  'biosPassword',
+  'wifiStandard'
+]);
+const machineSummaryDiagnosticKeys = Object.freeze([
+  'diskReadTest',
+  'diskWriteTest',
+  'ramTest',
+  'cpuTest',
+  'gpuTest',
+  'networkPing'
+]);
+const serverSummaryKeys = Object.freeze([
+  'networkPing',
+  'fsCheck',
+  'diskSmart',
+  'serverRaid',
+  'serverServices',
+  'thermal'
+]);
 
 const delayClasses = [
   'delay-0',
@@ -3140,63 +3177,49 @@ function summarizeDetailForDrawer(detail) {
       ? payload.tests
       : null;
   const components = resolveDetailComponents(detail);
-  const componentKeys = [
-    'usb',
-    'keyboard',
-    'camera',
-    'pad',
-    'badgeReader',
-    'cpu',
-    'gpu',
-    'biosBattery',
-    'biosLanguage',
-    'biosPassword',
-    'wifiStandard'
-  ];
-  componentKeys.forEach((key) => {
-    const raw = resolveUnifiedComponentStatus(key, components, tests);
-    const normalized = normalizeSummaryStatusForKey(key, raw || 'not_tested');
-    if (normalized) {
-      addSummaryStatus(summary, normalized);
-    }
-  });
-
-  const diagnosticCandidates = [];
-  if (tests) {
-    diagnosticCandidates.push(
-      resolveUnifiedComponentStatus('diskReadTest', components, tests),
-      resolveUnifiedComponentStatus('diskWriteTest', components, tests),
-      resolveUnifiedComponentStatus('ramTest', components, tests),
-      resolveUnifiedComponentStatus('cpuTest', components, tests),
-      resolveUnifiedComponentStatus('gpuTest', components, tests),
-      resolveUnifiedComponentStatus('networkPing', components, tests)
-    );
-    if (tests.fsCheck || components.fsCheck) {
-      diagnosticCandidates.push(resolveUnifiedComponentStatus('fsCheck', components, tests));
-    }
+  if (isServerDetail(detail)) {
+    getServerStatusEntries(detail, components, tests).forEach((entry) => {
+      const normalized = normalizeSummaryStatusForKey(entry.key, entry.status);
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
   } else {
-    diagnosticCandidates.push(
-      resolveUnifiedComponentStatus('diskReadTest', components),
-      resolveUnifiedComponentStatus('diskWriteTest', components),
-      resolveUnifiedComponentStatus('ramTest', components),
-      resolveUnifiedComponentStatus('cpuTest', components),
-      resolveUnifiedComponentStatus('gpuTest', components),
-      resolveUnifiedComponentStatus('networkPing', components)
-    );
-    if (components.fsCheck) {
-      diagnosticCandidates.push(resolveUnifiedComponentStatus('fsCheck', components));
-    }
-  }
-  diagnosticCandidates.forEach((value) => {
-    const normalized = normalizeStatusKey(value);
-    if (normalized) {
-      addSummaryStatus(summary, normalized);
-    }
-  });
+    machineSummaryComponentKeys.forEach((key) => {
+      const raw = resolveUnifiedComponentStatus(key, components, tests);
+      const normalized = normalizeSummaryStatusForKey(key, raw || 'not_tested');
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
 
-  const batteryStatus = getBatteryHealthStatus(detail);
-  if (batteryStatus) {
-    addSummaryStatus(summary, batteryStatus);
+    const diagnosticCandidates = [];
+    if (tests) {
+      machineSummaryDiagnosticKeys.forEach((key) => {
+        diagnosticCandidates.push(resolveUnifiedComponentStatus(key, components, tests));
+      });
+      if (tests.fsCheck || components.fsCheck) {
+        diagnosticCandidates.push(resolveUnifiedComponentStatus('fsCheck', components, tests));
+      }
+    } else {
+      machineSummaryDiagnosticKeys.forEach((key) => {
+        diagnosticCandidates.push(resolveUnifiedComponentStatus(key, components));
+      });
+      if (components.fsCheck) {
+        diagnosticCandidates.push(resolveUnifiedComponentStatus('fsCheck', components));
+      }
+    }
+    diagnosticCandidates.forEach((value) => {
+      const normalized = normalizeStatusKey(value);
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
+
+    const batteryStatus = getBatteryHealthStatus(detail);
+    if (batteryStatus) {
+      addSummaryStatus(summary, batteryStatus);
+    }
   }
 
   const hasComment = typeof detail.comment === 'string' && detail.comment.trim();
@@ -3234,46 +3257,52 @@ function collectDetailNokEntries(detail) {
     entries.push({ label, key, tab });
   }
 
-  addEntry(
-    'Lecture disque',
-    'diskReadTest',
-    'diagnostics',
-    resolveUnifiedComponentStatus('diskReadTest', components, tests)
-  );
-  addEntry(
-    'Ecriture disque',
-    'diskWriteTest',
-    'diagnostics',
-    resolveUnifiedComponentStatus('diskWriteTest', components, tests)
-  );
-  addEntry('RAM (WinSAT)', 'ramTest', 'diagnostics', resolveUnifiedComponentStatus('ramTest', components, tests));
-  addEntry('CPU (WinSAT)', 'cpuTest', 'diagnostics', resolveUnifiedComponentStatus('cpuTest', components, tests));
-  addEntry('GPU (WinSAT)', 'gpuTest', 'diagnostics', resolveUnifiedComponentStatus('gpuTest', components, tests));
-  addEntry(
-    'Ping',
-    'networkPing',
-    'diagnostics',
-    resolveUnifiedComponentStatus('networkPing', components, tests)
-  );
-  if ((tests && tests.fsCheck) || components.fsCheck) {
-    addEntry('Check disque', 'fsCheck', 'diagnostics', resolveUnifiedComponentStatus('fsCheck', components, tests));
-  }
+  if (isServerDetail(detail)) {
+    getServerStatusEntries(detail, components, tests).forEach((entry) => {
+      addEntry(entry.label, entry.key, entry.tab, entry.status);
+    });
+  } else {
+    addEntry(
+      'Lecture disque',
+      'diskReadTest',
+      'diagnostics',
+      resolveUnifiedComponentStatus('diskReadTest', components, tests)
+    );
+    addEntry(
+      'Ecriture disque',
+      'diskWriteTest',
+      'diagnostics',
+      resolveUnifiedComponentStatus('diskWriteTest', components, tests)
+    );
+    addEntry('RAM (WinSAT)', 'ramTest', 'diagnostics', resolveUnifiedComponentStatus('ramTest', components, tests));
+    addEntry('CPU (WinSAT)', 'cpuTest', 'diagnostics', resolveUnifiedComponentStatus('cpuTest', components, tests));
+    addEntry('GPU (WinSAT)', 'gpuTest', 'diagnostics', resolveUnifiedComponentStatus('gpuTest', components, tests));
+    addEntry(
+      'Ping',
+      'networkPing',
+      'diagnostics',
+      resolveUnifiedComponentStatus('networkPing', components, tests)
+    );
+    if ((tests && tests.fsCheck) || components.fsCheck) {
+      addEntry('Check disque', 'fsCheck', 'diagnostics', resolveUnifiedComponentStatus('fsCheck', components, tests));
+    }
 
-  addEntry('Ports USB', 'usb', 'composants', resolveUnifiedComponentStatus('usb', components, tests));
-  addEntry('Clavier', 'keyboard', 'composants', resolveUnifiedComponentStatus('keyboard', components, tests));
-  addEntry('Camera', 'camera', 'composants', resolveUnifiedComponentStatus('camera', components, tests));
-  addEntry('Pave tactile', 'pad', 'composants', resolveUnifiedComponentStatus('pad', components, tests));
-  addEntry('Lecteur badge', 'badgeReader', 'composants', resolveUnifiedComponentStatus('badgeReader', components, tests));
-  addEntry('CPU OK', 'cpu', 'composants', resolveUnifiedComponentStatus('cpu', components, tests));
-  addEntry('GPU OK', 'gpu', 'composants', resolveUnifiedComponentStatus('gpu', components, tests));
+    addEntry('Ports USB', 'usb', 'composants', resolveUnifiedComponentStatus('usb', components, tests));
+    addEntry('Clavier', 'keyboard', 'composants', resolveUnifiedComponentStatus('keyboard', components, tests));
+    addEntry('Camera', 'camera', 'composants', resolveUnifiedComponentStatus('camera', components, tests));
+    addEntry('Pave tactile', 'pad', 'composants', resolveUnifiedComponentStatus('pad', components, tests));
+    addEntry('Lecteur badge', 'badgeReader', 'composants', resolveUnifiedComponentStatus('badgeReader', components, tests));
+    addEntry('CPU OK', 'cpu', 'composants', resolveUnifiedComponentStatus('cpu', components, tests));
+    addEntry('GPU OK', 'gpu', 'composants', resolveUnifiedComponentStatus('gpu', components, tests));
 
-  addEntry('Pile BIOS', 'biosBattery', 'bios_wifi', components.biosBattery || 'not_tested');
-  addEntry('Langue BIOS', 'biosLanguage', 'bios_wifi', components.biosLanguage || 'not_tested');
-  addEntry('Mot de passe BIOS', 'biosPassword', 'bios_wifi', components.biosPassword || 'not_tested');
-  addEntry('Norme Wi-Fi', 'wifiStandard', 'bios_wifi', components.wifiStandard || 'not_tested');
+    addEntry('Pile BIOS', 'biosBattery', 'bios_wifi', components.biosBattery || 'not_tested');
+    addEntry('Langue BIOS', 'biosLanguage', 'bios_wifi', components.biosLanguage || 'not_tested');
+    addEntry('Mot de passe BIOS', 'biosPassword', 'bios_wifi', components.biosPassword || 'not_tested');
+    addEntry('Norme Wi-Fi', 'wifiStandard', 'bios_wifi', components.wifiStandard || 'not_tested');
 
-  if (getBatteryHealthStatus(detail) === 'nok') {
-    entries.push({ label: 'Sante batterie', key: 'batteryHealth', tab: 'identifiants' });
+    if (getBatteryHealthStatus(detail) === 'nok') {
+      entries.push({ label: 'Sante batterie', key: 'batteryHealth', tab: 'identifiants' });
+    }
   }
 
   const commentValue = typeof detail.comment === 'string' ? detail.comment.trim() : '';
@@ -4116,6 +4145,100 @@ function getServerTelemetry(detail) {
     failedServices,
     failingSelectedServices
   };
+}
+
+function isServerDetail(detail) {
+  return normalizeCategory(detail && detail.category) === 'server';
+}
+
+function hasComponentStatus(components, key) {
+  return Boolean(
+    components &&
+      typeof components === 'object' &&
+      !Array.isArray(components) &&
+      Object.prototype.hasOwnProperty.call(components, key)
+  );
+}
+
+function deriveServerServicesStatus(serverTelemetry) {
+  if (!serverTelemetry || typeof serverTelemetry !== 'object') {
+    return null;
+  }
+  if (serverTelemetry.failingSelectedServices.length || serverTelemetry.failedServices.length) {
+    return 'nok';
+  }
+  if (serverTelemetry.selectedServices.length) {
+    return 'ok';
+  }
+  return null;
+}
+
+function applyServerTelemetryToComponents(detail, components) {
+  if (!isServerDetail(detail)) {
+    return components;
+  }
+  const next =
+    components && typeof components === 'object' && !Array.isArray(components)
+      ? { ...components }
+      : {};
+  const serverTelemetry = getServerTelemetry(detail);
+  if (!hasComponentStatus(next, 'serverRaid') && serverTelemetry.raid && serverTelemetry.raid.status) {
+    next.serverRaid = serverTelemetry.raid.status;
+  }
+  if (!hasComponentStatus(next, 'serverServices')) {
+    const serverServicesStatus = deriveServerServicesStatus(serverTelemetry);
+    if (serverServicesStatus) {
+      next.serverServices = serverServicesStatus;
+    }
+  }
+  if (!hasComponentStatus(next, 'thermal') && serverTelemetry.thermal && serverTelemetry.thermal.status) {
+    next.thermal = serverTelemetry.thermal.status;
+  }
+  return next;
+}
+
+function getServerStatusEntries(detail, components, tests = null) {
+  const entries = [];
+  const serverTelemetry = getServerTelemetry(detail);
+  const addEntry = (label, key, status, extra = null) => {
+    if (status == null || status === '') {
+      return;
+    }
+    entries.push({ label, key, status, extra, tab: 'diagnostics' });
+  };
+
+  const pingStatus = resolveUnifiedComponentStatus('networkPing', components, tests);
+  if ((tests && tests.networkPing) || hasComponentStatus(components, 'networkPing')) {
+    addEntry('Ping', 'networkPing', pingStatus, tests && tests.networkPingTarget ? tests.networkPingTarget : null);
+  }
+
+  const fsCheckStatus = resolveUnifiedComponentStatus('fsCheck', components, tests);
+  if ((tests && tests.fsCheck) || hasComponentStatus(components, 'fsCheck')) {
+    addEntry('Check disque', 'fsCheck', fsCheckStatus);
+  }
+
+  if (hasComponentStatus(components, 'diskSmart')) {
+    addEntry('SMART disques', 'diskSmart', components.diskSmart || 'not_tested');
+  }
+
+  if (hasComponentStatus(components, 'serverRaid')) {
+    addEntry('RAID', 'serverRaid', components.serverRaid || 'not_tested', formatServerRaidSummary(serverTelemetry.raid));
+  }
+
+  if (hasComponentStatus(components, 'serverServices')) {
+    const servicesSummary = serverTelemetry.selectedServices.length
+      ? formatServerSelectedServicesSummary(serverTelemetry.selectedServices)
+      : serverTelemetry.failedServices.length
+        ? formatServerFailedServicesSummary(serverTelemetry.failedServices)
+        : null;
+    addEntry('Services critiques', 'serverServices', components.serverServices || 'not_tested', servicesSummary);
+  }
+
+  if (hasComponentStatus(components, 'thermal')) {
+    addEntry('Thermique', 'thermal', components.thermal || 'not_tested', formatServerThermalSummary(serverTelemetry.thermal));
+  }
+
+  return entries;
 }
 
 function formatDurationCompact(seconds) {
@@ -6067,11 +6190,9 @@ function buildDiagnosticsHtml(detail) {
         : null
     : null;
   const detailId = detail && detail.id != null ? String(detail.id) : '';
-  const components =
-    detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
-      ? detail.components
-      : {};
+  const components = resolveDetailComponents(detail);
   const serverTelemetry = getServerTelemetry(detail);
+  const serverStatusEntries = isServerDetail(detail) ? getServerStatusEntries(detail, components, tests) : [];
 
   const rows = [];
 
@@ -6097,50 +6218,56 @@ function buildDiagnosticsHtml(detail) {
     `);
   }
 
-  if (tests) {
-    const ramNote = tests.ramNote || formatWinSatNote(winSatMemScore);
-    const cpuNote = tests.cpuNote || formatWinSatNote(winSatCpuScore);
-    const gpuNote =
-      tests.gpuNote || formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : tests.gpuScore);
-    addRow(
-      'Lecture disque',
-      resolveUnifiedComponentStatus('diskReadTest', components, tests),
-      formatMbps(tests.diskReadMBps),
-      'diskReadTest'
-    );
-    addRow(
-      'Ecriture disque',
-      resolveUnifiedComponentStatus('diskWriteTest', components, tests),
-      formatMbps(tests.diskWriteMBps),
-      'diskWriteTest'
-    );
-    addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components, tests), ramNote || formatMbps(tests.ramMBps), 'ramTest');
-    addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components, tests), cpuNote || formatMbps(tests.cpuMBps), 'cpuTest');
-    const gpuStatusBase = resolveUnifiedComponentStatus('gpuTest', components, tests);
-    const gpuStatus = gpuStatusBase !== 'not_tested' ? gpuStatusBase : (winSatGraphicsScore != null ? 'ok' : 'not_tested');
-    const gpuExtra = gpuNote || (tests.gpuScore != null ? formatScore(tests.gpuScore) : null);
-    addRow('GPU (WinSAT)', gpuStatus, gpuExtra, 'gpuTest');
-    if (tests.cpuStress) {
-      addRow('CPU (stress)', tests.cpuStress, null, 'cpuStress');
-    }
-    if (tests.gpuStress) {
-      addRow('GPU (stress)', tests.gpuStress, null, 'gpuStress');
-    }
-    addRow('Ping', resolveUnifiedComponentStatus('networkPing', components, tests), tests.networkPingTarget || null, 'networkPing');
-    if (tests.fsCheck) {
-      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
-    } else if (components.fsCheck) {
-      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
-    }
+  if (serverStatusEntries.length) {
+    serverStatusEntries.forEach((entry) => {
+      addRow(entry.label, entry.status, entry.extra, entry.key);
+    });
   } else {
-    addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components), null, 'diskReadTest');
-    addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components), null, 'diskWriteTest');
-    addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components), null, 'ramTest');
-    addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components), null, 'cpuTest');
-    addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components), null, 'gpuTest');
-    addRow('Ping', resolveUnifiedComponentStatus('networkPing', components), null, 'networkPing');
-    if (components.fsCheck) {
-      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components), null, 'fsCheck');
+    if (tests) {
+      const ramNote = tests.ramNote || formatWinSatNote(winSatMemScore);
+      const cpuNote = tests.cpuNote || formatWinSatNote(winSatCpuScore);
+      const gpuNote =
+        tests.gpuNote || formatWinSatNote(winSatGraphicsScore != null ? winSatGraphicsScore : tests.gpuScore);
+      addRow(
+        'Lecture disque',
+        resolveUnifiedComponentStatus('diskReadTest', components, tests),
+        formatMbps(tests.diskReadMBps),
+        'diskReadTest'
+      );
+      addRow(
+        'Ecriture disque',
+        resolveUnifiedComponentStatus('diskWriteTest', components, tests),
+        formatMbps(tests.diskWriteMBps),
+        'diskWriteTest'
+      );
+      addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components, tests), ramNote || formatMbps(tests.ramMBps), 'ramTest');
+      addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components, tests), cpuNote || formatMbps(tests.cpuMBps), 'cpuTest');
+      const gpuStatusBase = resolveUnifiedComponentStatus('gpuTest', components, tests);
+      const gpuStatus = gpuStatusBase !== 'not_tested' ? gpuStatusBase : (winSatGraphicsScore != null ? 'ok' : 'not_tested');
+      const gpuExtra = gpuNote || (tests.gpuScore != null ? formatScore(tests.gpuScore) : null);
+      addRow('GPU (WinSAT)', gpuStatus, gpuExtra, 'gpuTest');
+      if (tests.cpuStress) {
+        addRow('CPU (stress)', tests.cpuStress, null, 'cpuStress');
+      }
+      if (tests.gpuStress) {
+        addRow('GPU (stress)', tests.gpuStress, null, 'gpuStress');
+      }
+      addRow('Ping', resolveUnifiedComponentStatus('networkPing', components, tests), tests.networkPingTarget || null, 'networkPing');
+      if (tests.fsCheck) {
+        addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
+      } else if (components.fsCheck) {
+        addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
+      }
+    } else {
+      addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components), null, 'diskReadTest');
+      addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components), null, 'diskWriteTest');
+      addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components), null, 'ramTest');
+      addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components), null, 'cpuTest');
+      addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components), null, 'gpuTest');
+      addRow('Ping', resolveUnifiedComponentStatus('networkPing', components), null, 'networkPing');
+      if (components.fsCheck) {
+        addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components), null, 'fsCheck');
+      }
     }
   }
 
@@ -6298,12 +6425,14 @@ function buildReportHistory(detail) {
 }
 
 function resolveDetailComponents(detail) {
-  const defaults = {
-    biosBattery: 'not_tested',
-    biosLanguage: 'not_tested',
-    biosPassword: 'not_tested',
-    wifiStandard: 'not_tested'
-  };
+  const defaults = isServerDetail(detail)
+    ? {}
+    : {
+        biosBattery: 'not_tested',
+        biosLanguage: 'not_tested',
+        biosPassword: 'not_tested',
+        wifiStandard: 'not_tested'
+      };
   const raw =
     detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
       ? detail.components
@@ -6321,11 +6450,13 @@ function resolveDetailComponents(detail) {
       merged[key] = value;
     }
   });
-  const clockAlert = normalizeClockAlert(detail && detail.clockAlert);
-  if (clockAlert && clockAlert.active) {
-    merged.biosBattery = 'nok';
+  if (!isServerDetail(detail)) {
+    const clockAlert = normalizeClockAlert(detail && detail.clockAlert);
+    if (clockAlert && clockAlert.active) {
+      merged.biosBattery = 'nok';
+    }
   }
-  return merged;
+  return applyServerTelemetryToComponents(detail, merged);
 }
 
 function resolveUnifiedComponentStatus(key, components, tests = null) {
@@ -6450,6 +6581,7 @@ function buildDrawerDiagnosticsRows(detail) {
     winSat && winSat.winSPR && typeof winSat.winSPR === 'object' ? winSat.winSPR : null;
   const components = resolveDetailComponents(detail);
   const serverTelemetry = getServerTelemetry(detail);
+  const serverStatusEntries = isServerDetail(detail) ? getServerStatusEntries(detail, components, tests) : [];
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const rows = [];
 
@@ -6469,35 +6601,41 @@ function buildDrawerDiagnosticsRows(detail) {
     `);
   }
 
-  if (tests) {
-    const cpuScore = winSpr && typeof winSpr.CpuScore === 'number' ? winSpr.CpuScore : null;
-    const memScore = winSpr && typeof winSpr.MemoryScore === 'number' ? winSpr.MemoryScore : null;
-    const gfxScore = winSpr
-      ? typeof winSpr.GamingScore === 'number'
-        ? winSpr.GamingScore
-        : typeof winSpr.GraphicsScore === 'number'
-          ? winSpr.GraphicsScore
-          : null
-      : null;
-
-    addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components, tests), formatMbps(tests.diskReadMBps), 'diskReadTest');
-    addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components, tests), formatMbps(tests.diskWriteMBps), 'diskWriteTest');
-    addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components, tests), tests.ramNote || formatWinSatNote(memScore), 'ramTest');
-    addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components, tests), tests.cpuNote || formatWinSatNote(cpuScore), 'cpuTest');
-    addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components, tests), tests.gpuNote || formatWinSatNote(gfxScore), 'gpuTest');
-    addRow('Ping', resolveUnifiedComponentStatus('networkPing', components, tests), tests.networkPingTarget || null, 'networkPing');
-    if (tests.fsCheck || components.fsCheck) {
-      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
-    }
+  if (serverStatusEntries.length) {
+    serverStatusEntries.forEach((entry) => {
+      addRow(entry.label, entry.status, entry.extra, entry.key);
+    });
   } else {
-    addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components), null, 'diskReadTest');
-    addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components), null, 'diskWriteTest');
-    addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components), null, 'ramTest');
-    addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components), null, 'cpuTest');
-    addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components), null, 'gpuTest');
-    addRow('Ping', resolveUnifiedComponentStatus('networkPing', components), null, 'networkPing');
-    if (components.fsCheck) {
-      addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components), null, 'fsCheck');
+    if (tests) {
+      const cpuScore = winSpr && typeof winSpr.CpuScore === 'number' ? winSpr.CpuScore : null;
+      const memScore = winSpr && typeof winSpr.MemoryScore === 'number' ? winSpr.MemoryScore : null;
+      const gfxScore = winSpr
+        ? typeof winSpr.GamingScore === 'number'
+          ? winSpr.GamingScore
+          : typeof winSpr.GraphicsScore === 'number'
+            ? winSpr.GraphicsScore
+            : null
+        : null;
+
+      addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components, tests), formatMbps(tests.diskReadMBps), 'diskReadTest');
+      addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components, tests), formatMbps(tests.diskWriteMBps), 'diskWriteTest');
+      addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components, tests), tests.ramNote || formatWinSatNote(memScore), 'ramTest');
+      addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components, tests), tests.cpuNote || formatWinSatNote(cpuScore), 'cpuTest');
+      addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components, tests), tests.gpuNote || formatWinSatNote(gfxScore), 'gpuTest');
+      addRow('Ping', resolveUnifiedComponentStatus('networkPing', components, tests), tests.networkPingTarget || null, 'networkPing');
+      if (tests.fsCheck || components.fsCheck) {
+        addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components, tests), null, 'fsCheck');
+      }
+    } else {
+      addRow('Lecture disque', resolveUnifiedComponentStatus('diskReadTest', components), null, 'diskReadTest');
+      addRow('Ecriture disque', resolveUnifiedComponentStatus('diskWriteTest', components), null, 'diskWriteTest');
+      addRow('RAM (WinSAT)', resolveUnifiedComponentStatus('ramTest', components), null, 'ramTest');
+      addRow('CPU (WinSAT)', resolveUnifiedComponentStatus('cpuTest', components), null, 'cpuTest');
+      addRow('GPU (WinSAT)', resolveUnifiedComponentStatus('gpuTest', components), null, 'gpuTest');
+      addRow('Ping', resolveUnifiedComponentStatus('networkPing', components), null, 'networkPing');
+      if (components.fsCheck) {
+        addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components), null, 'fsCheck');
+      }
     }
   }
 
@@ -6552,6 +6690,7 @@ function buildDrawerDiagnosticsRows(detail) {
 function buildDrawerDetailHtml(detail) {
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const category = normalizeCategory(detail.category);
+  const isServerCategory = category === 'server';
   const title = escapeHtml(formatPrimary(detail));
   const subtitle = escapeHtml(formatSubtitle(detail));
   const lot = getMachineLot(detail);
@@ -6716,6 +6855,10 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-mini-card"><span>RAM</span><strong>${escapeHtml(formatRam(detail.ramMb))}</strong></div>
       <div class="drawer-mini-card"><span>Stockage</span><strong>${escapeHtml(formatTotalStorage(diskInfo, volumeInfo))}</strong></div>
       <div class="drawer-mini-card"><span>GPU</span><strong>${escapeHtml((gpuInfo && gpuInfo.name) || '--')}</strong></div>
+      ${
+        isServerCategory
+          ? ''
+          : `
       <div class="drawer-mini-card${isBatteryAlert ? ' is-alert' : ''}"><span>Sante batterie</span><strong>${escapeHtml(
         batteryHealthLabel
       )}</strong></div>
@@ -6724,7 +6867,8 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-mini-card"><span>Alimentation</span><strong>${escapeHtml(batteryPowerSourceLabel)}</strong></div>
       <div class="drawer-mini-card${clockAlert && clockAlert.active ? ' is-alert' : ''}"><span>Pile BIOS</span><strong>${escapeHtml(
         clockAlert && clockAlert.active ? 'Controle requis' : 'RAS'
-      )}</strong></div>
+      )}</strong></div>`
+      }
       ${serverSummaryCards.join('')}
     </div>
   `;
@@ -6897,15 +7041,25 @@ function buildDrawerDetailHtml(detail) {
     </div>
   `;
 
-  const componentRows = [
-    ['Ports USB', 'usb'],
-    ['Clavier', 'keyboard'],
-    ['Camera', 'camera'],
-    ['Pave tactile', 'pad'],
-    ['Lecteur badge', 'badgeReader'],
-    ['CPU OK', 'cpu'],
-    ['GPU OK', 'gpu']
-  ]
+  const componentDefinitions = isServerCategory
+    ? [
+        ['Ping', 'networkPing'],
+        ['Check disque', 'fsCheck'],
+        ['SMART disques', 'diskSmart'],
+        ['RAID', 'serverRaid'],
+        ['Services critiques', 'serverServices'],
+        ['Thermique', 'thermal']
+      ]
+    : [
+        ['Ports USB', 'usb'],
+        ['Clavier', 'keyboard'],
+        ['Camera', 'camera'],
+        ['Pave tactile', 'pad'],
+        ['Lecteur badge', 'badgeReader'],
+        ['CPU OK', 'cpu'],
+        ['GPU OK', 'gpu']
+      ];
+  const componentRows = componentDefinitions
     .map(
       ([label, key]) => `
         <div class="drawer-status-row${
@@ -6918,23 +7072,58 @@ function buildDrawerDetailHtml(detail) {
     )
     .join('');
 
-  const biosRows = [
-    ['Pile BIOS', 'biosBattery'],
-    ['Langue BIOS', 'biosLanguage'],
-    ['Mot de passe BIOS', 'biosPassword'],
-    ['Norme Wi-Fi', 'wifiStandard']
-  ]
-    .map(
-      ([label, key]) => `
-        <div class="drawer-status-row${
-          normalizeSummaryStatusForKey(key, components[key] || 'not_tested') === 'nok' ? ' is-nok' : ''
-        }" data-detail-key="${escapeHtml(key)}">
-          <span>${escapeHtml(label)}</span>
-          ${renderStatusValue(components[key] || 'not_tested', { id: detailId, key })}
-        </div>
-      `
-    )
-    .join('');
+  const biosRows = isServerCategory
+    ? [
+        ['Passerelle', serverNetwork && serverNetwork.defaultGateway ? serverNetwork.defaultGateway : '--'],
+        ['IPv4 primaire', serverNetwork && serverNetwork.primaryIpv4 ? serverNetwork.primaryIpv4 : '--'],
+        ['IPv6 primaire', serverNetwork && serverNetwork.primaryIpv6 ? serverNetwork.primaryIpv6 : '--'],
+        [
+          'Interfaces reseau',
+          serverNetwork && Array.isArray(serverNetwork.interfaces) && serverNetwork.interfaces.length
+            ? String(serverNetwork.interfaces.length)
+            : '--'
+        ],
+        [
+          'Services suivis',
+          serverTelemetry.selectedServices.length
+            ? formatServerSelectedServicesSummary(serverTelemetry.selectedServices)
+            : '--'
+        ],
+        [
+          'Services en echec',
+          serverTelemetry.failedServices.length
+            ? formatServerFailedServicesSummary(serverTelemetry.failedServices)
+            : serverTelemetry.selectedServices.length
+              ? 'Aucun service en echec'
+              : '--'
+        ]
+      ]
+        .map(
+          ([label, value]) => `
+            <div class="drawer-status-row">
+              <span>${escapeHtml(label)}</span>
+              <div class="drawer-status-stack"><span class="drawer-metric">${escapeHtml(value)}</span></div>
+            </div>
+          `
+        )
+        .join('')
+    : [
+        ['Pile BIOS', 'biosBattery'],
+        ['Langue BIOS', 'biosLanguage'],
+        ['Mot de passe BIOS', 'biosPassword'],
+        ['Norme Wi-Fi', 'wifiStandard']
+      ]
+        .map(
+          ([label, key]) => `
+            <div class="drawer-status-row${
+              normalizeSummaryStatusForKey(key, components[key] || 'not_tested') === 'nok' ? ' is-nok' : ''
+            }" data-detail-key="${escapeHtml(key)}">
+              <span>${escapeHtml(label)}</span>
+              ${renderStatusValue(components[key] || 'not_tested', { id: detailId, key })}
+            </div>
+          `
+        )
+        .join('');
 
   const commentValue = typeof detail.comment === 'string' ? detail.comment : '';
   const commentMeta = detail.commentedAt
@@ -6965,8 +7154,16 @@ function buildDrawerDetailHtml(detail) {
   const tabs = [
     { id: 'identifiants', title: 'Identifiants', content: identifiersPanel },
     { id: 'diagnostics', title: 'Diagnostics', content: diagnosticsPanel },
-    { id: 'composants', title: 'Composants', content: `<div class="drawer-status-list">${componentRows}</div>` },
-    { id: 'bios_wifi', title: 'BIOS / Wi-Fi', content: `<div class="drawer-status-list">${biosRows}</div>` },
+    {
+      id: 'composants',
+      title: isServerCategory ? 'Etat serveur' : 'Composants',
+      content: `<div class="drawer-status-list">${componentRows}</div>`
+    },
+    {
+      id: 'bios_wifi',
+      title: isServerCategory ? 'Reseau / Infra' : 'BIOS / Wi-Fi',
+      content: `<div class="drawer-status-list">${biosRows}</div>`
+    },
     { id: 'commentaires', title: 'Commentaires', content: commentsPanel }
   ];
 

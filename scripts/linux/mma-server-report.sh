@@ -878,6 +878,37 @@ append_json_string_field component_fields "fsCheck" "$fs_check_status"
 if [[ "$disk_smart_status" != "not_tested" ]]; then
   append_json_string_field component_fields "diskSmart" "$disk_smart_status"
 fi
+if [[ -n "$raid_json" ]]; then
+  raid_status=""
+  if [[ "$raid_json" =~ \"status\":\"([^\"]+)\" ]]; then
+    raid_status="${BASH_REMATCH[1]}"
+  fi
+  raid_status="$(trim "$raid_status")"
+  if [[ -n "$raid_status" ]]; then
+    append_json_string_field component_fields "serverRaid" "$raid_status"
+  fi
+fi
+server_services_status=""
+if [[ "$selected_services_json" != "[]" ]]; then
+  server_services_status="ok"
+fi
+if [[ "$failed_services_json" != "[]" ]]; then
+  server_services_status="nok"
+fi
+if [[ "$selected_services_json" =~ \"activeState\":\"([^\"]+)\" ]]; then
+  selected_services_scan="$selected_services_json"
+  while [[ "$selected_services_scan" =~ \"activeState\":\"([^\"]+)\" ]]; do
+    active_state="${BASH_REMATCH[1]}"
+    if [[ "$(trim "$active_state")" != "active" ]]; then
+      server_services_status="nok"
+      break
+    fi
+    selected_services_scan="${selected_services_scan#*\"activeState\":\"$active_state\"}"
+  done
+fi
+if [[ -n "$server_services_status" ]]; then
+  append_json_string_field component_fields "serverServices" "$server_services_status"
+fi
 if [[ -n "$thermal_json" ]]; then
   thermal_status=""
   if [[ "$thermal_json" =~ \"status\":\"([^\"]+)\" ]]; then
@@ -893,6 +924,8 @@ components_json="$(json_build_object "${component_fields[@]}")"
 diag_count=2
 [[ -n "$thermal_json" ]] && diag_count=$((diag_count + 1))
 [[ "$disk_smart_status" != "not_tested" ]] && diag_count=$((diag_count + 1))
+[[ -n "${raid_status:-}" ]] && diag_count=$((diag_count + 1))
+[[ -n "$server_services_status" ]] && diag_count=$((diag_count + 1))
 diag_fields=()
 append_json_string_field diag_fields "type" "linux_server"
 append_json_number_field diag_fields "diagnosticsPerformed" "$diag_count"

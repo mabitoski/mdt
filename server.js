@@ -3355,6 +3355,10 @@ const COMPONENT_LABELS = {
   gpuStress: 'GPU (stress)',
   networkPing: 'Ping',
   fsCheck: 'Check disque',
+  diskSmart: 'SMART disques',
+  serverRaid: 'RAID',
+  serverServices: 'Services critiques',
+  thermal: 'Thermique',
   gpu: 'GPU',
   usb: 'Ports USB',
   keyboard: 'Clavier',
@@ -3376,6 +3380,10 @@ const COMPONENT_ORDER = [
   'gpuStress',
   'networkPing',
   'fsCheck',
+  'diskSmart',
+  'serverRaid',
+  'serverServices',
+  'thermal',
   'gpu',
   'usb',
   'keyboard',
@@ -3387,7 +3395,7 @@ const COMPONENT_ORDER = [
   'biosPassword',
   'wifiStandard'
 ];
-const HIDDEN_COMPONENTS = new Set(['diskSmart', 'networkTest', 'memDiag', 'thermal']);
+const HIDDEN_COMPONENTS = new Set(['networkTest', 'memDiag']);
 const VALID_PAD_STATUSES = new Set(['ok', 'nok']);
 const VALID_USB_STATUSES = new Set(['ok', 'nok']);
 const DEFAULT_COMPONENT_STATUSES = new Set(['not_tested', 'ok', 'nok']);
@@ -3408,6 +3416,35 @@ const MANUAL_COMPONENT_DEFAULTS = {
   biosPassword: 'not_tested',
   wifiStandard: 'not_tested'
 };
+const MACHINE_PRIMARY_COMPONENT_KEYS = Object.freeze([
+  'usb',
+  'keyboard',
+  'camera',
+  'pad',
+  'badgeReader',
+  'cpu',
+  'gpu',
+  'biosBattery',
+  'biosLanguage',
+  'biosPassword',
+  'wifiStandard'
+]);
+const MACHINE_PRIMARY_DIAGNOSTIC_KEYS = Object.freeze([
+  'diskReadTest',
+  'diskWriteTest',
+  'ramTest',
+  'cpuTest',
+  'gpuTest',
+  'networkPing'
+]);
+const SERVER_PRIMARY_KEYS = Object.freeze([
+  'networkPing',
+  'fsCheck',
+  'diskSmart',
+  'serverRaid',
+  'serverServices',
+  'thermal'
+]);
 const MANUAL_REPORT_IMPORT_MAX_ROWS = 500;
 const MANUAL_REPORT_TEMPLATE_COLUMNS = [
   'hostname',
@@ -6440,11 +6477,31 @@ function buildReportFilters(
           'bios_clock_alert'
         )}, false))`
       );
+      values.push(component);
+      idx += 1;
+    } else if (component === 'serverRaid') {
+      clauses.push(
+        `lower(COALESCE(NULLIF(btrim(safe_jsonb(${col('components')}) ->> 'serverRaid'), ''), NULLIF(btrim(safe_jsonb(${col(
+          'payload'
+        )}) -> 'server' -> 'raid' ->> 'status'), ''))) = 'nok'`
+      );
+    } else if (component === 'serverServices') {
+      clauses.push(
+        `(
+          lower(COALESCE(NULLIF(btrim(safe_jsonb(${col('components')}) ->> 'serverServices'), ''), '')) = 'nok'
+          OR jsonb_array_length(COALESCE(safe_jsonb(${col('payload')}) -> 'server' -> 'failedServices', '[]'::jsonb)) > 0
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(COALESCE(safe_jsonb(${col('payload')}) -> 'server' -> 'selectedServices', '[]'::jsonb)) AS svc(item)
+            WHERE lower(COALESCE(svc.item ->> 'activeState', '')) <> 'active'
+          )
+        )`
+      );
     } else {
       clauses.push(`lower(safe_jsonb(${col('components')}) ->> $${idx}) = 'nok'`);
+      values.push(component);
+      idx += 1;
     }
-    values.push(component);
-    idx += 1;
   }
 
   const batteryUnderRaw =
@@ -9249,6 +9306,18 @@ function buildDerivedComponents(body, sources) {
     addStatus('thermal', body.thermal.status);
   }
 
+  const server =
+    body && body.server && typeof body.server === 'object' && !Array.isArray(body.server) ? body.server : null;
+  if (server) {
+    if (server.raid && typeof server.raid === 'object') {
+      addStatus('serverRaid', server.raid.status);
+    }
+    const serverServicesStatus = deriveServerServicesStatusFromPayload(body);
+    if (serverServicesStatus) {
+      derived.serverServices = serverServicesStatus;
+    }
+  }
+
   return Object.keys(derived).length > 0 ? derived : null;
 }
 
@@ -9406,6 +9475,111 @@ function normalizeStatusKey(value) {
   return normalizeStatus(value);
 }
 
+function parseJsonObjectOrNull(value) {
+  if (!value) {
+    return null;
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function isServerCategoryValue(value) {
+  return normalizeCategory(value) === 'server';
+}
+
+function hasComponentStatusValue(components, key) {
+  return Boolean(
+    components &&
+      typeof components === 'object' &&
+      !Array.isArray(components) &&
+      Object.prototype.hasOwnProperty.call(components, key)
+  );
+}
+
+function deriveServerServicesStatusFromPayload(payload) {
+  const server =
+    payload && payload.server && typeof payload.server === 'object' && !Array.isArray(payload.server)
+      ? payload.server
+      : null;
+  if (!server) {
+    return null;
+  }
+  const failedServices = Array.isArray(server.failedServices)
+    ? server.failedServices
+        .map((item) => (item == null ? '' : String(item).trim()))
+        .filter(Boolean)
+    : [];
+  const selectedServices = Array.isArray(server.selectedServices)
+    ? server.selectedServices.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const failingSelectedServices = selectedServices.filter((item) => {
+    const activeState = String(item.activeState || '')
+      .trim()
+      .toLowerCase();
+    return activeState && activeState !== 'active';
+  });
+  if (failedServices.length || failingSelectedServices.length) {
+    return 'nok';
+  }
+  if (selectedServices.length) {
+    return 'ok';
+  }
+  return null;
+}
+
+function applyServerTelemetryToComponents(components, payload, categoryValue = null) {
+  const payloadObject = parseJsonObjectOrNull(payload);
+  const isServer =
+    isServerCategoryValue(categoryValue) ||
+    (payloadObject && isServerCategoryValue(payloadObject.category));
+  if (!isServer) {
+    return components;
+  }
+  const next =
+    components && typeof components === 'object' && !Array.isArray(components)
+      ? { ...components }
+      : {};
+  const server =
+    payloadObject && payloadObject.server && typeof payloadObject.server === 'object' && !Array.isArray(payloadObject.server)
+      ? payloadObject.server
+      : null;
+  const raid =
+    server && server.raid && typeof server.raid === 'object' && !Array.isArray(server.raid)
+      ? server.raid
+      : null;
+  const thermal =
+    payloadObject && payloadObject.thermal && typeof payloadObject.thermal === 'object' && !Array.isArray(payloadObject.thermal)
+      ? payloadObject.thermal
+      : null;
+  if (!hasComponentStatusValue(next, 'serverRaid') && raid && raid.status) {
+    next.serverRaid = raid.status;
+  }
+  if (!hasComponentStatusValue(next, 'serverServices')) {
+    const servicesStatus = deriveServerServicesStatusFromPayload(payloadObject);
+    if (servicesStatus) {
+      next.serverServices = servicesStatus;
+    }
+  }
+  if (!hasComponentStatusValue(next, 'thermal') && thermal && thermal.status) {
+    next.thermal = thermal.status;
+  }
+  return next;
+}
+
+function shouldIncludeServerPrimaryKey(components, key) {
+  return hasComponentStatusValue(components, key);
+}
+
 function summarizeComponents(components) {
   const summary = { ok: 0, nok: 0, other: 0, total: 0 };
   if (!components || typeof components !== 'object' || Array.isArray(components)) {
@@ -9436,29 +9610,6 @@ function summarizeComponents(components) {
   return summary;
 }
 
-const DASHBOARD_PRIMARY_COMPONENT_KEYS = Object.freeze([
-  'usb',
-  'keyboard',
-  'camera',
-  'pad',
-  'badgeReader',
-  'cpu',
-  'gpu',
-  'biosBattery',
-  'biosLanguage',
-  'biosPassword',
-  'wifiStandard'
-]);
-
-const DASHBOARD_PRIMARY_DIAGNOSTIC_KEYS = Object.freeze([
-  'diskReadTest',
-  'diskWriteTest',
-  'ramTest',
-  'cpuTest',
-  'gpuTest',
-  'networkPing'
-]);
-
 function buildDashboardSummaryComponents(row) {
   let rawComponents = {};
   if (row && row.components && typeof row.components === 'object' && !Array.isArray(row.components)) {
@@ -9486,37 +9637,45 @@ function buildDashboardSummaryComponents(row) {
       merged[key] = value;
     }
   });
-  return applyClockAlertToComponents(merged, row);
+  return applyServerTelemetryToComponents(applyClockAlertToComponents(merged, row), row ? row.payload : null, row ? row.category : null);
 }
 
 function summarizeDashboardMachine(row) {
   const summary = { ok: 0, nok: 0, other: 0, total: 0 };
   const components = buildDashboardSummaryComponents(row);
+  if (isServerCategoryValue(row ? row.category : null)) {
+    SERVER_PRIMARY_KEYS.filter((key) => shouldIncludeServerPrimaryKey(components, key)).forEach((key) => {
+      const normalized = normalizeSummaryStatusForKey(key, components[key] || 'not_tested');
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
+  } else {
+    MACHINE_PRIMARY_COMPONENT_KEYS.forEach((key) => {
+      const normalized = normalizeSummaryStatusForKey(key, components[key] || 'not_tested');
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
 
-  DASHBOARD_PRIMARY_COMPONENT_KEYS.forEach((key) => {
-    const normalized = normalizeSummaryStatusForKey(key, components[key] || 'not_tested');
-    if (normalized) {
-      addSummaryStatus(summary, normalized);
+    MACHINE_PRIMARY_DIAGNOSTIC_KEYS.forEach((key) => {
+      const normalized = normalizeSummaryStatusForKey(key, components[key] || 'not_tested');
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
+
+    if (Object.prototype.hasOwnProperty.call(components, 'fsCheck')) {
+      const normalized = normalizeSummaryStatusForKey('fsCheck', components.fsCheck || 'not_tested');
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
     }
-  });
 
-  DASHBOARD_PRIMARY_DIAGNOSTIC_KEYS.forEach((key) => {
-    const normalized = normalizeSummaryStatusForKey(key, components[key] || 'not_tested');
-    if (normalized) {
-      addSummaryStatus(summary, normalized);
+    const batteryHealth = normalizeBatteryHealth(row ? row.battery_health || row.batteryHealth : null);
+    if (batteryHealth != null) {
+      addSummaryStatus(summary, batteryHealth < ALERT_BATTERY_THRESHOLD ? 'nok' : 'ok');
     }
-  });
-
-  if (Object.prototype.hasOwnProperty.call(components, 'fsCheck')) {
-    const normalized = normalizeSummaryStatusForKey('fsCheck', components.fsCheck || 'not_tested');
-    if (normalized) {
-      addSummaryStatus(summary, normalized);
-    }
-  }
-
-  const batteryHealth = normalizeBatteryHealth(row ? row.battery_health || row.batteryHealth : null);
-  if (batteryHealth != null) {
-    addSummaryStatus(summary, batteryHealth < ALERT_BATTERY_THRESHOLD ? 'nok' : 'ok');
   }
 
   const commentValue = row && typeof row.comment === 'string' ? row.comment.trim() : '';
@@ -9583,72 +9742,80 @@ function normalizeSummaryStatusForKey(key, value) {
   return statusKey;
 }
 
-function summarizePdfDetailForReport(components, payload, commentValue = '') {
+function summarizePdfDetailForReport(components, payload, commentValue = '', categoryValue = null) {
   const summary = { ok: 0, nok: 0, other: 0, total: 0 };
-  const mergedComponents = withManualComponentDefaults(
-    components && typeof components === 'object' && !Array.isArray(components) ? components : {}
+  const payloadObject = parseJsonObjectOrNull(payload);
+  const isServer =
+    isServerCategoryValue(categoryValue) ||
+    (payloadObject && isServerCategoryValue(payloadObject.category));
+  const mergedComponents = applyServerTelemetryToComponents(
+    isServer
+      ? components && typeof components === 'object' && !Array.isArray(components)
+        ? components
+        : {}
+      : withManualComponentDefaults(
+          components && typeof components === 'object' && !Array.isArray(components) ? components : {}
+        ),
+    payloadObject,
+    categoryValue
   );
-  const componentKeys = [
-    'usb',
-    'keyboard',
-    'camera',
-    'pad',
-    'badgeReader',
-    'cpu',
-    'gpu',
-    'biosBattery',
-    'biosLanguage',
-    'biosPassword',
-    'wifiStandard'
-  ];
 
-  componentKeys.forEach((key) => {
-    const raw = Object.prototype.hasOwnProperty.call(mergedComponents, key)
-      ? mergedComponents[key]
-      : 'not_tested';
-    const normalized = normalizeSummaryStatusForKey(key, raw || 'not_tested');
-    if (normalized) {
-      addSummaryStatus(summary, normalized);
-    }
-  });
-
-  const tests =
-    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
-      ? payload.tests
-      : null;
-  const diskTests = resolveAuthoritativeDiskTests(payload);
-  const diagnosticCandidates = [];
-  if (tests) {
-    diagnosticCandidates.push(
-      (diskTests && diskTests.diskRead) || mergedComponents.diskReadTest || tests.diskRead || 'not_tested',
-      (diskTests && diskTests.diskWrite) || mergedComponents.diskWriteTest || tests.diskWrite || 'not_tested',
-      tests.ram || mergedComponents.ramTest || 'not_tested',
-      tests.cpu || mergedComponents.cpuTest || 'not_tested',
-      tests.gpu || mergedComponents.gpuTest || 'not_tested',
-      tests.networkPing || mergedComponents.networkPing || 'not_tested'
-    );
-    if (tests.fsCheck || mergedComponents.fsCheck) {
-      diagnosticCandidates.push(tests.fsCheck || mergedComponents.fsCheck || 'not_tested');
-    }
+  if (isServer) {
+    SERVER_PRIMARY_KEYS.filter((key) => shouldIncludeServerPrimaryKey(mergedComponents, key)).forEach((key) => {
+      const normalized = normalizeSummaryStatusForKey(key, mergedComponents[key] || 'not_tested');
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
   } else {
-    diagnosticCandidates.push(
-      mergedComponents.diskReadTest || 'not_tested',
-      mergedComponents.diskWriteTest || 'not_tested',
-      mergedComponents.ramTest || 'not_tested',
-      mergedComponents.cpuTest || 'not_tested',
-      mergedComponents.gpuTest || 'not_tested',
-      mergedComponents.networkPing || 'not_tested'
-    );
-    if (mergedComponents.fsCheck) {
-      diagnosticCandidates.push(mergedComponents.fsCheck);
+    MACHINE_PRIMARY_COMPONENT_KEYS.forEach((key) => {
+      const raw = Object.prototype.hasOwnProperty.call(mergedComponents, key)
+        ? mergedComponents[key]
+        : 'not_tested';
+      const normalized = normalizeSummaryStatusForKey(key, raw || 'not_tested');
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
+
+    const tests =
+      payloadObject && payloadObject.tests && typeof payloadObject.tests === 'object' && !Array.isArray(payloadObject.tests)
+        ? payloadObject.tests
+        : null;
+    const diskTests = resolveAuthoritativeDiskTests(payloadObject);
+    const diagnosticCandidates = [];
+    if (tests) {
+      diagnosticCandidates.push(
+        (diskTests && diskTests.diskRead) || mergedComponents.diskReadTest || tests.diskRead || 'not_tested',
+        (diskTests && diskTests.diskWrite) || mergedComponents.diskWriteTest || tests.diskWrite || 'not_tested',
+        tests.ram || mergedComponents.ramTest || 'not_tested',
+        tests.cpu || mergedComponents.cpuTest || 'not_tested',
+        tests.gpu || mergedComponents.gpuTest || 'not_tested',
+        tests.networkPing || mergedComponents.networkPing || 'not_tested'
+      );
+      if (tests.fsCheck || mergedComponents.fsCheck) {
+        diagnosticCandidates.push(tests.fsCheck || mergedComponents.fsCheck || 'not_tested');
+      }
+    } else {
+      diagnosticCandidates.push(
+        mergedComponents.diskReadTest || 'not_tested',
+        mergedComponents.diskWriteTest || 'not_tested',
+        mergedComponents.ramTest || 'not_tested',
+        mergedComponents.cpuTest || 'not_tested',
+        mergedComponents.gpuTest || 'not_tested',
+        mergedComponents.networkPing || 'not_tested'
+      );
+      if (mergedComponents.fsCheck) {
+        diagnosticCandidates.push(mergedComponents.fsCheck);
+      }
     }
+    diagnosticCandidates.forEach((value) => {
+      const normalized = normalizeStatusKey(value);
+      if (normalized) {
+        addSummaryStatus(summary, normalized);
+      }
+    });
   }
-  diagnosticCandidates.forEach((value) => {
-    const normalized = normalizeStatusKey(value);
-    if (normalized) {
-      addSummaryStatus(summary, normalized);
-    }
-  });
 
   if (typeof commentValue === 'string' && commentValue.trim()) {
     addSummaryStatus(summary, 'nok');
@@ -10204,17 +10371,24 @@ function formatWinSatNote(score) {
   return 'Excellent';
 }
 
-function buildDiagnosticsRows(payload, components = null) {
+function buildDiagnosticsRows(payload, components = null, categoryValue = null) {
   const rows = [];
+  const payloadObject = parseJsonObjectOrNull(payload);
+  const componentMap = applyServerTelemetryToComponents(
+    components && typeof components === 'object' && !Array.isArray(components) ? components : {},
+    payloadObject,
+    categoryValue
+  );
+  const isServer =
+    isServerCategoryValue(categoryValue) ||
+    (payloadObject && isServerCategoryValue(payloadObject.category));
   const tests =
-    payload && payload.tests && typeof payload.tests === 'object' && !Array.isArray(payload.tests)
-      ? payload.tests
+    payloadObject && payloadObject.tests && typeof payloadObject.tests === 'object' && !Array.isArray(payloadObject.tests)
+      ? payloadObject.tests
       : null;
-  const diskTests = resolveAuthoritativeDiskTests(payload);
-  const componentMap =
-    components && typeof components === 'object' && !Array.isArray(components) ? components : {};
+  const diskTests = resolveAuthoritativeDiskTests(payloadObject);
   const winSat =
-    payload && payload.winsat && typeof payload.winsat === 'object' ? payload.winsat : null;
+    payloadObject && payloadObject.winsat && typeof payloadObject.winsat === 'object' ? payloadObject.winsat : null;
   const winSpr =
     winSat && winSat.winSPR && typeof winSat.winSPR === 'object' ? winSat.winSPR : null;
   const winSatCpuScore = winSpr && typeof winSpr.CpuScore === 'number' ? winSpr.CpuScore : null;
@@ -10235,13 +10409,83 @@ function buildDiagnosticsRows(payload, components = null) {
     }
     return null;
   };
-
   const addRow = (label, status, extra) => {
     if (status == null && !extra) {
       return;
     }
     rows.push({ label, status, extra });
   };
+
+  if (isServer) {
+    const server =
+      payloadObject && payloadObject.server && typeof payloadObject.server === 'object' && !Array.isArray(payloadObject.server)
+        ? payloadObject.server
+        : null;
+    const raid =
+      server && server.raid && typeof server.raid === 'object' && !Array.isArray(server.raid)
+        ? server.raid
+        : null;
+    const thermal =
+      payloadObject && payloadObject.thermal && typeof payloadObject.thermal === 'object' && !Array.isArray(payloadObject.thermal)
+        ? payloadObject.thermal
+        : null;
+    const selectedServices = Array.isArray(server && server.selectedServices)
+      ? server.selectedServices.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+      : [];
+    const failedServices = Array.isArray(server && server.failedServices)
+      ? server.failedServices
+          .map((item) => (item == null ? '' : String(item).trim()))
+          .filter(Boolean)
+      : [];
+    const thermalMetric =
+      thermal && typeof thermal.maxCelsius === 'number' && Number.isFinite(thermal.maxCelsius)
+        ? `${thermal.maxCelsius.toFixed(1).replace(/\\.0$/, '')} °C`
+        : null;
+    const servicesMetric = selectedServices.length
+      ? selectedServices
+          .map((item) => String(item.name || '').trim())
+          .filter(Boolean)
+          .join(' • ')
+      : failedServices.length
+        ? failedServices.join(' • ')
+        : null;
+    const loadMetric =
+      server &&
+      [server.loadAverage1m, server.loadAverage5m, server.loadAverage15m]
+        .map((value) => parseMetricNumber(value))
+        .some((value) => value != null)
+        ? [
+            ['1m', parseMetricNumber(server.loadAverage1m)],
+            ['5m', parseMetricNumber(server.loadAverage5m)],
+            ['15m', parseMetricNumber(server.loadAverage15m)]
+          ]
+            .filter(([, value]) => value != null)
+            .map(([label, value]) => `${label} ${value.toFixed(2).replace(/\\.00$/, '')}`)
+            .join(' / ')
+        : null;
+
+    addRow('Ping', pickStatus(tests && tests.networkPing, componentMap.networkPing, 'not_tested'), tests ? tests.networkPingTarget || null : null);
+    addRow('Check disque', pickStatus(tests && tests.fsCheck, componentMap.fsCheck, null), null);
+    if (Object.prototype.hasOwnProperty.call(componentMap, 'diskSmart')) {
+      addRow('SMART disques', componentMap.diskSmart || 'not_tested', null);
+    }
+    if (Object.prototype.hasOwnProperty.call(componentMap, 'serverRaid')) {
+      addRow('RAID', componentMap.serverRaid || 'not_tested', raid && raid.mdstat ? 'mdstat' : null);
+    }
+    if (Object.prototype.hasOwnProperty.call(componentMap, 'serverServices')) {
+      addRow('Services critiques', componentMap.serverServices || 'not_tested', servicesMetric);
+    }
+    if (Object.prototype.hasOwnProperty.call(componentMap, 'thermal')) {
+      addRow('Thermique', componentMap.thermal || 'not_tested', thermalMetric);
+    }
+    if (server && server.uptimeSeconds != null) {
+      addRow('Uptime', null, `${Math.round(server.uptimeSeconds / 3600)} h`);
+    }
+    if (loadMetric) {
+      addRow('Charge systeme', null, loadMetric);
+    }
+    return rows;
+  }
 
   const diskReadStatus = pickStatus(
     diskTests && diskTests.diskRead,
@@ -10962,10 +11206,17 @@ function drawReportPdf(doc, data) {
   doc.fillColor(palette.title).font('Helvetica-Bold').fontSize(14.6).text(`Nom du poste: ${truncatePdfText(data.title, 46)}`, titleX, headerY + 22, {
     width: titleWidth
   });
-  doc.fillColor(palette.accentPillText).font('Helvetica-Bold').fontSize(7.8).text('Rapport machine', badgeX, headerY + 16, {
-    width: badgeWidth,
-    align: 'center'
-  });
+  if (isServerCategoryValue(data.category)) {
+    doc.fillColor(palette.accentPillText).font('Helvetica-Bold').fontSize(7.8).text('Rapport serveur', badgeX, headerY + 16, {
+      width: badgeWidth,
+      align: 'center'
+    });
+  } else {
+    doc.fillColor(palette.accentPillText).font('Helvetica-Bold').fontSize(7.8).text('Rapport machine', badgeX, headerY + 16, {
+      width: badgeWidth,
+      align: 'center'
+    });
+  }
   doc
     .fillColor(palette.headerSubText)
     .font('Helvetica-Bold')
@@ -11010,15 +11261,9 @@ function drawReportPdf(doc, data) {
     }
     diagnosticsMap.set(normalizedLabel, { ...row, label: normalizedLabel });
   });
-  const diagnosticsOrder = [
-    'Lecture disque',
-    'Ecriture disque',
-    'RAM (WinSAT)',
-    'CPU (WinSAT)',
-    'GPU (WinSAT)',
-    'Ping',
-    'Check disk'
-  ];
+  const diagnosticsOrder = isServerCategoryValue(data.category)
+    ? ['Ping', 'Check disk', 'SMART disques', 'RAID', 'Services critiques', 'Thermique', 'Uptime', 'Charge systeme']
+    : ['Lecture disque', 'Ecriture disque', 'RAM (WinSAT)', 'CPU (WinSAT)', 'GPU (WinSAT)', 'Ping', 'Check disk'];
   const diagnosticsRows = diagnosticsOrder
     .map((label) => diagnosticsMap.get(label))
     .filter(Boolean);
@@ -14291,6 +14536,7 @@ app.get('/api/machines/:id', requireAuth, async (req, res) => {
     machinePayload = null;
   }
   payload = mergeHardwarePayload(payload, machinePayload);
+  components = applyServerTelemetryToComponents(components, payload, row.category);
   const autopilotHash = buildAutopilotHash(payload);
 
   const relatedSerial = normalizeSerial(row.serial_number);
@@ -15944,11 +16190,11 @@ function buildReportPdfPayload(row) {
     keyboardStatus: row.keyboard_status,
     padStatus: row.pad_status,
     badgeReaderStatus: row.badge_reader_status,
-    diagnostics: buildDiagnosticsRows(payload, components),
+    diagnostics: buildDiagnosticsRows(payload, components, category),
     inventoryRows: buildInventoryRows(payload),
     components: buildComponentRows(components),
     summary: summarizeComponents(components),
-    summaryForPdf: summarizePdfDetailForReport(components, payload, row.comment || ''),
+    summaryForPdf: summarizePdfDetailForReport(components, payload, row.comment || '', category),
     generatedAt: formatDateTime(new Date())
   };
 
