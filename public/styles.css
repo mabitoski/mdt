@@ -2641,6 +2641,11 @@ button.badge:focus-visible {
   color: #9b4a16;
 }
 
+.badge[data-category="server"] {
+  background: rgba(31, 63, 141, 0.15);
+  color: #1f3f8d;
+}
+
 .badge[data-category="unknown"] {
   background: rgba(60, 64, 60, 0.12);
   color: #4b4b4b;

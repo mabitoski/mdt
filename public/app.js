@@ -133,6 +133,7 @@ const lastUpdatedEl = document.getElementById('last-updated');
 const statTotal = document.getElementById('stat-total');
 const statLaptop = document.getElementById('stat-laptop');
 const statDesktop = document.getElementById('stat-desktop');
+const statServer = document.getElementById('stat-server');
 const statUnknown = document.getElementById('stat-unknown');
 const statLotCard = document.getElementById('stat-lot-card');
 const statLotProgress = document.getElementById('stat-lot-progress');
@@ -206,9 +207,10 @@ let reportLoadRecoveryTriggered = false;
 const categoryLabels = {
   laptop: 'Portable',
   desktop: 'Tour',
+  server: 'Serveur',
   unknown: 'Inconnu'
 };
-const categoryCycle = ['desktop', 'unknown', 'laptop'];
+const categoryCycle = ['desktop', 'server', 'unknown', 'laptop'];
 const DEFAULT_TAG_LABEL = 'En cours';
 const DEFAULT_LOT_LABEL = 'Aucun lot';
 const DEFAULT_PALLET_LABEL = 'Aucune palette';
@@ -315,7 +317,7 @@ const prefsStorageKey = `mdt-ui-preferences${storageSuffix}`;
 const tagFilterStorageKey = `mdt-tag-filter${storageSuffix}`;
 const tagFilterNameStorageKey = `mdt-tag-filter-names${storageSuffix}`;
 const filterCollapseStorageKey = `mdt-filter-collapse${storageSuffix}`;
-const categoryFilterOptions = new Set(['all', 'laptop', 'desktop', 'unknown']);
+const categoryFilterOptions = new Set(['all', 'laptop', 'desktop', 'server', 'unknown']);
 const commentFilterOptions = new Set(['all', 'with', 'without']);
 const quickFilterTypes = new Set(['serial', 'mac', 'tech', 'summary']);
 const summaryFilterValues = new Set(['ok', 'nok', 'nt']);
@@ -1096,6 +1098,7 @@ async function loadStats() {
       total: data.total || 0,
       laptop: data.laptop || 0,
       desktop: data.desktop || 0,
+      server: data.server || 0,
       unknown: data.unknown || 0
     };
     state.techOptions = Array.isArray(data.techs) ? data.techs : [];
@@ -3296,7 +3299,7 @@ function adjustFilteredStatusCounts(previousMachine, nextMachine) {
 }
 
 function normalizeCategory(value) {
-  if (value === 'laptop' || value === 'desktop' || value === 'unknown') {
+  if (value === 'laptop' || value === 'desktop' || value === 'server' || value === 'unknown') {
     return value;
   }
   return 'unknown';
@@ -3992,6 +3995,144 @@ function formatBatteryPowerSource(value) {
     return 'Batterie';
   }
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function getServerTelemetry(detail) {
+  const payload =
+    detail && detail.payload && typeof detail.payload === 'object' && !Array.isArray(detail.payload)
+      ? detail.payload
+      : null;
+  const server =
+    payload && payload.server && typeof payload.server === 'object' && !Array.isArray(payload.server)
+      ? payload.server
+      : null;
+  const network =
+    payload && payload.network && typeof payload.network === 'object' && !Array.isArray(payload.network)
+      ? payload.network
+      : null;
+  const thermal =
+    payload && payload.thermal && typeof payload.thermal === 'object' && !Array.isArray(payload.thermal)
+      ? payload.thermal
+      : null;
+  const raid =
+    server && server.raid && typeof server.raid === 'object' && !Array.isArray(server.raid)
+      ? server.raid
+      : null;
+  const selectedServices = Array.isArray(server && server.selectedServices)
+    ? server.selectedServices.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const failedServices = Array.isArray(server && server.failedServices)
+    ? server.failedServices
+        .map((item) => (item == null ? '' : String(item).trim()))
+        .filter(Boolean)
+    : [];
+  const failingSelectedServices = selectedServices.filter((item) => {
+    const activeState = String(item.activeState || '')
+      .trim()
+      .toLowerCase();
+    return activeState && activeState !== 'active';
+  });
+
+  return {
+    server,
+    network,
+    thermal,
+    raid,
+    selectedServices,
+    failedServices,
+    failingSelectedServices
+  };
+}
+
+function formatDurationCompact(seconds) {
+  const numeric = parseNumericMetric(seconds);
+  if (numeric == null || numeric < 0) {
+    return '--';
+  }
+  let remaining = Math.floor(numeric);
+  const days = Math.floor(remaining / 86400);
+  remaining -= days * 86400;
+  const hours = Math.floor(remaining / 3600);
+  remaining -= hours * 3600;
+  const minutes = Math.floor(remaining / 60);
+  const parts = [];
+  if (days > 0) {
+    parts.push(`${days} j`);
+  }
+  if (hours > 0) {
+    parts.push(`${hours} h`);
+  }
+  if (minutes > 0 && parts.length < 2) {
+    parts.push(`${minutes} min`);
+  }
+  if (!parts.length) {
+    parts.push('< 1 min');
+  }
+  return parts.join(' ');
+}
+
+function formatServerLoadSummary(server) {
+  if (!server || typeof server !== 'object') {
+    return '--';
+  }
+  const values = [
+    ['1m', parseNumericMetric(server.loadAverage1m)],
+    ['5m', parseNumericMetric(server.loadAverage5m)],
+    ['15m', parseNumericMetric(server.loadAverage15m)]
+  ].filter(([, value]) => value != null);
+  if (!values.length) {
+    return '--';
+  }
+  return values
+    .map(([label, value]) => `${label} ${value.toFixed(2).replace(/\.00$/, '')}`)
+    .join(' / ');
+}
+
+function formatServerThermalSummary(thermal) {
+  if (!thermal || typeof thermal !== 'object') {
+    return '--';
+  }
+  const maxCelsius = parseNumericMetric(thermal.maxCelsius);
+  if (maxCelsius == null) {
+    return '--';
+  }
+  return `${maxCelsius.toFixed(1).replace(/\.0$/, '')} °C`;
+}
+
+function formatServerRaidSummary(raid) {
+  if (!raid || typeof raid !== 'object') {
+    return '--';
+  }
+  const mdstat = typeof raid.mdstat === 'string' ? raid.mdstat.trim() : '';
+  if (!mdstat) {
+    return '--';
+  }
+  const firstUsefulLine = mdstat
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line && line !== 'Personalities :' && line !== 'unused devices: <none>');
+  return firstUsefulLine || '--';
+}
+
+function formatServerSelectedServicesSummary(services) {
+  if (!Array.isArray(services) || !services.length) {
+    return '--';
+  }
+  return services
+    .map((item) => {
+      const name = item && item.name ? String(item.name).trim() : '--';
+      const activeState = item && item.activeState ? String(item.activeState).trim() : 'unknown';
+      const subState = item && item.subState ? String(item.subState).trim() : '';
+      return subState ? `${name} (${activeState}/${subState})` : `${name} (${activeState})`;
+    })
+    .join(' • ');
+}
+
+function formatServerFailedServicesSummary(services) {
+  if (!Array.isArray(services) || !services.length) {
+    return '--';
+  }
+  return services.join(' • ');
 }
 
 function getBatteryTelemetry(source) {
@@ -5649,16 +5790,19 @@ function updateStats() {
     setTextContent(statTotal, state.stats.total || 0);
     setTextContent(statLaptop, state.stats.laptop || 0);
     setTextContent(statDesktop, state.stats.desktop || 0);
+    setTextContent(statServer, state.stats.server || 0);
     setTextContent(statUnknown, state.stats.unknown || 0);
   } else {
     const total = uniqueMachines.length;
     const laptop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'laptop').length;
     const desktop = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'desktop').length;
+    const server = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'server').length;
     const unknown = uniqueMachines.filter((m) => normalizeCategory(m.category) === 'unknown').length;
 
     setTextContent(statTotal, total);
     setTextContent(statLaptop, laptop);
     setTextContent(statDesktop, desktop);
+    setTextContent(statServer, server);
     setTextContent(statUnknown, unknown);
   }
   renderLotMetrics();
@@ -5809,7 +5953,7 @@ function sortMachines(list) {
   }
 
   if (sortMode === 'category') {
-    const order = { laptop: 0, desktop: 1, unknown: 2 };
+    const order = { laptop: 0, desktop: 1, server: 2, unknown: 3 };
     sorted.sort((a, b) => {
       const categoryA = normalizeCategory(a.category);
       const categoryB = normalizeCategory(b.category);
@@ -5847,15 +5991,12 @@ function buildDiagnosticsHtml(detail) {
         ? winSpr.GraphicsScore
         : null
     : null;
-  const thermal =
-    payload && payload.thermal && typeof payload.thermal === 'object' && !Array.isArray(payload.thermal)
-      ? payload.thermal
-      : null;
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const components =
     detail && detail.components && typeof detail.components === 'object' && !Array.isArray(detail.components)
       ? detail.components
       : {};
+  const serverTelemetry = getServerTelemetry(detail);
 
   const rows = [];
 
@@ -5926,6 +6067,51 @@ function buildDiagnosticsHtml(detail) {
     if (components.fsCheck) {
       addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components), null, 'fsCheck');
     }
+  }
+
+  if (serverTelemetry.server) {
+    const uptimeSummary = formatDurationCompact(serverTelemetry.server.uptimeSeconds);
+    if (uptimeSummary !== '--') {
+      addRow('Uptime', null, uptimeSummary, null);
+    }
+    const loadSummary = formatServerLoadSummary(serverTelemetry.server);
+    if (loadSummary !== '--') {
+      addRow('Charge systeme', null, loadSummary, null);
+    }
+  }
+  if (serverTelemetry.thermal) {
+    addRow(
+      'Thermique',
+      serverTelemetry.thermal.status || 'not_tested',
+      formatServerThermalSummary(serverTelemetry.thermal),
+      null
+    );
+  }
+  if (serverTelemetry.raid) {
+    addRow(
+      'RAID',
+      serverTelemetry.raid.status || 'not_tested',
+      formatServerRaidSummary(serverTelemetry.raid),
+      null
+    );
+  }
+  if (serverTelemetry.selectedServices.length) {
+    addRow(
+      'Services critiques',
+      serverTelemetry.failingSelectedServices.length ? 'nok' : 'ok',
+      formatServerSelectedServicesSummary(serverTelemetry.selectedServices),
+      null
+    );
+  }
+  if (serverTelemetry.failedServices.length) {
+    addRow(
+      'Services en echec',
+      'nok',
+      formatServerFailedServicesSummary(serverTelemetry.failedServices),
+      null
+    );
+  } else if (serverTelemetry.selectedServices.length) {
+    addRow('Services en echec', 'ok', 'Aucun service en echec', null);
   }
 
   if (!rows.length) {
@@ -6188,6 +6374,7 @@ function buildDrawerDiagnosticsRows(detail) {
   const winSpr =
     winSat && winSat.winSPR && typeof winSat.winSPR === 'object' ? winSat.winSPR : null;
   const components = resolveDetailComponents(detail);
+  const serverTelemetry = getServerTelemetry(detail);
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const rows = [];
 
@@ -6237,6 +6424,51 @@ function buildDrawerDiagnosticsRows(detail) {
     if (components.fsCheck) {
       addRow('Check disque', resolveUnifiedComponentStatus('fsCheck', components), null, 'fsCheck');
     }
+  }
+
+  if (serverTelemetry.server) {
+    const uptimeSummary = formatDurationCompact(serverTelemetry.server.uptimeSeconds);
+    if (uptimeSummary !== '--') {
+      addRow('Uptime', null, uptimeSummary, null);
+    }
+    const loadSummary = formatServerLoadSummary(serverTelemetry.server);
+    if (loadSummary !== '--') {
+      addRow('Charge systeme', null, loadSummary, null);
+    }
+  }
+  if (serverTelemetry.thermal) {
+    addRow(
+      'Thermique',
+      serverTelemetry.thermal.status || 'not_tested',
+      formatServerThermalSummary(serverTelemetry.thermal),
+      null
+    );
+  }
+  if (serverTelemetry.raid) {
+    addRow(
+      'RAID',
+      serverTelemetry.raid.status || 'not_tested',
+      formatServerRaidSummary(serverTelemetry.raid),
+      null
+    );
+  }
+  if (serverTelemetry.selectedServices.length) {
+    addRow(
+      'Services critiques',
+      serverTelemetry.failingSelectedServices.length ? 'nok' : 'ok',
+      formatServerSelectedServicesSummary(serverTelemetry.selectedServices),
+      null
+    );
+  }
+  if (serverTelemetry.failedServices.length) {
+    addRow(
+      'Services en echec',
+      'nok',
+      formatServerFailedServicesSummary(serverTelemetry.failedServices),
+      null
+    );
+  } else if (serverTelemetry.selectedServices.length) {
+    addRow('Services en echec', 'ok', 'Aucun service en echec', null);
   }
 
   return rows.join('');
@@ -6289,6 +6521,54 @@ function buildDrawerDetailHtml(detail) {
   const remoteWinRmListeners = formatRemoteAccessWinRmListeners(remoteAccess);
   const remoteCollectedAt =
     remoteAccess && remoteAccess.collectedAt ? formatDateTime(remoteAccess.collectedAt) : '--';
+  const serverTelemetry = getServerTelemetry(detail);
+  const serverNetwork = serverTelemetry.network;
+  const serverSummaryCards = [];
+  if (serverTelemetry.server) {
+    const uptimeSummary = formatDurationCompact(serverTelemetry.server.uptimeSeconds);
+    if (uptimeSummary !== '--') {
+      serverSummaryCards.push(
+        `<div class="drawer-mini-card"><span>Uptime</span><strong>${escapeHtml(uptimeSummary)}</strong></div>`
+      );
+    }
+    const loadSummary = formatServerLoadSummary(serverTelemetry.server);
+    if (loadSummary !== '--') {
+      serverSummaryCards.push(
+        `<div class="drawer-mini-card"><span>Charge systeme</span><strong>${escapeHtml(loadSummary)}</strong></div>`
+      );
+    }
+  }
+  if (serverTelemetry.raid) {
+    const raidStatus = String(serverTelemetry.raid.status || '')
+      .trim()
+      .toLowerCase();
+    const raidLabel = raidStatus === 'nok' ? 'Alerte' : raidStatus === 'ok' ? 'OK' : '--';
+    serverSummaryCards.push(
+      `<div class="drawer-mini-card${
+        raidStatus === 'nok' ? ' is-alert' : ''
+      }"><span>RAID</span><strong>${escapeHtml(raidLabel)}</strong></div>`
+    );
+  }
+  if (serverTelemetry.selectedServices.length) {
+    serverSummaryCards.push(
+      `<div class="drawer-mini-card${
+        serverTelemetry.failingSelectedServices.length ? ' is-alert' : ''
+      }"><span>Services critiques</span><strong>${escapeHtml(
+        serverTelemetry.failingSelectedServices.length
+          ? `${serverTelemetry.failingSelectedServices.length} en alerte`
+          : 'OK'
+      )}</strong></div>`
+    );
+  }
+  if (serverTelemetry.thermal) {
+    serverSummaryCards.push(
+      `<div class="drawer-mini-card${
+        String(serverTelemetry.thermal.status || '').trim().toLowerCase() === 'nok' ? ' is-alert' : ''
+      }"><span>Temperature max</span><strong>${escapeHtml(
+        formatServerThermalSummary(serverTelemetry.thermal)
+      )}</strong></div>`
+    );
+  }
 
   if (detailsDrawerTitle) {
     detailsDrawerTitle.textContent = formatPrimary(detail);
@@ -6370,6 +6650,7 @@ function buildDrawerDetailHtml(detail) {
       <div class="drawer-mini-card${clockAlert && clockAlert.active ? ' is-alert' : ''}"><span>Pile BIOS</span><strong>${escapeHtml(
         clockAlert && clockAlert.active ? 'Controle requis' : 'RAS'
       )}</strong></div>
+      ${serverSummaryCards.join('')}
     </div>
   `;
 
@@ -6498,6 +6779,26 @@ function buildDrawerDetailHtml(detail) {
       <div><span>Premier passage</span><strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong></div>
       <div><span>Dernier passage</span><strong>${escapeHtml(formatDateTime(detail.lastSeen))}</strong></div>
       <div><span>IP serveur</span><strong>${escapeHtml(detail.lastIp || '--')}</strong></div>
+      ${
+        serverNetwork && serverNetwork.defaultGateway
+          ? `<div><span>Passerelle</span><strong>${escapeHtml(serverNetwork.defaultGateway)}</strong></div>`
+          : ''
+      }
+      ${
+        serverNetwork && serverNetwork.primaryIpv4
+          ? `<div><span>IPv4 primaire</span><strong>${escapeHtml(serverNetwork.primaryIpv4)}</strong></div>`
+          : ''
+      }
+      ${
+        serverNetwork && serverNetwork.primaryIpv6
+          ? `<div><span>IPv6 primaire</span><strong>${escapeHtml(serverNetwork.primaryIpv6)}</strong></div>`
+          : ''
+      }
+      ${
+        serverNetwork && Array.isArray(serverNetwork.interfaces) && serverNetwork.interfaces.length
+          ? `<div><span>Interfaces reseau</span><strong>${escapeHtml(String(serverNetwork.interfaces.length))}</strong></div>`
+          : ''
+      }
       ${
         remoteAccess
           ? `

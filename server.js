@@ -3311,9 +3311,11 @@ const ingestLimiter = rateLimit({
 
 const LAPTOP_CHASSIS_CODES = new Set([8, 9, 10, 11, 12, 14, 18, 21, 31]);
 const DESKTOP_CHASSIS_CODES = new Set([3, 4, 5, 6, 7, 15, 16]);
+const SERVER_CHASSIS_CODES = new Set([17, 23, 28, 29]);
 const CATEGORY_LABELS = {
   laptop: 'Portable',
   desktop: 'Tour',
+  server: 'Serveur',
   unknown: 'Inconnu'
 };
 const DEFAULT_REPORT_TAG = 'En cours';
@@ -6589,6 +6591,9 @@ function normalizeCategory(value) {
     if (DESKTOP_CHASSIS_CODES.has(value)) {
       return 'desktop';
     }
+    if (SERVER_CHASSIS_CODES.has(value)) {
+      return 'server';
+    }
     return 'unknown';
   }
 
@@ -6603,6 +6608,9 @@ function normalizeCategory(value) {
     }
     if (DESKTOP_CHASSIS_CODES.has(numeric)) {
       return 'desktop';
+    }
+    if (SERVER_CHASSIS_CODES.has(numeric)) {
+      return 'server';
     }
   }
   if (
@@ -6621,6 +6629,16 @@ function normalizeCategory(value) {
     normalized.includes('workstation')
   ) {
     return 'desktop';
+  }
+  if (
+    normalized.includes('server') ||
+    normalized.includes('serveur') ||
+    normalized.includes('rack mount') ||
+    normalized.includes('rackmount') ||
+    normalized.includes('rack') ||
+    normalized.includes('blade')
+  ) {
+    return 'server';
   }
   return 'unknown';
 }
@@ -13451,6 +13469,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE category = 'laptop') AS laptop,
             COUNT(*) FILTER (WHERE category = 'desktop') AS desktop,
+            COUNT(*) FILTER (WHERE category = 'server') AS server,
             COUNT(*) FILTER (WHERE category = 'unknown') AS unknown
           FROM latest
           ${where}
@@ -13463,6 +13482,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE category = 'laptop') AS laptop,
             COUNT(*) FILTER (WHERE category = 'desktop') AS desktop,
+            COUNT(*) FILTER (WHERE category = 'server') AS server,
             COUNT(*) FILTER (WHERE category = 'unknown') AS unknown
           FROM reports
           ${where}
@@ -13527,6 +13547,7 @@ app.get('/api/stats', requireAuth, async (req, res) => {
       total: Number.parseInt(row?.total || '0', 10),
       laptop: Number.parseInt(row?.laptop || '0', 10),
       desktop: Number.parseInt(row?.desktop || '0', 10),
+      server: Number.parseInt(row?.server || '0', 10),
       unknown: Number.parseInt(row?.unknown || '0', 10),
       techs
     });
@@ -14756,7 +14777,7 @@ app.put('/api/reports/:id/category', requireOperator, async (req, res) => {
 
   const rawValue = typeof req.body?.category === 'string' ? req.body.category.trim() : '';
   const category = normalizeCategory(rawValue);
-  if (!['unknown', 'laptop', 'desktop'].includes(category)) {
+  if (!['unknown', 'laptop', 'desktop', 'server'].includes(category)) {
     return res.status(400).json({ ok: false, error: 'invalid_category' });
   }
 
