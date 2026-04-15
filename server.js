@@ -3357,6 +3357,9 @@ const COMPONENT_LABELS = {
   fsCheck: 'Check disque',
   diskSmart: 'SMART disques',
   serverRaid: 'RAID',
+  powerSupply: 'Alimentations',
+  serverFans: 'Ventilos',
+  serverBmc: 'BMC',
   serverServices: 'Services critiques',
   thermal: 'Thermique',
   gpu: 'GPU',
@@ -3382,6 +3385,9 @@ const COMPONENT_ORDER = [
   'fsCheck',
   'diskSmart',
   'serverRaid',
+  'powerSupply',
+  'serverFans',
+  'serverBmc',
   'serverServices',
   'thermal',
   'gpu',
@@ -3438,11 +3444,11 @@ const MACHINE_PRIMARY_DIAGNOSTIC_KEYS = Object.freeze([
   'networkPing'
 ]);
 const SERVER_PRIMARY_KEYS = Object.freeze([
-  'networkPing',
-  'fsCheck',
   'diskSmart',
   'serverRaid',
-  'serverServices',
+  'powerSupply',
+  'serverFans',
+  'serverBmc',
   'thermal'
 ]);
 const MANUAL_REPORT_IMPORT_MAX_ROWS = 500;
@@ -6485,6 +6491,34 @@ function buildReportFilters(
           'payload'
         )}) -> 'server' -> 'raid' ->> 'status'), ''))) = 'nok'`
       );
+    } else if (component === 'powerSupply') {
+      clauses.push(
+        `(
+          lower(COALESCE(NULLIF(btrim(safe_jsonb(${col('components')}) ->> 'powerSupply'), ''), '')) = 'nok'
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(COALESCE(safe_jsonb(${col('payload')}) -> 'inventory' -> 'powerSupplies', '[]'::jsonb)) AS psu(item)
+            WHERE lower(COALESCE(psu.item ->> 'status', '')) = 'nok'
+          )
+        )`
+      );
+    } else if (component === 'serverFans') {
+      clauses.push(
+        `(
+          lower(COALESCE(NULLIF(btrim(safe_jsonb(${col('components')}) ->> 'serverFans'), ''), '')) = 'nok'
+          OR EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(COALESCE(safe_jsonb(${col('payload')}) -> 'inventory' -> 'fans', '[]'::jsonb)) AS fan(item)
+            WHERE lower(COALESCE(fan.item ->> 'status', '')) = 'nok'
+          )
+        )`
+      );
+    } else if (component === 'serverBmc') {
+      clauses.push(
+        `lower(COALESCE(NULLIF(btrim(safe_jsonb(${col('components')}) ->> 'serverBmc'), ''), NULLIF(btrim(safe_jsonb(${col(
+          'payload'
+        )}) -> 'inventory' -> 'bmc' ->> 'status'), ''))) = 'nok'`
+      );
     } else if (component === 'serverServices') {
       clauses.push(
         `(
@@ -9312,6 +9346,18 @@ function buildDerivedComponents(body, sources) {
     if (server.raid && typeof server.raid === 'object') {
       addStatus('serverRaid', server.raid.status);
     }
+    const powerSupplyStatus = deriveServerHardwareListStatusFromPayload(body, 'powerSupplies');
+    if (powerSupplyStatus) {
+      derived.powerSupply = powerSupplyStatus;
+    }
+    const fanStatus = deriveServerHardwareListStatusFromPayload(body, 'fans');
+    if (fanStatus) {
+      derived.serverFans = fanStatus;
+    }
+    const bmcStatus = deriveServerBmcStatusFromPayload(body);
+    if (bmcStatus) {
+      derived.serverBmc = bmcStatus;
+    }
     const serverServicesStatus = deriveServerServicesStatusFromPayload(body);
     if (serverServicesStatus) {
       derived.serverServices = serverServicesStatus;
@@ -9537,6 +9583,62 @@ function deriveServerServicesStatusFromPayload(payload) {
   return null;
 }
 
+function listServerInventoryItems(payload, key) {
+  const inventory =
+    payload && payload.inventory && typeof payload.inventory === 'object' && !Array.isArray(payload.inventory)
+      ? payload.inventory
+      : null;
+  const raw = inventory ? inventory[key] : null;
+  return Array.isArray(raw)
+    ? raw.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : [];
+}
+
+function deriveServerHardwareListStatusFromPayload(payload, inventoryKey) {
+  const items = listServerInventoryItems(payload, inventoryKey);
+  if (!items.length) {
+    return null;
+  }
+  let hasOk = false;
+  let hasKnown = false;
+  for (const item of items) {
+    const normalized = normalizeStatusKey(item && item.status);
+    if (!normalized) {
+      continue;
+    }
+    hasKnown = true;
+    if (normalized === 'nok') {
+      return 'nok';
+    }
+    if (normalized === 'ok') {
+      hasOk = true;
+    }
+  }
+  if (hasOk) {
+    return 'ok';
+  }
+  return hasKnown ? 'not_tested' : null;
+}
+
+function deriveServerBmcStatusFromPayload(payload) {
+  const inventory =
+    payload && payload.inventory && typeof payload.inventory === 'object' && !Array.isArray(payload.inventory)
+      ? payload.inventory
+      : null;
+  const bmc =
+    inventory && inventory.bmc && typeof inventory.bmc === 'object' && !Array.isArray(inventory.bmc)
+      ? inventory.bmc
+      : null;
+  if (!bmc) {
+    return null;
+  }
+  const explicit = normalizeStatusKey(bmc.status);
+  if (explicit) {
+    return explicit;
+  }
+  return bmc.ipAddress || bmc.macAddress || bmc.firmwareRevision ? 'ok' : null;
+}
+
 function applyServerTelemetryToComponents(components, payload, categoryValue = null) {
   const payloadObject = parseJsonObjectOrNull(payload);
   const isServer =
@@ -9563,6 +9665,24 @@ function applyServerTelemetryToComponents(components, payload, categoryValue = n
       : null;
   if (!hasComponentStatusValue(next, 'serverRaid') && raid && raid.status) {
     next.serverRaid = raid.status;
+  }
+  if (!hasComponentStatusValue(next, 'powerSupply')) {
+    const powerSupplyStatus = deriveServerHardwareListStatusFromPayload(payloadObject, 'powerSupplies');
+    if (powerSupplyStatus) {
+      next.powerSupply = powerSupplyStatus;
+    }
+  }
+  if (!hasComponentStatusValue(next, 'serverFans')) {
+    const fanStatus = deriveServerHardwareListStatusFromPayload(payloadObject, 'fans');
+    if (fanStatus) {
+      next.serverFans = fanStatus;
+    }
+  }
+  if (!hasComponentStatusValue(next, 'serverBmc')) {
+    const bmcStatus = deriveServerBmcStatusFromPayload(payloadObject);
+    if (bmcStatus) {
+      next.serverBmc = bmcStatus;
+    }
   }
   if (!hasComponentStatusValue(next, 'serverServices')) {
     const servicesStatus = deriveServerServicesStatusFromPayload(payloadObject);
@@ -10371,6 +10491,92 @@ function formatWinSatNote(score) {
   return 'Excellent';
 }
 
+function formatServerDiskInventorySummary(disks) {
+  const list = Array.isArray(disks) ? disks.filter((item) => item && typeof item === 'object') : [];
+  if (!list.length) {
+    return null;
+  }
+  return `${list.length} disque${list.length > 1 ? 's' : ''}`;
+}
+
+function formatServerPowerSupplySummary(powerSupplies) {
+  const list = Array.isArray(powerSupplies) ? powerSupplies.filter((item) => item && typeof item === 'object') : [];
+  if (!list.length) {
+    return null;
+  }
+  const nokCount = list.filter((item) => normalizeStatusKey(item.status) === 'nok').length;
+  if (nokCount > 0) {
+    return `${list.length} alims · ${nokCount} alerte${nokCount > 1 ? 's' : ''}`;
+  }
+  return `${list.length} alim${list.length > 1 ? 's' : ''} OK`;
+}
+
+function formatServerFanSummary(fans) {
+  const list = Array.isArray(fans) ? fans.filter((item) => item && typeof item === 'object') : [];
+  if (!list.length) {
+    return null;
+  }
+  const nokCount = list.filter((item) => normalizeStatusKey(item.status) === 'nok').length;
+  if (nokCount > 0) {
+    return `${list.length} ventilos · ${nokCount} alerte${nokCount > 1 ? 's' : ''}`;
+  }
+  return `${list.length} ventilos OK`;
+}
+
+function formatServerBmcSummary(bmc) {
+  if (!bmc || typeof bmc !== 'object' || Array.isArray(bmc)) {
+    return null;
+  }
+  const ipAddress = safeString(bmc.ipAddress, '');
+  const firmwareRevision = safeString(bmc.firmwareRevision, '');
+  const manufacturer = safeString(bmc.manufacturer, '');
+  const product = safeString(bmc.product, '');
+  if (ipAddress && firmwareRevision) {
+    return `${ipAddress} · FW ${firmwareRevision}`;
+  }
+  if (ipAddress) {
+    return ipAddress;
+  }
+  if (manufacturer && product) {
+    return `${manufacturer} ${product}`;
+  }
+  if (product) {
+    return product;
+  }
+  if (firmwareRevision) {
+    return `FW ${firmwareRevision}`;
+  }
+  return 'Present';
+}
+
+function formatServerControllerSummary(controllers) {
+  const list = Array.isArray(controllers) ? controllers.filter((item) => item && typeof item === 'object') : [];
+  if (!list.length) {
+    return null;
+  }
+  const names = list
+    .map((item) => safeString(item.name || item.description, ''))
+    .filter(Boolean);
+  return names.length ? names.join(' • ') : `${list.length} controleur${list.length > 1 ? 's' : ''}`;
+}
+
+function formatServerPlatformLabel(value) {
+  const normalized = safeString(value, '').toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'physical') {
+    return 'Physique';
+  }
+  if (normalized === 'virtual') {
+    return 'Virtualise';
+  }
+  if (normalized.startsWith('virtual:')) {
+    return `Virtualise (${normalized.slice(8)})`;
+  }
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
 function buildDiagnosticsRows(payload, components = null, categoryValue = null) {
   const rows = [];
   const payloadObject = parseJsonObjectOrNull(payload);
@@ -10421,9 +10627,22 @@ function buildDiagnosticsRows(payload, components = null, categoryValue = null) 
       payloadObject && payloadObject.server && typeof payloadObject.server === 'object' && !Array.isArray(payloadObject.server)
         ? payloadObject.server
         : null;
+    const inventory =
+      payloadObject &&
+      payloadObject.inventory &&
+      typeof payloadObject.inventory === 'object' &&
+      !Array.isArray(payloadObject.inventory)
+        ? payloadObject.inventory
+        : null;
     const raid =
       server && server.raid && typeof server.raid === 'object' && !Array.isArray(server.raid)
         ? server.raid
+        : null;
+    const powerSupplies = listServerInventoryItems(payloadObject, 'powerSupplies');
+    const fans = listServerInventoryItems(payloadObject, 'fans');
+    const bmc =
+      inventory && inventory.bmc && typeof inventory.bmc === 'object' && !Array.isArray(inventory.bmc)
+        ? inventory.bmc
         : null;
     const thermal =
       payloadObject && payloadObject.thermal && typeof payloadObject.thermal === 'object' && !Array.isArray(payloadObject.thermal)
@@ -10436,6 +10655,9 @@ function buildDiagnosticsRows(payload, components = null, categoryValue = null) 
       ? server.failedServices
           .map((item) => (item == null ? '' : String(item).trim()))
           .filter(Boolean)
+      : [];
+    const disks = Array.isArray(payloadObject && payloadObject.disks)
+      ? payloadObject.disks.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
       : [];
     const thermalMetric =
       thermal && typeof thermal.maxCelsius === 'number' && Number.isFinite(thermal.maxCelsius)
@@ -10464,13 +10686,20 @@ function buildDiagnosticsRows(payload, components = null, categoryValue = null) 
             .join(' / ')
         : null;
 
-    addRow('Ping', pickStatus(tests && tests.networkPing, componentMap.networkPing, 'not_tested'), tests ? tests.networkPingTarget || null : null);
-    addRow('Check disque', pickStatus(tests && tests.fsCheck, componentMap.fsCheck, null), null);
     if (Object.prototype.hasOwnProperty.call(componentMap, 'diskSmart')) {
-      addRow('SMART disques', componentMap.diskSmart || 'not_tested', null);
+      addRow('SMART disques', componentMap.diskSmart || 'not_tested', formatServerDiskInventorySummary(disks));
     }
     if (Object.prototype.hasOwnProperty.call(componentMap, 'serverRaid')) {
-      addRow('RAID', componentMap.serverRaid || 'not_tested', raid && raid.mdstat ? 'mdstat' : null);
+      addRow('RAID', componentMap.serverRaid || 'not_tested', raid && raid.summary ? raid.summary : raid && raid.mdstat ? 'mdstat' : null);
+    }
+    if (Object.prototype.hasOwnProperty.call(componentMap, 'powerSupply')) {
+      addRow('Alimentations', componentMap.powerSupply || 'not_tested', formatServerPowerSupplySummary(powerSupplies));
+    }
+    if (Object.prototype.hasOwnProperty.call(componentMap, 'serverFans')) {
+      addRow('Ventilos', componentMap.serverFans || 'not_tested', formatServerFanSummary(fans));
+    }
+    if (Object.prototype.hasOwnProperty.call(componentMap, 'serverBmc')) {
+      addRow('BMC', componentMap.serverBmc || 'not_tested', formatServerBmcSummary(bmc));
     }
     if (Object.prototype.hasOwnProperty.call(componentMap, 'serverServices')) {
       addRow('Services critiques', componentMap.serverServices || 'not_tested', servicesMetric);
@@ -10478,6 +10707,8 @@ function buildDiagnosticsRows(payload, components = null, categoryValue = null) 
     if (Object.prototype.hasOwnProperty.call(componentMap, 'thermal')) {
       addRow('Thermique', componentMap.thermal || 'not_tested', thermalMetric);
     }
+    addRow('Ping', pickStatus(tests && tests.networkPing, componentMap.networkPing, 'not_tested'), tests ? tests.networkPingTarget || null : null);
+    addRow('Check disque', pickStatus(tests && tests.fsCheck, componentMap.fsCheck, null), null);
     if (server && server.uptimeSeconds != null) {
       addRow('Uptime', null, `${Math.round(server.uptimeSeconds / 3600)} h`);
     }
@@ -10559,6 +10790,33 @@ function buildInventoryRows(payload) {
     rows.push({ label: 'Carte mere', value: baseboardSerial });
   }
 
+  const chassis =
+    inventory.chassis && typeof inventory.chassis === 'object' && !Array.isArray(inventory.chassis)
+      ? inventory.chassis
+      : null;
+  if (chassis) {
+    const chassisLabel = [chassis.vendor, chassis.name, chassis.type]
+      .map((value) => safeString(value, ''))
+      .filter(Boolean)
+      .join(' • ');
+    if (chassisLabel) {
+      rows.push({ label: 'Chassis', value: chassisLabel });
+    }
+  }
+
+  const bmc =
+    inventory.bmc && typeof inventory.bmc === 'object' && !Array.isArray(inventory.bmc) ? inventory.bmc : null;
+  const bmcSummary = formatServerBmcSummary(bmc);
+  if (bmcSummary) {
+    rows.push({ label: 'BMC', value: bmcSummary });
+  }
+
+  const controllers = listServerInventoryItems({ inventory }, 'storageControllers');
+  const controllerSummary = formatServerControllerSummary(controllers);
+  if (controllerSummary) {
+    rows.push({ label: 'Controleurs stockage', value: controllerSummary });
+  }
+
   const batteryRaw = inventory.battery;
   const batteryList = Array.isArray(batteryRaw) ? batteryRaw : batteryRaw ? [batteryRaw] : [];
   const batteryValues = batteryList
@@ -10611,6 +10869,18 @@ function buildInventoryRows(payload) {
     .filter(Boolean);
   if (memoryValues.length) {
     rows.push({ label: 'RAM', value: memoryValues.join(' • ') });
+  }
+
+  const powerSupplies = listServerInventoryItems({ inventory }, 'powerSupplies');
+  const powerSupplySummary = formatServerPowerSupplySummary(powerSupplies);
+  if (powerSupplySummary) {
+    rows.push({ label: 'Alimentations', value: powerSupplySummary });
+  }
+
+  const fans = listServerInventoryItems({ inventory }, 'fans');
+  const fanSummary = formatServerFanSummary(fans);
+  if (fanSummary) {
+    rows.push({ label: 'Ventilos', value: fanSummary });
   }
 
   return rows;
@@ -11262,7 +11532,19 @@ function drawReportPdf(doc, data) {
     diagnosticsMap.set(normalizedLabel, { ...row, label: normalizedLabel });
   });
   const diagnosticsOrder = isServerCategoryValue(data.category)
-    ? ['Ping', 'Check disk', 'SMART disques', 'RAID', 'Services critiques', 'Thermique', 'Uptime', 'Charge systeme']
+    ? [
+        'SMART disques',
+        'RAID',
+        'Alimentations',
+        'Ventilos',
+        'BMC',
+        'Thermique',
+        'Ping',
+        'Check disk',
+        'Services critiques',
+        'Uptime',
+        'Charge systeme'
+      ]
     : ['Lecture disque', 'Ecriture disque', 'RAM (WinSAT)', 'CPU (WinSAT)', 'GPU (WinSAT)', 'Ping', 'Check disk'];
   const diagnosticsRows = diagnosticsOrder
     .map((label) => diagnosticsMap.get(label))

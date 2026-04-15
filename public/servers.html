@@ -218,20 +218,20 @@
                 <div class="test-filter-group">
                   <span class="controls-label">Defauts</span>
                   <div class="pill-group test-filters" role="group" aria-label="Filtrer par test en echec">
-                    <button class="test-filter-btn" data-component="networkPing" type="button" aria-pressed="false">
-                      Ping
-                    </button>
-                    <button class="test-filter-btn" data-component="fsCheck" type="button" aria-pressed="false">
-                      FS
-                    </button>
                     <button class="test-filter-btn" data-component="diskSmart" type="button" aria-pressed="false">
                       SMART
                     </button>
                     <button class="test-filter-btn" data-component="serverRaid" type="button" aria-pressed="false">
                       RAID
                     </button>
-                    <button class="test-filter-btn" data-component="serverServices" type="button" aria-pressed="false">
-                      Services
+                    <button class="test-filter-btn" data-component="powerSupply" type="button" aria-pressed="false">
+                      Alims
+                    </button>
+                    <button class="test-filter-btn" data-component="serverFans" type="button" aria-pressed="false">
+                      Ventilos
+                    </button>
+                    <button class="test-filter-btn" data-component="serverBmc" type="button" aria-pressed="false">
+                      BMC
                     </button>
                     <button class="test-filter-btn" data-component="thermal" type="button" aria-pressed="false">
                       Thermique
@@ -311,16 +311,16 @@
               <p class="board-kicker">Production</p>
               <h2 id="board-title">Liste des serveurs suivis</h2>
               <p class="board-sub" id="board-sub">
-                Vue operationnelle en temps reel avec suivi clair des services, de la charge et des alertes infra.
+                Vue operationnelle bare metal avec inventaire des composants de baie et alertes hardware prioritaires.
               </p>
             </div>
           </div>
           <div class="board-tabs" id="board-tabs" role="tablist" aria-label="Vues production">
             <button class="board-tab-btn" type="button" data-board-view="workspace" role="tab" aria-selected="true">
-              Postes en cours
+              Serveurs suivis
             </button>
             <button class="board-tab-btn" type="button" data-board-view="battery-alerts" role="tab" aria-selected="false">
-              Alertes
+              Alertes hardware
             </button>
           </div>
           <div class="board-results-bar" aria-live="polite">
@@ -473,6 +473,6 @@
       </div>
     </div>
 
-    <script src="/app.js?v=20260415c" defer></script>
+    <script src="/app.js?v=20260415d" defer></script>
   </body>
 </html>

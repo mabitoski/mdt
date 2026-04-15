@@ -247,6 +247,9 @@ const componentLabels = {
   fsCheck: 'Check disque',
   diskSmart: 'SMART disques',
   serverRaid: 'RAID',
+  powerSupply: 'Alimentations',
+  serverFans: 'Ventilos',
+  serverBmc: 'BMC',
   serverServices: 'Services critiques',
   thermal: 'Thermique',
   gpu: 'GPU',
@@ -273,6 +276,9 @@ const componentOrder = [
   'fsCheck',
   'diskSmart',
   'serverRaid',
+  'powerSupply',
+  'serverFans',
+  'serverBmc',
   'serverServices',
   'thermal',
   'gpu',
@@ -313,14 +319,15 @@ const machineSummaryDiagnosticKeys = Object.freeze([
   'gpuTest',
   'networkPing'
 ]);
-const serverSummaryKeys = Object.freeze([
-  'networkPing',
-  'fsCheck',
+const serverHardwareSummaryKeys = Object.freeze([
   'diskSmart',
   'serverRaid',
-  'serverServices',
+  'powerSupply',
+  'serverFans',
+  'serverBmc',
   'thermal'
 ]);
+const serverOperationalSummaryKeys = Object.freeze(['networkPing', 'fsCheck', 'serverServices']);
 
 const delayClasses = [
   'delay-0',
@@ -2794,10 +2801,10 @@ function renderBoardTabs() {
   if (boardSubEl) {
     boardSubEl.textContent = isBatteryAlertsView()
       ? isServerView
-        ? 'Vue dediee aux serveurs a traiter en priorite: services critiques, thermique ou alertes RTC.'
+        ? 'Vue dediee aux serveurs a traiter en priorite: alertes hardware critiques, thermique ou defauts de baie.'
         : 'Vue dediee aux postes a traiter en priorite: batterie faible ou derive d horloge BIOS / RTC.'
       : isServerView
-        ? 'Vue operationnelle en temps reel avec suivi clair de l infrastructure et des diagnostics serveurs.'
+        ? 'Vue operationnelle bare metal avec inventaire des composants de baie et alertes hardware prioritaires.'
         : 'Vue operationnelle en temps reel avec suivi clair des machines et du lot prioritaire.';
   }
   if (boardScopeBannerEl) {
@@ -4113,6 +4120,10 @@ function getServerTelemetry(detail) {
     payload && payload.network && typeof payload.network === 'object' && !Array.isArray(payload.network)
       ? payload.network
       : null;
+  const inventory =
+    payload && payload.inventory && typeof payload.inventory === 'object' && !Array.isArray(payload.inventory)
+      ? payload.inventory
+      : null;
   const thermal =
     payload && payload.thermal && typeof payload.thermal === 'object' && !Array.isArray(payload.thermal)
       ? payload.thermal
@@ -4129,21 +4140,62 @@ function getServerTelemetry(detail) {
         .map((item) => (item == null ? '' : String(item).trim()))
         .filter(Boolean)
     : [];
+  const powerSupplies = Array.isArray(inventory && inventory.powerSupplies)
+    ? inventory.powerSupplies.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const fans = Array.isArray(inventory && inventory.fans)
+    ? inventory.fans.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const storageControllers = Array.isArray(inventory && inventory.storageControllers)
+    ? inventory.storageControllers.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const memoryModules = Array.isArray(inventory && inventory.memory)
+    ? inventory.memory.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const disks = Array.isArray(payload && payload.disks)
+    ? payload.disks.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    : [];
+  const chassis =
+    inventory && inventory.chassis && typeof inventory.chassis === 'object' && !Array.isArray(inventory.chassis)
+      ? inventory.chassis
+      : null;
+  const bmc =
+    inventory && inventory.bmc && typeof inventory.bmc === 'object' && !Array.isArray(inventory.bmc)
+      ? inventory.bmc
+      : server && server.bmc && typeof server.bmc === 'object' && !Array.isArray(server.bmc)
+        ? server.bmc
+        : null;
+  const physicalInterfaces = Array.isArray(network && network.interfaces)
+    ? network.interfaces.filter((item) => item && typeof item === 'object' && item.isPhysical !== false)
+    : [];
   const failingSelectedServices = selectedServices.filter((item) => {
     const activeState = String(item.activeState || '')
       .trim()
       .toLowerCase();
     return activeState && activeState !== 'active';
   });
+  const failingPowerSupplies = powerSupplies.filter((item) => normalizeStatusKey(item.status) === 'nok');
+  const failingFans = fans.filter((item) => normalizeStatusKey(item.status) === 'nok');
 
   return {
     server,
     network,
+    inventory,
     thermal,
     raid,
+    chassis,
+    bmc,
+    powerSupplies,
+    fans,
+    storageControllers,
+    memoryModules,
+    disks,
+    physicalInterfaces,
     selectedServices,
     failedServices,
-    failingSelectedServices
+    failingSelectedServices,
+    failingPowerSupplies,
+    failingFans
   };
 }
 
@@ -4173,6 +4225,44 @@ function deriveServerServicesStatus(serverTelemetry) {
   return null;
 }
 
+function deriveServerHardwareListStatus(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return null;
+  }
+  let hasOk = false;
+  let hasKnown = false;
+  for (const item of items) {
+    const normalized = normalizeStatusKey(item && item.status);
+    if (!normalized) {
+      continue;
+    }
+    hasKnown = true;
+    if (normalized === 'nok') {
+      return 'nok';
+    }
+    if (normalized === 'ok') {
+      hasOk = true;
+    }
+  }
+  if (hasOk) {
+    return 'ok';
+  }
+  return hasKnown ? 'not_tested' : null;
+}
+
+function deriveServerBmcStatus(serverTelemetry) {
+  if (!serverTelemetry || !serverTelemetry.bmc || typeof serverTelemetry.bmc !== 'object') {
+    return null;
+  }
+  const explicit = normalizeStatusKey(serverTelemetry.bmc.status);
+  if (explicit) {
+    return explicit;
+  }
+  return serverTelemetry.bmc.ipAddress || serverTelemetry.bmc.macAddress || serverTelemetry.bmc.firmwareRevision
+    ? 'ok'
+    : null;
+}
+
 function applyServerTelemetryToComponents(detail, components) {
   if (!isServerDetail(detail)) {
     return components;
@@ -4184,6 +4274,24 @@ function applyServerTelemetryToComponents(detail, components) {
   const serverTelemetry = getServerTelemetry(detail);
   if (!hasComponentStatus(next, 'serverRaid') && serverTelemetry.raid && serverTelemetry.raid.status) {
     next.serverRaid = serverTelemetry.raid.status;
+  }
+  if (!hasComponentStatus(next, 'powerSupply')) {
+    const powerSupplyStatus = deriveServerHardwareListStatus(serverTelemetry.powerSupplies);
+    if (powerSupplyStatus) {
+      next.powerSupply = powerSupplyStatus;
+    }
+  }
+  if (!hasComponentStatus(next, 'serverFans')) {
+    const fanStatus = deriveServerHardwareListStatus(serverTelemetry.fans);
+    if (fanStatus) {
+      next.serverFans = fanStatus;
+    }
+  }
+  if (!hasComponentStatus(next, 'serverBmc')) {
+    const bmcStatus = deriveServerBmcStatus(serverTelemetry);
+    if (bmcStatus) {
+      next.serverBmc = bmcStatus;
+    }
   }
   if (!hasComponentStatus(next, 'serverServices')) {
     const serverServicesStatus = deriveServerServicesStatus(serverTelemetry);
@@ -4197,7 +4305,7 @@ function applyServerTelemetryToComponents(detail, components) {
   return next;
 }
 
-function getServerStatusEntries(detail, components, tests = null) {
+function getServerStatusEntries(detail, components, tests = null, { includeOperational = false } = {}) {
   const entries = [];
   const serverTelemetry = getServerTelemetry(detail);
   const addEntry = (label, key, status, extra = null) => {
@@ -4207,22 +4315,24 @@ function getServerStatusEntries(detail, components, tests = null) {
     entries.push({ label, key, status, extra, tab: 'diagnostics' });
   };
 
-  const pingStatus = resolveUnifiedComponentStatus('networkPing', components, tests);
-  if ((tests && tests.networkPing) || hasComponentStatus(components, 'networkPing')) {
-    addEntry('Ping', 'networkPing', pingStatus, tests && tests.networkPingTarget ? tests.networkPingTarget : null);
-  }
-
-  const fsCheckStatus = resolveUnifiedComponentStatus('fsCheck', components, tests);
-  if ((tests && tests.fsCheck) || hasComponentStatus(components, 'fsCheck')) {
-    addEntry('Check disque', 'fsCheck', fsCheckStatus);
-  }
-
   if (hasComponentStatus(components, 'diskSmart')) {
-    addEntry('SMART disques', 'diskSmart', components.diskSmart || 'not_tested');
+    addEntry('SMART disques', 'diskSmart', components.diskSmart || 'not_tested', formatServerDiskInventorySummary(serverTelemetry.disks));
   }
 
   if (hasComponentStatus(components, 'serverRaid')) {
     addEntry('RAID', 'serverRaid', components.serverRaid || 'not_tested', formatServerRaidSummary(serverTelemetry.raid));
+  }
+
+  if (hasComponentStatus(components, 'powerSupply')) {
+    addEntry('Alimentations', 'powerSupply', components.powerSupply || 'not_tested', formatServerPowerSupplySummary(serverTelemetry.powerSupplies));
+  }
+
+  if (hasComponentStatus(components, 'serverFans')) {
+    addEntry('Ventilos', 'serverFans', components.serverFans || 'not_tested', formatServerFanSummary(serverTelemetry.fans));
+  }
+
+  if (hasComponentStatus(components, 'serverBmc')) {
+    addEntry('BMC', 'serverBmc', components.serverBmc || 'not_tested', formatServerBmcSummary(serverTelemetry.bmc));
   }
 
   if (hasComponentStatus(components, 'serverServices')) {
@@ -4231,11 +4341,25 @@ function getServerStatusEntries(detail, components, tests = null) {
       : serverTelemetry.failedServices.length
         ? formatServerFailedServicesSummary(serverTelemetry.failedServices)
         : null;
-    addEntry('Services critiques', 'serverServices', components.serverServices || 'not_tested', servicesSummary);
+    if (includeOperational) {
+      addEntry('Services critiques', 'serverServices', components.serverServices || 'not_tested', servicesSummary);
+    }
   }
 
   if (hasComponentStatus(components, 'thermal')) {
     addEntry('Thermique', 'thermal', components.thermal || 'not_tested', formatServerThermalSummary(serverTelemetry.thermal));
+  }
+
+  if (includeOperational) {
+    const pingStatus = resolveUnifiedComponentStatus('networkPing', components, tests);
+    if ((tests && tests.networkPing) || hasComponentStatus(components, 'networkPing')) {
+      addEntry('Ping', 'networkPing', pingStatus, tests && tests.networkPingTarget ? tests.networkPingTarget : null);
+    }
+
+    const fsCheckStatus = resolveUnifiedComponentStatus('fsCheck', components, tests);
+    if ((tests && tests.fsCheck) || hasComponentStatus(components, 'fsCheck')) {
+      addEntry('Check disque', 'fsCheck', fsCheckStatus);
+    }
   }
 
   return entries;
@@ -4330,6 +4454,111 @@ function formatServerFailedServicesSummary(services) {
     return '--';
   }
   return services.join(' • ');
+}
+
+function formatServerDiskInventorySummary(disks) {
+  if (!Array.isArray(disks) || !disks.length) {
+    return '--';
+  }
+  return `${disks.length} disque${disks.length > 1 ? 's' : ''}`;
+}
+
+function formatServerPowerSupplySummary(powerSupplies) {
+  if (!Array.isArray(powerSupplies) || !powerSupplies.length) {
+    return '--';
+  }
+  const nokCount = powerSupplies.filter((item) => normalizeStatusKey(item && item.status) === 'nok').length;
+  if (nokCount > 0) {
+    return `${powerSupplies.length} alims · ${nokCount} alerte${nokCount > 1 ? 's' : ''}`;
+  }
+  return `${powerSupplies.length} alim${powerSupplies.length > 1 ? 's' : ''} OK`;
+}
+
+function formatServerFanSummary(fans) {
+  if (!Array.isArray(fans) || !fans.length) {
+    return '--';
+  }
+  const nokCount = fans.filter((item) => normalizeStatusKey(item && item.status) === 'nok').length;
+  if (nokCount > 0) {
+    return `${fans.length} ventilos · ${nokCount} alerte${nokCount > 1 ? 's' : ''}`;
+  }
+  return `${fans.length} ventilos OK`;
+}
+
+function formatServerBmcSummary(bmc) {
+  if (!bmc || typeof bmc !== 'object') {
+    return '--';
+  }
+  const ipAddress = bmc.ipAddress ? String(bmc.ipAddress).trim() : '';
+  const firmwareRevision = bmc.firmwareRevision ? String(bmc.firmwareRevision).trim() : '';
+  const manufacturer = bmc.manufacturer ? String(bmc.manufacturer).trim() : '';
+  const product = bmc.product ? String(bmc.product).trim() : '';
+  if (ipAddress && firmwareRevision) {
+    return `${ipAddress} · FW ${firmwareRevision}`;
+  }
+  if (ipAddress) {
+    return ipAddress;
+  }
+  if (manufacturer && product) {
+    return `${manufacturer} ${product}`;
+  }
+  if (product) {
+    return product;
+  }
+  if (firmwareRevision) {
+    return `FW ${firmwareRevision}`;
+  }
+  return 'Present';
+}
+
+function formatServerControllerSummary(controllers) {
+  if (!Array.isArray(controllers) || !controllers.length) {
+    return '--';
+  }
+  const names = controllers
+    .map((item) => {
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+      return String(item.name || item.description || '').trim();
+    })
+    .filter(Boolean);
+  return names.length ? names.join(' • ') : `${controllers.length} controleur${controllers.length > 1 ? 's' : ''}`;
+}
+
+function formatServerPlatformLabel(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return '--';
+  }
+  if (normalized === 'physical') {
+    return 'Physique';
+  }
+  if (normalized === 'virtual') {
+    return 'Virtualise';
+  }
+  if (normalized.startsWith('virtual:')) {
+    return `Virtualise (${normalized.slice(8)})`;
+  }
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function formatServerMemorySummary(modules) {
+  if (!Array.isArray(modules) || !modules.length) {
+    return '--';
+  }
+  const populated = modules.filter((item) => {
+    const size = item && item.size ? String(item.size).trim().toLowerCase() : '';
+    return size && size !== 'no module installed';
+  });
+  return `${populated.length} DIMM${populated.length > 1 ? 's' : ''}`;
+}
+
+function formatServerPhysicalInterfaceSummary(interfaces) {
+  if (!Array.isArray(interfaces) || !interfaces.length) {
+    return '--';
+  }
+  return `${interfaces.length} port${interfaces.length > 1 ? 's' : ''}`;
 }
 
 function getBatteryTelemetry(source) {
@@ -6192,7 +6421,9 @@ function buildDiagnosticsHtml(detail) {
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const components = resolveDetailComponents(detail);
   const serverTelemetry = getServerTelemetry(detail);
-  const serverStatusEntries = isServerDetail(detail) ? getServerStatusEntries(detail, components, tests) : [];
+  const serverStatusEntries = isServerDetail(detail)
+    ? getServerStatusEntries(detail, components, tests, { includeOperational: true })
+    : [];
 
   const rows = [];
 
@@ -6281,39 +6512,41 @@ function buildDiagnosticsHtml(detail) {
       addRow('Charge systeme', null, loadSummary, null);
     }
   }
-  if (serverTelemetry.thermal) {
-    addRow(
-      'Thermique',
-      serverTelemetry.thermal.status || 'not_tested',
-      formatServerThermalSummary(serverTelemetry.thermal),
-      null
-    );
-  }
-  if (serverTelemetry.raid) {
-    addRow(
-      'RAID',
-      serverTelemetry.raid.status || 'not_tested',
-      formatServerRaidSummary(serverTelemetry.raid),
-      null
-    );
-  }
-  if (serverTelemetry.selectedServices.length) {
-    addRow(
-      'Services critiques',
-      serverTelemetry.failingSelectedServices.length ? 'nok' : 'ok',
-      formatServerSelectedServicesSummary(serverTelemetry.selectedServices),
-      null
-    );
-  }
-  if (serverTelemetry.failedServices.length) {
-    addRow(
-      'Services en echec',
-      'nok',
-      formatServerFailedServicesSummary(serverTelemetry.failedServices),
-      null
-    );
-  } else if (serverTelemetry.selectedServices.length) {
-    addRow('Services en echec', 'ok', 'Aucun service en echec', null);
+  if (!serverStatusEntries.length) {
+    if (serverTelemetry.thermal) {
+      addRow(
+        'Thermique',
+        serverTelemetry.thermal.status || 'not_tested',
+        formatServerThermalSummary(serverTelemetry.thermal),
+        null
+      );
+    }
+    if (serverTelemetry.raid) {
+      addRow(
+        'RAID',
+        serverTelemetry.raid.status || 'not_tested',
+        formatServerRaidSummary(serverTelemetry.raid),
+        null
+      );
+    }
+    if (serverTelemetry.selectedServices.length) {
+      addRow(
+        'Services critiques',
+        serverTelemetry.failingSelectedServices.length ? 'nok' : 'ok',
+        formatServerSelectedServicesSummary(serverTelemetry.selectedServices),
+        null
+      );
+    }
+    if (serverTelemetry.failedServices.length) {
+      addRow(
+        'Services en echec',
+        'nok',
+        formatServerFailedServicesSummary(serverTelemetry.failedServices),
+        null
+      );
+    } else if (serverTelemetry.selectedServices.length) {
+      addRow('Services en echec', 'ok', 'Aucun service en echec', null);
+    }
   }
 
   if (!rows.length) {
@@ -6581,7 +6814,9 @@ function buildDrawerDiagnosticsRows(detail) {
     winSat && winSat.winSPR && typeof winSat.winSPR === 'object' ? winSat.winSPR : null;
   const components = resolveDetailComponents(detail);
   const serverTelemetry = getServerTelemetry(detail);
-  const serverStatusEntries = isServerDetail(detail) ? getServerStatusEntries(detail, components, tests) : [];
+  const serverStatusEntries = isServerDetail(detail)
+    ? getServerStatusEntries(detail, components, tests, { includeOperational: true })
+    : [];
   const detailId = detail && detail.id != null ? String(detail.id) : '';
   const rows = [];
 
@@ -6737,7 +6972,25 @@ function buildDrawerDetailHtml(detail) {
     remoteAccess && remoteAccess.collectedAt ? formatDateTime(remoteAccess.collectedAt) : '--';
   const serverTelemetry = getServerTelemetry(detail);
   const serverNetwork = serverTelemetry.network;
+  const serverPlatformLabel = formatServerPlatformLabel(serverTelemetry.server && serverTelemetry.server.platformType);
+  const serverChassisLabel = serverTelemetry.chassis
+    ? [serverTelemetry.chassis.vendor, serverTelemetry.chassis.name, serverTelemetry.chassis.type]
+        .filter((value) => typeof value === 'string' && value.trim())
+        .join(' · ')
+    : '--';
+  const serverBmcSummary = formatServerBmcSummary(serverTelemetry.bmc);
+  const serverControllerSummary = formatServerControllerSummary(serverTelemetry.storageControllers);
+  const serverMemorySummary = formatServerMemorySummary(serverTelemetry.memoryModules);
+  const serverDiskSummary = formatServerDiskInventorySummary(serverTelemetry.disks);
+  const serverNetworkSummary = formatServerPhysicalInterfaceSummary(serverTelemetry.physicalInterfaces);
+  const serverPowerSupplySummary = formatServerPowerSupplySummary(serverTelemetry.powerSupplies);
+  const serverFanSummary = formatServerFanSummary(serverTelemetry.fans);
   const serverSummaryCards = [];
+  if (serverPlatformLabel !== '--') {
+    serverSummaryCards.push(
+      `<div class="drawer-mini-card"><span>Plateforme</span><strong>${escapeHtml(serverPlatformLabel)}</strong></div>`
+    );
+  }
   if (serverTelemetry.server) {
     const uptimeSummary = formatDurationCompact(serverTelemetry.server.uptimeSeconds);
     if (uptimeSummary !== '--') {
@@ -6763,15 +7016,25 @@ function buildDrawerDetailHtml(detail) {
       }"><span>RAID</span><strong>${escapeHtml(raidLabel)}</strong></div>`
     );
   }
-  if (serverTelemetry.selectedServices.length) {
+  if (serverTelemetry.powerSupplies.length) {
     serverSummaryCards.push(
       `<div class="drawer-mini-card${
-        serverTelemetry.failingSelectedServices.length ? ' is-alert' : ''
-      }"><span>Services critiques</span><strong>${escapeHtml(
-        serverTelemetry.failingSelectedServices.length
-          ? `${serverTelemetry.failingSelectedServices.length} en alerte`
-          : 'OK'
-      )}</strong></div>`
+        serverTelemetry.failingPowerSupplies.length ? ' is-alert' : ''
+      }"><span>Alims</span><strong>${escapeHtml(serverPowerSupplySummary)}</strong></div>`
+    );
+  }
+  if (serverTelemetry.fans.length) {
+    serverSummaryCards.push(
+      `<div class="drawer-mini-card${
+        serverTelemetry.failingFans.length ? ' is-alert' : ''
+      }"><span>Ventilos</span><strong>${escapeHtml(serverFanSummary)}</strong></div>`
+    );
+  }
+  if (serverTelemetry.bmc) {
+    serverSummaryCards.push(
+      `<div class="drawer-mini-card${
+        normalizeStatusKey(serverTelemetry.bmc.status) === 'nok' ? ' is-alert' : ''
+      }"><span>BMC</span><strong>${escapeHtml(serverBmcSummary)}</strong></div>`
     );
   }
   if (serverTelemetry.thermal) {
@@ -6981,6 +7244,20 @@ function buildDrawerDetailHtml(detail) {
       <div><span>Serial</span><strong>${escapeHtml(detail.serialNumber || '--')}</strong></div>
       <div><span>MAC</span><strong>${escapeHtml(formatMacSummary(detail))}</strong></div>
       <div><span>OS</span><strong>${escapeHtml(detail.osVersion || '--')}</strong></div>
+      ${
+        isServerCategory
+          ? `
+      <div><span>Plateforme</span><strong>${escapeHtml(serverPlatformLabel)}</strong></div>
+      <div><span>Chassis</span><strong>${escapeHtml(serverChassisLabel)}</strong></div>
+      <div><span>BMC</span><strong>${escapeHtml(serverBmcSummary)}</strong></div>
+      <div><span>Controleurs stockage</span><strong>${escapeHtml(serverControllerSummary)}</strong></div>
+      <div><span>Modules RAM</span><strong>${escapeHtml(serverMemorySummary)}</strong></div>
+      <div><span>Disques</span><strong>${escapeHtml(serverDiskSummary)}</strong></div>
+      <div><span>Ports physiques</span><strong>${escapeHtml(serverNetworkSummary)}</strong></div>
+      <div><span>Alimentations</span><strong>${escapeHtml(serverPowerSupplySummary)}</strong></div>
+      <div><span>Ventilos</span><strong>${escapeHtml(serverFanSummary)}</strong></div>
+          `
+          : `
       ${batteryFieldHtml}
       <div><span>Charge batterie</span><strong>${escapeHtml(batteryChargeLabel)}</strong></div>
       <div><span>Capacite utile</span><strong>${escapeHtml(batteryCapacityLabel)}</strong></div>
@@ -6995,6 +7272,8 @@ function buildDrawerDetailHtml(detail) {
             )}" loading="lazy" /></div>`
           : '<strong>--</strong>'
       }</div>
+          `
+      }
       <div><span>Premier passage</span><strong>${escapeHtml(formatDateTime(detail.createdAt))}</strong></div>
       <div><span>Dernier passage</span><strong>${escapeHtml(formatDateTime(detail.lastSeen))}</strong></div>
       <div><span>IP serveur</span><strong>${escapeHtml(detail.lastIp || '--')}</strong></div>
@@ -7042,14 +7321,7 @@ function buildDrawerDetailHtml(detail) {
   `;
 
   const componentDefinitions = isServerCategory
-    ? [
-        ['Ping', 'networkPing'],
-        ['Check disque', 'fsCheck'],
-        ['SMART disques', 'diskSmart'],
-        ['RAID', 'serverRaid'],
-        ['Services critiques', 'serverServices'],
-        ['Thermique', 'thermal']
-      ]
+    ? serverHardwareSummaryKeys.map((key) => [componentLabels[key] || key, key])
     : [
         ['Ports USB', 'usb'],
         ['Clavier', 'keyboard'],
@@ -7074,14 +7346,24 @@ function buildDrawerDetailHtml(detail) {
 
   const biosRows = isServerCategory
     ? [
+        ['Plateforme', serverPlatformLabel],
+        ['Chassis', serverChassisLabel],
+        ['BMC IP', serverTelemetry.bmc && serverTelemetry.bmc.ipAddress ? serverTelemetry.bmc.ipAddress : '--'],
+        [
+          'Firmware BMC',
+          serverTelemetry.bmc && serverTelemetry.bmc.firmwareRevision ? serverTelemetry.bmc.firmwareRevision : '--'
+        ],
+        ['Controleurs stockage', serverControllerSummary],
+        ['Modules RAM', serverMemorySummary],
+        ['Disques', serverDiskSummary],
+        ['Alimentations', serverPowerSupplySummary],
+        ['Ventilos', serverFanSummary],
         ['Passerelle', serverNetwork && serverNetwork.defaultGateway ? serverNetwork.defaultGateway : '--'],
         ['IPv4 primaire', serverNetwork && serverNetwork.primaryIpv4 ? serverNetwork.primaryIpv4 : '--'],
         ['IPv6 primaire', serverNetwork && serverNetwork.primaryIpv6 ? serverNetwork.primaryIpv6 : '--'],
         [
           'Interfaces reseau',
-          serverNetwork && Array.isArray(serverNetwork.interfaces) && serverNetwork.interfaces.length
-            ? String(serverNetwork.interfaces.length)
-            : '--'
+          serverNetworkSummary
         ],
         [
           'Services suivis',
@@ -7161,7 +7443,7 @@ function buildDrawerDetailHtml(detail) {
     },
     {
       id: 'bios_wifi',
-      title: isServerCategory ? 'Reseau / Infra' : 'BIOS / Wi-Fi',
+      title: isServerCategory ? 'Inventaire / Infra' : 'BIOS / Wi-Fi',
       content: `<div class="drawer-status-list">${biosRows}</div>`
     },
     { id: 'commentaires', title: 'Commentaires', content: commentsPanel }
