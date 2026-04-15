@@ -474,6 +474,10 @@ C:\ProgramData\MMA\MdtRunner\
 - le build Linux local est `windows-runner/build-msi.sh`
 - la tache de synchronisation optionnelle est `windows-runner/Register-MmaMdtRunnerSyncTask.ps1`
 
+## Espace FOG
+
+Les scripts, artefacts et la documentation FOG ont ete externalises dans le depot `fog-web` afin de garder ce depot centre sur MDT.
+
 ## Structure du depot
 
 ```text

@@ -175,6 +175,188 @@ function New-RunCommandStepNode {
   return $stepNode
 }
 
+function Convert-ToPowerShellEncodedCommand {
+  param([string]$Script)
+
+  $bytes = [Text.Encoding]::Unicode.GetBytes($Script)
+  return [Convert]::ToBase64String($bytes)
+}
+
+function Get-ReportScriptPathFromCopyStep {
+  param([xml]$SequenceXml)
+
+  $copyActionNode = $SequenceXml.SelectSingleNode("//step[@name='copy report']/action")
+  if (-not $copyActionNode -or [string]::IsNullOrWhiteSpace($copyActionNode.InnerText)) {
+    return $null
+  }
+
+  $match = [regex]::Match($copyActionNode.InnerText, 'xcopy\s+"[^"]*\\([^\\"]+\.ps1)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if (-not $match.Success) {
+    return $null
+  }
+
+  return ('C:\Users\Administrateur\Desktop\{0}' -f $match.Groups[1].Value)
+}
+
+function Get-ReportScriptSharePathFromCopyStep {
+  param([xml]$SequenceXml)
+
+  $copyActionNode = $SequenceXml.SelectSingleNode("//step[@name='copy report']/action")
+  if (-not $copyActionNode -or [string]::IsNullOrWhiteSpace($copyActionNode.InnerText)) {
+    return $null
+  }
+
+  $match = [regex]::Match($copyActionNode.InnerText, 'xcopy\s+"([^"]+\.ps1)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if (-not $match.Success) {
+    return $null
+  }
+
+  return $match.Groups[1].Value
+}
+
+function Get-ReportScriptPathFromExecuteStep {
+  param([xml]$SequenceXml)
+
+  $executeActionNode = $SequenceXml.SelectSingleNode("//step[@name='execute report script']/action")
+  if (-not $executeActionNode -or [string]::IsNullOrWhiteSpace($executeActionNode.InnerText)) {
+    return $null
+  }
+
+  $match = [regex]::Match($executeActionNode.InnerText, '-File\s+"([^"]+)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if ($match.Success) {
+    return $match.Groups[1].Value
+  }
+
+  $fallbackMatch = [regex]::Match($executeActionNode.InnerText, '-File\s+([^\s]+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if ($fallbackMatch.Success) {
+    return $fallbackMatch.Groups[1].Value.Trim('"')
+  }
+
+  return $null
+}
+
+function Get-BootstrapSharePathFromCopyStep {
+  param([xml]$SequenceXml)
+
+  $reportSharePath = Get-ReportScriptSharePathFromCopyStep -SequenceXml $SequenceXml
+  if (-not $reportSharePath) {
+    return $null
+  }
+
+  return (Join-Path (Split-Path -Path $reportSharePath -Parent) 'mdt-report-bootstrap.ps1')
+}
+
+function Get-BootstrapLocalPath {
+  return 'C:\Windows\Temp\mdt-report-bootstrap.ps1'
+}
+
+function Get-ExecuteReportStepContext {
+  param([xml]$SequenceXml)
+
+  $allGroups = @($SequenceXml.SelectNodes('//group'))
+  foreach ($group in $allGroups) {
+    foreach ($step in @($group.step)) {
+      if ($step -and [string]$step.name -eq 'execute report script') {
+        return @{
+          Group = $group
+          Step = $step
+        }
+      }
+    }
+  }
+
+  return $null
+}
+
+function Get-DefenderBootstrapAction {
+  param(
+    [string]$ReportScriptPath,
+    [string]$BootstrapLocalPath
+  )
+
+  if ([string]::IsNullOrWhiteSpace($ReportScriptPath)) {
+    throw 'Report script path is required to build the Defender bootstrap action.'
+  }
+  if ([string]::IsNullOrWhiteSpace($BootstrapLocalPath)) {
+    throw 'Bootstrap script path is required to build the Defender bootstrap action.'
+  }
+
+  $escapedReportScriptPath = $ReportScriptPath.Replace('"', '""')
+  $escapedBootstrapLocalPath = $BootstrapLocalPath.Replace('"', '""')
+  return ('%TOOLROOT%\bddrun.exe /runas powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -ReportPath "{1}"' -f $escapedBootstrapLocalPath, $escapedReportScriptPath)
+}
+
+function Set-OrCreateReportBootstrapCopyStep {
+  param([xml]$SequenceXml)
+
+  $bootstrapSharePath = Get-BootstrapSharePathFromCopyStep -SequenceXml $SequenceXml
+  if (-not $bootstrapSharePath) {
+    throw 'Unable to resolve the bootstrap share path from the copy report step.'
+  }
+
+  $bootstrapLocalPath = Get-BootstrapLocalPath
+  $bootstrapLocalDirectory = Split-Path -Path $bootstrapLocalPath -Parent
+  $copyAction = 'xcopy "{0}" "{1}\" /Y /I' -f $bootstrapSharePath, $bootstrapLocalDirectory
+
+  $context = Get-ExecuteReportStepContext -SequenceXml $SequenceXml
+  if (-not $context) {
+    throw 'Unable to locate the "execute report script" step in TS.xml.'
+  }
+
+  $existingStep = $SequenceXml.SelectSingleNode("//step[@name='copy report bootstrap']")
+  if ($existingStep) {
+    $actionNode = $existingStep.SelectSingleNode('action')
+    if (-not $actionNode) {
+      $actionNode = $SequenceXml.CreateElement('action')
+      [void]$existingStep.AppendChild($actionNode)
+    }
+    $actionNode.InnerText = $copyAction
+    return @{
+      SharePath = $bootstrapSharePath
+      LocalPath = $bootstrapLocalPath
+    }
+  }
+
+  $stepNode = New-RunCommandLineStep -SequenceXml $SequenceXml -StepName 'copy report bootstrap' -Action $copyAction
+  [void]$context.Group.InsertBefore($stepNode, $context.Step)
+  return @{
+    SharePath = $bootstrapSharePath
+    LocalPath = $bootstrapLocalPath
+  }
+}
+
+function Set-ExecuteReportStepWithDefenderBootstrap {
+  param([xml]$SequenceXml)
+
+  $context = Get-ExecuteReportStepContext -SequenceXml $SequenceXml
+  if (-not $context) {
+    throw 'Unable to locate the "execute report script" step in TS.xml.'
+  }
+  $executeStep = $context.Step
+
+  $actionNode = $executeStep.SelectSingleNode('action')
+  if (-not $actionNode) {
+    $actionNode = $SequenceXml.CreateElement('action')
+    [void]$executeStep.AppendChild($actionNode)
+  }
+
+  $reportScriptPath = Get-ReportScriptPathFromCopyStep -SequenceXml $SequenceXml
+  if (-not $reportScriptPath) {
+    $reportScriptPath = Get-ReportScriptPathFromExecuteStep -SequenceXml $SequenceXml
+  }
+  if (-not $reportScriptPath) {
+    throw 'Unable to resolve the local report script path for the execute report script step.'
+  }
+
+  $bootstrapInfo = Set-OrCreateReportBootstrapCopyStep -SequenceXml $SequenceXml
+  $actionNode.InnerText = Get-DefenderBootstrapAction -ReportScriptPath $reportScriptPath -BootstrapLocalPath $bootstrapInfo.LocalPath
+  return @{
+    ReportScriptPath = $reportScriptPath
+    BootstrapSharePath = $bootstrapInfo.SharePath
+    BootstrapLocalPath = $bootstrapInfo.LocalPath
+  }
+}
+
 function Set-OrCreateRunnerInstallStep {
   param(
     [xml]$SequenceXml,
